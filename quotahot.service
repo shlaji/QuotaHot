@@ -1,0 +1,16 @@
+[Unit]
+Description=QuotaHot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.quotahot
+ExecStart=%h/.quotahot/bin/quotahot
+Restart=always
+RestartSec=30
+Environment="PATH=%h/.quotahot/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment=PORT=8686
+
+[Install]
+WantedBy=default.target
