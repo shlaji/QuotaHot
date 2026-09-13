@@ -1,0 +1,499 @@
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --card: #1c2029;
+  --line: #2a2f3a;
+  --text: #e6e8ee;
+  --muted: #8b93a5;
+  --accent: #5b8cff;
+  --ok: #3ecf8e;
+  --warn: #f0b429;
+  --danger: #f2555a;
+  --radius: 10px;
+  /* 每家上游一个色：卡片分组的组头和 provider 徽章共用，同一家在页面各处颜色一致 */
+  --p-claude: #e08b63;
+  --p-codex: #2bbd97;
+  --p-qoder: #8b92f7;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --card: #ffffff;
+    --line: #e2e5eb;
+    --text: #1a1d24;
+    --muted: #6b7280;
+    /* 同一套 provider 色压暗一档：浅色底上组头标题和徽章文字才读得清 */
+    --p-claude: #c2643a;
+    --p-codex: #0f8168;
+    --p-qoder: #5058d0;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.app { max-width: 1280px; margin: 0 auto; padding: 20px 24px 40px; }
+.loading { padding: 60px; text-align: center; color: var(--muted); }
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin-bottom: 18px;
+}
+.topbar h1 { font-size: 20px; margin: 0; display: flex; align-items: baseline; gap: 10px; }
+.topbar h1 small { font-size: 13px; font-weight: 400; color: var(--muted); }
+.topbar-status { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.pill {
+  padding: 3px 10px; border-radius: 999px; font-size: 12px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+}
+.pill.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.pill.off { color: var(--muted); }
+.pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+
+/* ---------- 标签页 ---------- */
+/* 配置那一页即使被藏起来也照样挂载着，否则切走一次就把没保存的草稿丢了。
+ * .grid 之类自带 display，UA 的 [hidden] 规则压不住，所以这里显式写一条。 */
+.tab-panel[hidden] { display: none; }
+
+.tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
+.tab {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  border-radius: 0; color: var(--muted); padding: 9px 14px; margin-bottom: -1px;
+  display: flex; align-items: center; gap: 7px;
+}
+.tab:hover:not(.on) { color: var(--text); }
+.tab.on { color: var(--text); border-bottom-color: var(--accent); }
+/* 未保存的改动在别的页上也得看得见 */
+.tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+/* 调度里跑着几个账户，在别的页上也该看得见 */
+.tab-count {
+  font-size: 11px; font-variant-numeric: tabular-nums; padding: 1px 6px; border-radius: 999px;
+  background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok);
+}
+
+/* ---------- 控制面板 ---------- */
+.panel {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 16px; margin-bottom: 20px;
+}
+.panel-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+.panel-row + .panel-row { margin-top: 14px; }
+
+/* 配置页按功能分组：组之间留白并划一条线，比一整片挤在一起容易扫 */
+.config-group + .config-group { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line); }
+.group-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.group-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+/* 组说明只是补充，不能和组标题抢注意力 */
+.group-head p { margin: 0; font-size: 12px; color: var(--muted); }
+/* 组标题里的操作按钮按文字对齐，不要靠自己的内边距把标题行撑高 */
+.group-head button.link { padding: 0 2px; font-size: 12px; }
+.config-actions { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); }
+
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 170px; }
+.field.grow { flex: 1; min-width: 220px; }
+.field span { font-size: 12px; color: var(--muted); }
+.field input {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 8px 10px; font: inherit; width: 100%;
+}
+.field input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: -1px; }
+
+/* 字段行内提示，和字段名显示在同一行 */
+.field span .hint { font-style: normal; margin-left: 8px; opacity: 0.75; }
+.field input.invalid { border-color: var(--danger); }
+
+/* 模型选择器：默认下拉框，选择“自定义”后补一个文本框 */
+.model-pick { display: flex; gap: 8px; }
+.model-pick select { flex: 1; min-width: 0; }
+.model-pick input { flex: 1; min-width: 0; }
+.field select {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 8px 10px; font: inherit; width: 100%;
+}
+.field select:focus { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: -1px; }
+.field input.invalid:focus { outline-color: color-mix(in srgb, var(--danger) 55%, transparent); }
+.field:has(input.invalid) span .hint { color: var(--danger); opacity: 1; }
+
+.actions { align-items: center; }
+.spacer { flex: 1; }
+/* 账户页的动作条：和卡片同属一页，所以贴着卡片放，不再套一层面板边框 */
+.runbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.running-hint { font-size: 12px; color: var(--muted); margin-right: 4px; }
+/* 勾选提示要说清“没勾 = 全部”，否则批量按钮的作用范围只能靠猜 */
+.select-hint { display: flex; align-items: center; gap: 2px; font-size: 12px; color: var(--muted); }
+.select-hint button.link { font-size: 12px; padding: 4px 4px; }
+
+button {
+  font: inherit; border-radius: 7px; padding: 8px 16px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  transition: filter .12s, opacity .12s;
+}
+button:hover:not(:disabled) { filter: brightness(1.15); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+button.save { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+button.link { background: none; border: none; color: var(--accent); padding: 8px 4px; }
+button.ghost { background: transparent; }
+
+/* ---------- 账户分组 ---------- */
+/*
+  卡片按 provider 分组，组头接手了原先每张卡上那枚 provider 徽章的活：
+  一组里的账户能做的操作、额度口径都一样，说一次就够。
+  组的强调色走 --p，各条规则只认这一个变量，加一家上游只要多一行 provider- 类。
+*/
+.accounts { margin-bottom: 20px; }
+.account-group + .account-group { margin-top: 26px; }
+.group-bar {
+  --p: var(--muted);
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 12px; padding-left: 10px;
+  border-left: 3px solid var(--p);
+}
+.group-bar.provider-claude { --p: var(--p-claude); }
+.group-bar.provider-codex { --p: var(--p-codex); }
+.group-bar.provider-qoder { --p: var(--p-qoder); }
+.group-bar h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .02em; color: var(--p); }
+.group-count {
+  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
+  padding: 1px 8px; border-radius: 999px; align-self: center;
+  background: color-mix(in srgb, var(--p) 16%, transparent); color: var(--p);
+}
+/* 各组的额度按什么节奏走并不一样，写在组头上，省得每张卡再解释一遍 */
+.group-note { font-size: 12px; color: var(--muted); }
+
+/* ---------- 账户卡片 ---------- */
+.grid {
+  display: grid; gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+}
+.card {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.card.state-sending { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.card.state-error { border-color: color-mix(in srgb, var(--danger) 55%, var(--line)); }
+/* 勾选态要盖过状态色：批量操作打算动哪几张卡，比它们各自的运行状态更要紧 */
+.card.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--card)); }
+
+.card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.card-check { width: 15px; height: 15px; margin: 5px 0 0; accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
+.card-head > div { flex: 1; min-width: 0; }
+.card-head h3 {
+  margin: 4px 0 0; font-size: 14px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 210px;
+}
+.badge {
+  font-size: 11px; padding: 2px 7px; border-radius: 5px; text-transform: uppercase;
+  letter-spacing: .04em; font-weight: 600;
+}
+/* provider / plan / 续期方式排在同一行，间距交给 gap，不再靠相邻选择器补空格 */
+.card-tags { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.badge.provider-claude { background: color-mix(in srgb, var(--p-claude) 18%, transparent); color: var(--p-claude); }
+.badge.provider-codex { background: color-mix(in srgb, var(--p-codex) 18%, transparent); color: var(--p-codex); }
+.badge.provider-qoder { background: color-mix(in srgb, var(--p-qoder) 18%, transparent); color: var(--p-qoder); }
+.badge.plan { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+/*
+  续期方式按钮：它既是当前状态又是切换入口，就排在 provider / plan 两枚徽章旁边。
+  麻烦也在这儿——挨着两枚纯展示的标签，光靠一圈淡边框根本读不出它点得动。
+  所以它跟徽章处处相反：药丸形而不是方角、实心边框、带一枚 ⇄ 图标，
+  hover 时底色和描边一起加深。图标是最要紧的那一下，方角标签不会自己长出箭头。
+  自动刷新是本程序在动令牌，用主色；跟随客户端只是同步，不是异常，取中性的次要色。
+*/
+button.mode {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 600; line-height: 1.5;
+  padding: 1px 8px 1px 6px; border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 14%, var(--card));
+  border-color: color-mix(in srgb, var(--muted) 55%, var(--line)); color: var(--muted);
+  transition: color .12s, border-color .12s, background .12s, opacity .12s;
+}
+button.mode:hover:not(:disabled) {
+  filter: none; color: var(--text);
+  background: color-mix(in srgb, var(--muted) 26%, var(--card)); border-color: var(--muted);
+}
+button.mode.auto {
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); color: var(--accent);
+}
+button.mode.auto:hover:not(:disabled) {
+  color: var(--accent); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 26%, var(--card));
+}
+.card-sub { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+.state-dot { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.state-dot.state-sending { color: var(--accent); }
+.state-dot.state-waiting { color: var(--ok); }
+.state-dot.state-error { color: var(--danger); }
+
+.usage { display: flex; flex-direction: column; gap: 10px; }
+.usage-row { display: flex; flex-direction: column; gap: 4px; }
+.usage-row-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.usage-name { font-size: 12px; font-weight: 600; }
+.usage-pct { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--ok); }
+.usage-pct.warn { color: var(--warn); }
+.usage-pct.danger { color: var(--danger); }
+.usage-bar { height: 6px; background: var(--line); border-radius: 999px; overflow: hidden; }
+.usage-fill { height: 100%; background: var(--ok); transition: width .4s ease; }
+.usage-fill.warn { background: var(--warn); }
+.usage-fill.danger { background: var(--danger); }
+.usage-text { font-size: 11px; color: var(--muted); white-space: nowrap; }
+
+.subscription {
+  margin: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  font-size: 12px; color: var(--muted);
+  border: 1px solid color-mix(in srgb, var(--ok) 30%, var(--line));
+  border-radius: 8px; padding: 6px 10px;
+}
+.subscription strong { color: var(--ok); font-variant-numeric: tabular-nums; }
+.subscription span { font-variant-numeric: tabular-nums; }
+
+.facts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0; }
+.facts dt { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+.facts dd { margin: 0; display: flex; flex-direction: column; }
+.facts dd strong { font-size: 15px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.facts dd small { font-size: 11px; color: var(--muted); }
+.facts dd.imminent strong { color: var(--accent); }
+
+.card-error {
+  margin: 0; font-size: 12px; color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  padding: 6px 8px; border-radius: 6px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/*
+  卡片底部动作条。以前这里混着 ghost / icon / link 三种按钮，高矮和权重都不一样，
+  一排看下来读不出哪个更重要。现在统一成一族 .act：同样的高度、字号和图标，
+  只用颜色分层——主色是唯一会真发请求的动作，中性色是常规动作，
+  只读和危险动作压成图标，靠右单独成组，与左边的常规动作拉开距离。
+  上方那条分隔线是给它们和数据区划界用的，卡片本身的 gap 已经给足了上边距。
+*/
+/*
+  动作区分两列：左边是会随续期方式增减的按钮，右边是图标。
+  图标单占一列，所以左边不管排成一行还是两行，它们都钉在右上角不动;
+  align-items: start 让它们始终跟第一行按钮齐平，而不是随左边的高度上下浮动。
+  每行按钮仍留着 flex-wrap 兜底：真遇到窄到两枚按钮都放不下的卡片，宁可折行也不撑破卡片。
+*/
+.card-acts {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 8px;
+  align-items: start; padding-top: 12px; border-top: 1px solid var(--line);
+}
+.act-rows { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.act-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.act-icons { display: flex; gap: 6px; }
+
+button.act {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 28px; padding: 0 10px; border-radius: 7px; font-size: 12px; white-space: nowrap;
+  background: transparent; border: 1px solid var(--line); color: var(--muted);
+  transition: color .12s, border-color .12s, background .12s, opacity .12s;
+}
+/* 全局的 brightness hover 对透明底看不出变化，这里换成描边和底色一起走 */
+button.act:hover:not(:disabled) {
+  filter: none; color: var(--text); border-color: var(--muted);
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+}
+button.act svg { flex-shrink: 0; }
+/* 纯图标的按钮做成正方形，免得在一排里比别人矮胖一截 */
+button.act.only-icon { width: 28px; padding: 0; }
+/* 测试文本是这张卡上唯一真会消耗配额的动作，值得一眼看见 */
+button.act.key {
+  color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+button.act.key:hover:not(:disabled) {
+  color: var(--accent); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+/* 移除平时和别的按钮一样安静，只在鼠标停上去时才亮出红色 */
+button.act.danger { background: transparent; border-color: var(--line); color: var(--muted); }
+button.act.danger:hover:not(:disabled) {
+  color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+/* ---------- 调度任务 ---------- */
+/* 一行一个账户：这一页要横向对比“谁下一拍最早”，卡片式布局对不齐反而难看 */
+.sched {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 4px 16px 12px; margin-bottom: 20px;
+}
+.sched-table { width: 100%; border-collapse: collapse; }
+.sched-table th {
+  text-align: left; font-size: 11px; font-weight: 500; color: var(--muted);
+  padding: 10px 10px 8px 0; border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+.sched-table td {
+  padding: 10px 10px 10px 0; border-bottom: 1px solid var(--line); vertical-align: top;
+}
+.sched-table tr:last-child td { border-bottom: none; }
+.sched-table tr.picked td { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.sched-table td strong {
+  display: block; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.sched-table td.imminent strong { color: var(--accent); }
+.sched-table .col-check { width: 28px; padding-right: 0; }
+.sched-table .card-check { margin-top: 2px; }
+.sched-email {
+  display: inline-block; max-width: 220px; margin-left: 6px; vertical-align: middle;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sched-sub { display: block; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.sched-sub.bad { color: var(--danger); }
+
+/* ---------- 日志 ---------- */
+.logs { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); }
+.logs header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 16px; border-bottom: 1px solid var(--line);
+}
+.logs h2 { margin: 0; font-size: 14px; }
+.follow { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+
+.log-box {
+  max-height: 320px; overflow-y: auto; padding: 10px 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px;
+}
+.log-line { display: flex; gap: 10px; padding: 2px 0; align-items: baseline; }
+.log-line time { color: var(--muted); flex-shrink: 0; }
+.log-acct { color: var(--accent); flex-shrink: 0; }
+.log-line.warn .log-msg { color: var(--warn); }
+.log-line.error .log-msg { color: var(--danger); }
+.log-msg { word-break: break-word; }
+
+/* ---------- 额度 / 详情弹窗 ---------- */
+/*
+ * 列宽必须写死成 minmax(0, 1fr)。默认的 auto 列会按内容的 max-content 撑开，
+ * 而请求日志里的 curl 是一行不折断的长文本（codex 的 JWT 令牌上千字符），
+ * 于是列宽能到一万多像素，居中后整个弹窗被推到视口右边几千像素处——
+ * 弹窗照常渲染，却一点也看不见，而且因为溢出发生在 fixed 元素内部，
+ * 连横向滚动条都没有。
+ */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .6);
+  display: grid; grid-template-columns: minmax(0, 1fr); place-items: center;
+  padding: 24px; z-index: 50;
+}
+.modal {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  width: min(860px, 100%); min-width: 0; max-height: 82vh; display: flex; flex-direction: column;
+}
+.modal header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 18px; border-bottom: 1px solid var(--line);
+}
+.modal header h2 { margin: 0; font-size: 15px; }
+.modal-body { overflow-y: auto; padding: 16px 18px; }
+
+.probe-block + .probe-block { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line); }
+.probe-block h3 { margin: 0 0 10px; font-size: 14px; display: flex; gap: 8px; align-items: center; }
+.probe-block h4 { margin: 14px 0 6px; font-size: 12px; color: var(--muted); font-weight: 500; }
+.probe-block .ok { color: var(--ok); font-size: 12px; }
+.probe-block .bad { color: var(--danger); font-size: 12px; }
+.probe-error {
+  background: var(--bg); padding: 8px; border-radius: 6px; font-size: 11px;
+  white-space: pre-wrap; word-break: break-all; margin: 0; color: var(--danger);
+}
+.modal table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.modal th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px 4px 0; }
+.modal td { padding: 3px 8px 3px 0; vertical-align: top; }
+.hkey { font-family: ui-monospace, monospace; color: var(--accent); white-space: nowrap; }
+.hval { font-family: ui-monospace, monospace; word-break: break-all; }
+
+.probe-block details { margin-top: 12px; }
+.probe-block summary {
+  cursor: pointer; font-size: 11px; color: var(--muted); user-select: none;
+}
+.probe-meta { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+.raw-body {
+  background: var(--bg); padding: 8px; border-radius: 6px; font-size: 11px;
+  white-space: pre-wrap; word-break: break-all; margin: 8px 0 0; max-height: 240px; overflow-y: auto;
+}
+
+/* ---------- 账户弹窗 ---------- */
+.modal-body > h3 { margin: 18px 0 10px; font-size: 13px; color: var(--muted); font-weight: 500; }
+.modal-body > h3:first-child { margin-top: 0; }
+.modal-body input[type="text"] {
+  width: 100%; background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  padding: 8px 10px; border-radius: 6px; font-size: 13px; margin-top: 8px;
+}
+.modal-actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+.probe-meta a { color: var(--accent); word-break: break-all; }
+.probe-meta code { background: var(--bg); padding: 2px 6px; border-radius: 4px; }
+
+/* ---------- 请求日志弹窗 ---------- */
+.req-nav { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.req-pos { flex: 1; text-align: center; font-size: 12px; color: var(--muted); }
+/* 自绘的日志选择器：原生 select 的列表松开鼠标就收，翻不动几十条 */
+.req-picker { position: relative; margin-bottom: 6px; }
+.req-picker-toggle {
+  width: 100%; display: flex; align-items: center; gap: 8px;
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  padding: 7px 10px; border-radius: 6px; font-size: 12px;
+  font-family: ui-monospace, monospace; text-align: left; cursor: pointer;
+}
+.req-picker-toggle:hover { border-color: var(--accent); }
+.req-picker-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.req-picker-caret { color: var(--muted); font-size: 10px; }
+.req-picker-list {
+  position: absolute; top: calc(100% + 2px); left: 0; right: 0; z-index: 5;
+  max-height: 280px; overflow-y: auto; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, .35);
+}
+.req-picker-item {
+  display: block; width: 100%; text-align: left; background: none; border: 0;
+  color: var(--text); font-family: ui-monospace, monospace; font-size: 12px;
+  padding: 6px 8px; border-radius: 4px; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.req-picker-item:hover { background: var(--card); }
+.req-picker-item.current { background: var(--line); font-weight: 600; }
+.probe-block .warn { color: var(--warn); font-size: 12px; }
+.req-dur { margin-left: auto; font-size: 11px; color: var(--muted); font-weight: 400; }
+/* 接口标识：和状态码并排，但用中性色，抢的是“这是哪一路请求”而不是成败 */
+.req-endpoint {
+  font-size: 11px; color: var(--text); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 4px; padding: 2px 7px; font-weight: 500;
+}
+.req-url {
+  margin: 0 0 4px; font-family: ui-monospace, monospace; font-size: 11px;
+  color: var(--muted); word-break: break-all;
+}
+/* curl 要能整段选中复制，所以不换行折断单词，交给横向滚动 */
+.req-curl {
+  background: var(--bg); padding: 10px; border-radius: 6px; margin: 0;
+  font-size: 11px; line-height: 1.6; white-space: pre; overflow-x: auto;
+  max-height: 280px; overflow-y: auto; user-select: text;
+}
+.probe-block h4 { display: flex; align-items: center; gap: 10px; }
+
+/* 只有图标的按钮仍要给读屏软件留下名字 */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.probe-meta.warn-text { color: var(--warn); }
+
+/* ---------- 杂项 ---------- */
+.empty { color: var(--muted); font-size: 12px; margin: 4px 0; }
+.empty.big { grid-column: 1 / -1; text-align: center; padding: 40px; font-size: 14px; }
+.empty code { background: var(--panel); padding: 2px 6px; border-radius: 4px; }
+
+.toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: var(--card); border: 1px solid var(--line); color: var(--text);
+  padding: 10px 18px; border-radius: 999px; font-size: 13px; z-index: 60;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .35);
+}
