@@ -314,6 +314,7 @@ api.patch('/accounts/:id', async (c) => {
   if (!body.autoRefresh) {
     if (!check.ok) return c.json({ error: `不能跟随这个客户端：${check.reason}` }, 400);
     await setAutoRefresh(account, false, { source: check.source, path: check.path });
+    await checkClients(false);
     note = `已核对 ${check.label} 上登录的就是这个账户，之后从 ${check.path} 取新令牌`;
   } else {
     await setAutoRefresh(account, true);
@@ -406,8 +407,8 @@ api.post('/accounts/:id/sync-to-client', async (c) => {
     if (results.every((r) => r.error)) {
       return c.json({ error: results.map((r) => `${r.label}: ${r.error}`).join('；') }, 400);
     }
-    // 刚刚改的正是「这台电脑在用哪个账户」的依据，别让列表上的标记等到下一个核对周期
-    await checkClients();
+    await checkClients(false);
+    await pushAccounts();
     return c.json(results);
   } catch (err) {
     const message = (err as Error).message;
@@ -641,10 +642,10 @@ async function refreshLoop(): Promise<void> {
  */
 let clientTimer: NodeJS.Timeout | null = null;
 
-async function checkClients(): Promise<void> {
+async function checkClients(publish = true): Promise<void> {
   const { changes } = await refreshClientsInUse(await loadAccounts(cfgMod.ACCOUNTS_DIR));
   for (const change of changes) scheduler.log('info', change.accountId, change.message);
-  if (changes.length > 0) await pushAccounts();
+  if (publish && changes.length > 0) await pushAccounts();
 }
 
 async function clientLoop(): Promise<void> {

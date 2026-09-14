@@ -41,4 +41,6 @@ build/
 .headroom
 .claude
 .codebase-memory
+.worktrees/
 release/
+.playwright-mcp

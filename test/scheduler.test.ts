@@ -34,6 +34,9 @@ let usageWindows: Window[] = [];
 let tokenReady = true;
 /** 账户文件里记的到期时间。别处（后台额度刷新、界面上查额度）换到新令牌时，变的就是它。 */
 let diskExpiresAt = Date.now() + 86400_000;
+let diskAutoRefresh = true;
+let diskSyncPath = '/tmp/old-client.json';
+let diskSyncSource = 'codex-cli';
 
 const ON_DISK = [
   { id: 'codex:a@x.com', provider: 'codex', email: 'a@x.com', path: '/tmp/a.json', accountId: 'aid' },
@@ -112,6 +115,9 @@ mock.module('../src/server/creds.js', {
         refreshToken: 'r',
         expiresAt: diskExpiresAt,
         disabled: false,
+        autoRefresh: diskAutoRefresh,
+        syncPath: diskSyncPath,
+        syncSource: diskSyncSource,
       }));
     },
   },
@@ -682,6 +688,41 @@ test('别处换到的新令牌要反映到卡片的有效期上', async () => {
     const after = (await sched.snapshot()).find((a) => a.id === 'codex:a@x.com')!;
     assert.equal(after.tokenExpiresAt, diskExpiresAt, '磁盘上更新的那份才是当前令牌');
   } finally {
+    await sched.stop();
+    store.close();
+  }
+});
+
+test('运行中的账户采纳磁盘上的续期策略但保留更新的令牌', async () => {
+  const store = makeStore();
+  const originalExpiresAt = diskExpiresAt;
+  const sched = new Scheduler(store, {
+    ...DEFAULT_CONFIG,
+    ...ALL_DAY,
+    include: ['a@x.com'],
+  });
+
+  try {
+    await sched.start();
+    const diskAccount = (await loadAccounts('')).find((account) => account.id === 'codex:a@x.com');
+    assert.ok(diskAccount);
+    const newerWorkerExpiresAt = originalExpiresAt + 3600_000;
+    sched.adoptTokens({ ...diskAccount, accessToken: 'newer-worker-token', expiresAt: newerWorkerExpiresAt });
+
+    diskAutoRefresh = false;
+    diskSyncPath = '/tmp/new-client.json';
+    diskSyncSource = 'opencode';
+
+    const account = (await sched.snapshot()).find((view) => view.id === 'codex:a@x.com');
+    assert.ok(account);
+    assert.equal(account.autoRefresh, false);
+    assert.equal(account.syncPath, '/tmp/new-client.json');
+    assert.equal(account.tokenExpiresAt, newerWorkerExpiresAt);
+  } finally {
+    diskAutoRefresh = true;
+    diskSyncPath = '/tmp/old-client.json';
+    diskSyncSource = 'codex-cli';
+    diskExpiresAt = originalExpiresAt;
     await sched.stop();
     store.close();
   }

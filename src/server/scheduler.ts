@@ -361,7 +361,13 @@ export class Scheduler {
    */
   private adoptNewer(disk: Account): void {
     const worker = this.workers.get(disk.id);
-    if (worker && disk.expiresAt > worker.account.expiresAt) this.adoptTokens(disk);
+    if (!worker) return;
+    Object.assign(worker.account, {
+      autoRefresh: disk.autoRefresh,
+      syncPath: disk.syncPath,
+      syncSource: disk.syncSource,
+    });
+    if (disk.expiresAt > worker.account.expiresAt) this.adoptTokens(disk);
   }
 
   /**
