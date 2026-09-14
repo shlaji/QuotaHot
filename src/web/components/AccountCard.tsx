@@ -231,6 +231,26 @@ export function AccountCard({
         </span>
       </header>
 
+      {/*
+        这台电脑此刻用的是哪个账户：写在客户端自己的凭证文件里，服务端定时核对。
+        它独占一行、紧贴卡头——一列账户里用户最先要找的就是「我现在用的是哪个」；
+        挤进上面那排徽章则不行，客户端名比 plan 长得多，一挤就换行，把卡头拆散。
+      */}
+      {a.inUseBy.length > 0 && (
+        <p
+          className="card-inuse"
+          title={[
+            ...a.inUseBy.map((u) => `${u.label} 正在用这个账户（${u.path}）`),
+            a.inUseCheckedAt ? `上次核对 ${clock(a.inUseCheckedAt)}` : '',
+          ]
+            .filter(Boolean)
+            .join('\n')}
+        >
+          <span className="card-inuse-dot" aria-hidden="true" />
+          本机在用 · {a.inUseBy.map((u) => u.label).join('、')}
+        </p>
+      )}
+
       <div className="usage">
         {windows.length === 0 ? (
           <span className="usage-text">用量未知，点「查看额度」拉一次</span>

@@ -106,14 +106,6 @@ export function maskText(text: string, s: Secrets): string {
   );
 }
 
-/** 读取时：占位符 → 当前凭证。 */
-export function fillText(text: string, s: Secrets): string {
-  return applyPairs(
-    text,
-    live(s).map(({ secret, placeholder }): Pair => [placeholder, secret]),
-  );
-}
-
 /* ── curl ──────────────────────────────────────────────────────────────── */
 
 export function buildCurl(req: RequestRecord): string {
@@ -142,7 +134,7 @@ export function isCliRecord(req: Pick<RequestRecord, 'url'>): boolean {
 }
 
 /** 只在真的需要时才加引号，免得 `--print` 这种参数也被引号淹没。 */
-export function shellArg(v: string): string {
+function shellArg(v: string): string {
   return v !== '' && /^[A-Za-z0-9._/:=@-]+$/.test(v) ? v : sq(v);
 }
 

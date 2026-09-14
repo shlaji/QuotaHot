@@ -1,15 +1,17 @@
 /**
  * 刷新账户的额度信息，并把结果写回 store。
  *
- * 这段逻辑同时被 /api/usage 按钮和后台定时器复用，因此手动刷新和自动刷新会产出完全一致的状态；
- * 挑跟踪窗口也和调度器共用 nextSendWindow，三条写入路径（手动、后台、发送后）记下的是同一个窗口。
+ * 界面上的「查询额度」按钮和后台定时刷新走的都是这里，因此手动刷新和自动刷新会产出完全一致的
+ * 状态；挑跟踪窗口也和调度器共用 nextSendWindow，三条写入路径（手动、后台、发送前后）记下的
+ * 是同一个窗口。
  * 整个过程始终只读：不调模型、不消耗 token、也不会打开 5 小时窗口。
  */
 import { ACCOUNTS_DIR } from './config.js';
+import { isWithinDailyWindow, nextWindowOpen, parseDailyTime } from '../shared/schedule.js';
 import { loadAccounts, ensureFresh, type Account } from './creds.js';
 import { queryUsage } from './usage.js';
 import { nextSendWindow } from './ratelimit.js';
-import { selectAccounts } from './scheduler.js';
+import { selectAccounts } from './accounts-view.js';
 import type { Store } from './store.js';
 import type { AppConfig, UsageResult } from '../shared/types.js';
 
@@ -80,6 +82,41 @@ export async function refreshUsage(
   const results: UsageResult[] = [];
   for (const account of accounts) results.push(await refreshOne(store, account));
   return results;
+}
+
+/** 配置里那个每日时段，解析成零点后的分钟数。 */
+function dailyWindow(cfg: AppConfig): { startMin: number; endMin: number } {
+  return {
+    startMin: parseDailyTime(cfg.dailyStart) ?? 0,
+    endMin: parseDailyTime(cfg.dailyEnd) ?? 0,
+  };
+}
+
+/**
+ * 这一刻后台该不该刷。
+ *
+ * 周期为 0 是用户明说的“只在点按钮时查”。每日时段外则是另一回事：那段时间没有账户会发送，
+ * 卡片上的数字也没人在看，整夜去打上游的额度接口只会给它自己的限流计数加数——而那个计数
+ * 和发送共用，凌晨白加的每一笔，都可能让天亮后第一拍的窗口查询撞上 429。
+ */
+export function shouldRefreshUsage(cfg: AppConfig, now = Date.now()): boolean {
+  if (cfg.usageRefreshMinutes <= 0) return false;
+  const { startMin, endMin } = dailyWindow(cfg);
+  return isWithinDailyWindow(now, startMin, endMin);
+}
+
+/**
+ * 后台刷新下一轮隔多久醒。
+ *
+ * 时段内就是一个周期。时段外睡到开窗那一刻，省掉整夜的空转；但仍以一个周期封顶，好让时段
+ * 被改宽时最迟下一轮就跟上，而不是傻等到按旧时段算出来的那个开窗时刻。周期为 0（只手动）
+ * 时不必醒得勤，但也不能永不再醒——用户随时可能把它改回去，因此按 10 分钟回来看一眼。
+ */
+export function nextRefreshDelay(cfg: AppConfig, now = Date.now()): number {
+  const period = Math.max(1, cfg.usageRefreshMinutes || 10) * 60_000;
+  const { startMin, endMin } = dailyWindow(cfg);
+  if (cfg.usageRefreshMinutes <= 0 || isWithinDailyWindow(now, startMin, endMin)) return period;
+  return Math.max(1000, Math.min(period, nextWindowOpen(now, startMin, endMin) - now));
 }
 
 /** 按 ID 找账户再刷新；找不到时返回 null，由调用方给出 404。 */

@@ -13,10 +13,10 @@
  * 2. 只改令牌相关的那几个键，其余字段（模型偏好、API key 等）逐字保留。
  * 3. 逐项报出改了什么，由调用方写进日志——用户必须知道自己的配置文件被动了哪里。
  */
-import { copyFile, mkdir, rename, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { readJsonFile } from './clientfile.js';
+import { fileExists, readJsonFile } from './clientfile.js';
 import { emailOf, type Account } from './creds.js';
 import type { ConfigChange, SyncToClientResult } from '../shared/types.js';
 
@@ -57,6 +57,25 @@ export function opencodeAuthPath(): string {
  * 交给 CLI 用”的意思。OpenCode 只认 Codex 这一路：Claude 账户不写给它。
  */
 export async function syncTargetsOf(acct: Account): Promise<SyncTarget[]> {
+  return targetsOf(acct, acct.provider === 'codex' ? await fileExists(opencodeAuthPath()) : false);
+}
+
+/**
+ * 一批账户各自的写回目标。
+ *
+ * 与逐个调用 syncTargetsOf 的区别只在于：OpenCode 那个凭证文件的路径跟账户无关，
+ * 这里只探一次磁盘，而不是每个 Codex 账户探一次。界面每刷新一次就要问一遍全部账户。
+ */
+export async function syncTargetsOfMany(
+  accounts: readonly Account[],
+): Promise<Map<string, SyncTarget[]>> {
+  const opencodePresent = accounts.some((a) => a.provider === 'codex')
+    ? await fileExists(opencodeAuthPath())
+    : false;
+  return new Map(accounts.map((a) => [a.id, targetsOf(a, opencodePresent)]));
+}
+
+function targetsOf(acct: Account, opencodePresent: boolean): SyncTarget[] {
   const source = acct.syncSource || acct.source;
   if (acct.provider === 'codex') {
     const cliPath =
@@ -64,9 +83,8 @@ export async function syncTargetsOf(acct: Account): Promise<SyncTarget[]> {
         ? acct.syncPath
         : join(homedir(), '.codex', 'auth.json');
     const targets = [{ source: 'codex-cli', label: WRITABLE['codex-cli'], path: cliPath }];
-    const opencodePath = opencodeAuthPath();
-    if (await exists(opencodePath)) {
-      targets.push({ source: 'opencode', label: WRITABLE.opencode, path: opencodePath });
+    if (opencodePresent) {
+      targets.push({ source: 'opencode', label: WRITABLE.opencode, path: opencodeAuthPath() });
     }
     return targets;
   }
@@ -212,15 +230,6 @@ function occupantWarning(before: Record<string, unknown>, source: string, acct: 
   return `该文件原先属于 ${owner}，这次同步后该客户端会切换到 ${acct.email}`;
 }
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** 原子写：先落临时文件再 rename，别人就读不到写了一半的凭证。 */
 async function writeJson(path: string, data: Record<string, unknown>): Promise<void> {
   const tmp = `${path}.quotahot-tmp`;
@@ -237,7 +246,7 @@ async function writeJson(path: string, data: Record<string, unknown>): Promise<v
 async function syncOne(acct: Account, target: SyncTarget): Promise<SyncToClientResult> {
   const base = { path: target.path, source: target.source, label: target.label };
   try {
-    const created = !(await exists(target.path));
+    const created = !(await fileExists(target.path));
     const data = (await readJsonFile(target.path)) ?? {};
     const warning = created ? '' : occupantWarning(data, target.source, acct);
 

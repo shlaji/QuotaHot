@@ -19,7 +19,3 @@ export function emit(event: ServerEvent): void {
     }
   }
 }
-
-export function listenerCount(): number {
-  return listeners.size;
-}

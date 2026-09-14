@@ -10,7 +10,7 @@ import { renameSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { withCredentialLock } from './credential-lock.js';
-import { followSourceOf, readClientTokens } from './clientfile.js';
+import { followSourceOf, readClientTokens, type ClientTokens } from './clientfile.js';
 import { request, type Audit, type HttpResponse } from './http.js';
 import { claudeOAuthHeaders, diagnose } from './headers.js';
 import type { Provider } from '../shared/types.js';
@@ -201,48 +201,56 @@ export async function loadAccounts(authDir: string): Promise<Account[]> {
     return [];
   }
 
-  const accounts: Account[] = [];
-  for (const file of files) {
-    const path = join(authDir, file);
-    let data: Record<string, unknown>;
-    try {
-      data = JSON.parse(await readFile(path, 'utf8'));
-    } catch {
-      continue; // 跳过无法解析的凭证文件
-    }
+  // 并发读：这个函数在每次快照和每次发送前都要跑一遍，串行读会把账户数乘进延迟里。
+  // files 已排序，map 保序，所以结果顺序和一个个读时一致。
+  const parsed = await Promise.all(files.map((f) => parseAccountFile(join(authDir, f), f)));
+  return parsed.filter((a): a is Account => a !== null);
+}
 
-    const provider = String(data.type ?? '').toLowerCase();
-    if (provider !== 'claude' && provider !== 'codex' && provider !== 'qoder') continue;
-
-    const email = String(data.email ?? file);
-    const account: Account = {
-      id: `${provider}:${email}`,
-      provider: provider as Provider,
-      email,
-      path,
-      accountId: String(data.account_id ?? ''),
-      accessToken: String(data.access_token ?? ''),
-      refreshToken: String(data.refresh_token ?? ''),
-      expiresAt: parseExpiry(data.expired),
-      disabled: Boolean(data.disabled),
-      // 文件里记着的是上一次查询到的值；能从令牌声明里解出更新的，readClaims 会覆盖掉
-      plan: String(data.plan ?? ''),
-      subscriptionEndsAt: 0,
-      userId: String(data.user_id ?? ''),
-      loginMethod: '',
-      source: String(data.source ?? ''),
-      // 老账户文件里没有这个字段，默认仍是本程序自己刷新，行为与升级前一致
-      autoRefresh: data.auto_refresh === undefined ? true : Boolean(data.auto_refresh),
-      syncPath: String(data.sync_path ?? ''),
-      syncSource: String(data.sync_source ?? data.source ?? ''),
-      idToken: String(data.id_token ?? ''),
-    };
-    // 账户 ID 缺失时，用令牌声明补上：官方 CLI 的 auth.json 就没有单独的顶层字段
-    if (!account.accountId) account.accountId = accountIdOf(account.idToken || account.accessToken);
-    readClaims(data, account);
-    accounts.push(account);
+/** 读一个凭证文件；解析不了或不是本程序认得的 provider 时返回 null。 */
+async function parseAccountFile(path: string, file: string): Promise<Account | null> {
+  let data: Record<string, unknown>;
+  try {
+    data = JSON.parse(await readFile(path, 'utf8'));
+  } catch {
+    return null; // 跳过无法解析的凭证文件
   }
-  return accounts;
+
+  const provider = String(data.type ?? '').toLowerCase();
+  if (provider !== 'claude' && provider !== 'codex' && provider !== 'qoder') return null;
+
+  const email = String(data.email ?? file);
+  const account: Account = {
+    id: `${provider}:${email}`,
+    provider: provider as Provider,
+    email,
+    path,
+    accountId: String(data.account_id ?? ''),
+    accessToken: String(data.access_token ?? ''),
+    refreshToken: String(data.refresh_token ?? ''),
+    expiresAt: parseExpiry(data.expired),
+    disabled: Boolean(data.disabled),
+    // 文件里记着的是上一次查询到的值；能从令牌声明里解出更新的，readClaims 会覆盖掉
+    plan: String(data.plan ?? ''),
+    subscriptionEndsAt: 0,
+    userId: String(data.user_id ?? ''),
+    loginMethod: '',
+    source: String(data.source ?? ''),
+    // 老账户文件里没有这个字段，默认仍是本程序自己刷新，行为与升级前一致
+    autoRefresh: data.auto_refresh === undefined ? true : Boolean(data.auto_refresh),
+    syncPath: String(data.sync_path ?? ''),
+    syncSource: String(data.sync_source ?? data.source ?? ''),
+    idToken: String(data.id_token ?? ''),
+  };
+  // 账户 ID 缺失时，用令牌声明补上：官方 CLI 的 auth.json 就没有单独的顶层字段
+  if (!account.accountId) account.accountId = accountIdOf(account.idToken || account.accessToken);
+  readClaims(data, account);
+  return account;
+}
+
+/** 按 ID 取单个账户；找不到时返回 null，由调用方决定怎么报错。 */
+export async function loadAccount(authDir: string, accountId: string): Promise<Account | null> {
+  return (await loadAccounts(authDir)).find((a) => a.id === accountId) ?? null;
 }
 
 /** 邮箱直接当文件名不安全，这里只保留可安全落盘的字符。 */
@@ -358,6 +366,51 @@ export interface FollowCheck {
 }
 
 /**
+ * 客户端凭证文件里的那个登录，和手里这个账户是不是同一个。
+ *
+ * 判据按可信度排：令牌一模一样就是同一份登录，不必再问；否则比账户 ID，再比邮箱。
+ * 各来源能拿到的身份不一样——Claude 的 access_token 不是 JWT，凭证文件里也没有邮箱，
+ * 只有 ~/.claude.json 记着它当前登录的是谁；Codex 的 id_token 里 account_id 和邮箱都有。
+ * 一项都比不出来就是 'unknown'：确认不了是同一个，就不能当成是。
+ *
+ * 两个方向都用它，问的其实是同一件事：checkFollowClient 拿着账户问「这个客户端还是它吗」，
+ * inuse.ts 拿着客户端问「它现在用的是哪个账户」。判据只能有一套，否则会出现「跟随核对不
+ * 放行、界面却把它标成本机在用」这种自相矛盾。
+ */
+export type IdentityVerdict = {
+  kind: 'same' | 'other-id' | 'other-email' | 'unknown';
+  /** 客户端那边登录的是谁，邮箱优先、退到账户 ID；认不出来时为空串。 */
+  who: string;
+};
+
+/** 客户端凭证里那个登录是谁：邮箱优先，退到账户 ID；两样都认不出来时为空串。 */
+export function whoOf(tokens: ClientTokens): string {
+  return (
+    tokens.email ||
+    emailOf(tokens.idToken || tokens.accessToken) ||
+    tokens.accountId ||
+    accountIdOf(tokens.idToken || tokens.accessToken)
+  );
+}
+
+export function identityOf(tokens: ClientTokens, acct: Account): IdentityVerdict {
+  const theirId = tokens.accountId || accountIdOf(tokens.idToken || tokens.accessToken);
+  const myId = acct.accountId || accountIdOf(acct.idToken || acct.accessToken);
+  const theirEmail = tokens.email || emailOf(tokens.idToken || tokens.accessToken);
+  const who = whoOf(tokens);
+
+  // 手里这份就是它那份，是同一个登录无疑
+  if (tokens.accessToken && tokens.accessToken === acct.accessToken) return { kind: 'same', who };
+  if (theirId && myId && theirId !== myId) return { kind: 'other-id', who };
+  // 占位名（'claude-code'、'qoder' 这类）不是邮箱，拿它比只会得出假结论
+  if (isEmail(theirEmail) && isEmail(acct.email) && !sameEmail(theirEmail, acct.email)) {
+    return { kind: 'other-email', who: theirEmail };
+  }
+  const compared = (theirId && myId) || (isEmail(theirEmail) && isEmail(acct.email));
+  return { kind: compared ? 'same' : 'unknown', who };
+}
+
+/**
  * 「改为跟随客户端」之前的身份核对：本机那个客户端现在登录的还是这个账户吗。
  *
  * 跟随模式的全部内容就是「过期了就回客户端的凭证文件里取一份新令牌」，所以核对的对象只能是
@@ -365,10 +418,7 @@ export interface FollowCheck {
  * Codex 比 ~/.codex/auth.json（导入时记过来源文件的则比它自己那份）。客户端要是已经换了账号，
  * 跟随就会一路把别人的令牌同步进来：卡片上还写着 A 的邮箱，查的却是 B 的额度。
  *
- * 判据按可信度排：令牌一模一样就是同一份登录，不必再问；否则比账户 ID，再比邮箱。
- * 各来源能拿到的身份不一样——Claude 的 access_token 不是 JWT，凭证文件里也没有邮箱，
- * 只有 ~/.claude.json 记着它当前登录的是谁；Codex 的 id_token 里 account_id 和邮箱都有。
- *
+ * 比身份的那套判据在 identityOf 里，与账户列表上的「本机在用」标记共用。
  * 一项都比不出来时同样不放行：确认不了是不是同一个账户，跟随的就可能是别人。
  */
 export async function checkFollowClient(acct: Account): Promise<FollowCheck> {
@@ -388,27 +438,16 @@ export async function checkFollowClient(acct: Account): Promise<FollowCheck> {
 
   const tokens = await readClientTokens(src.source, src.path);
   if (!tokens) return deny(`没能从 ${src.label} 的 ${src.path} 读出令牌，确认不了它登录的是哪个账户`);
-  // 手里这份就是它那份，是同一个登录无疑
-  if (tokens.accessToken === acct.accessToken) return allow();
 
-  const theirId = tokens.accountId || accountIdOf(tokens.idToken || tokens.accessToken);
-  const myId = acct.accountId || accountIdOf(acct.idToken || acct.accessToken);
-  const theirEmail = tokens.email || emailOf(tokens.idToken || tokens.accessToken);
-  const who = theirEmail || theirId;
-
-  if (theirId && myId && theirId !== myId) {
-    return deny(`${src.label} 现在登录的是另一个账户（${who || theirId}），不是 ${acct.email}`);
+  const verdict = identityOf(tokens, acct);
+  if (verdict.kind === 'same') return allow();
+  if (verdict.kind === 'other-id') {
+    return deny(`${src.label} 现在登录的是另一个账户（${verdict.who}），不是 ${acct.email}`);
   }
-  // 占位名（'claude-code'、'qoder' 这类）不是邮箱，拿它比只会得出假结论
-  if (isEmail(theirEmail) && isEmail(acct.email) && !sameEmail(theirEmail, acct.email)) {
-    return deny(`${src.label} 现在登录的是 ${theirEmail}，不是 ${acct.email}`);
+  if (verdict.kind === 'other-email') {
+    return deny(`${src.label} 现在登录的是 ${verdict.who}，不是 ${acct.email}`);
   }
-
-  const compared = (theirId && myId) || (isEmail(theirEmail) && isEmail(acct.email));
-  if (!compared) {
-    return deny(`认不出 ${src.label} 现在登录的是哪个账户，无法确认与 ${acct.email} 是同一个`);
-  }
-  return allow();
+  return deny(`认不出 ${src.label} 现在登录的是哪个账户，无法确认与 ${acct.email} 是同一个`);
 }
 
 /** 占位名（'claude-code'、'qoder' 等）不是邮箱，不能拿来判断身份。 */

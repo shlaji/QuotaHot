@@ -25,7 +25,7 @@ export const CLAUDE_VERSION = '2.1.220';
  * 这个程序的定位就是长期挂着定时发送，因此“一次运行 = 一个会话”是最贴近的映射。
  */
 let sessionId = '';
-export function currentSessionId(): string {
+function currentSessionId(): string {
   if (sessionId === '') sessionId = randomUUID();
   return sessionId;
 }
@@ -51,7 +51,7 @@ const CHATGPT_UA =
  * UA 里的版本号、@anthropic-ai/sdk 的包版本、Node 运行时版本、以及 SDK 上报的
  * 系统与架构。它们必须彼此自洽——一个 MacOS/arm64 的机器不会跑在 Linux 的 Node 上。
  */
-export const CLAUDE_UA = `claude-cli/${CLAUDE_VERSION} (external, cli)`;
+const CLAUDE_UA = `claude-cli/${CLAUDE_VERSION} (external, cli)`;
 const SDK_PACKAGE_VERSION = '0.94.0';
 const SDK_RUNTIME_VERSION = 'v26.3.0';
 const SDK_OS = 'MacOS';
@@ -104,7 +104,7 @@ export function claudeOAuthHeaders(accessToken = '', beta = ''): Record<string, 
  * 这类原始大小写写到线上；这里的头会按我们给出的字面量发出去，因此统一用小写，
  * 与 HTTP/2 下的形态一致。
  */
-export function claudeSdkHeaders(accessToken: string, betas: string): Record<string, string> {
+function claudeSdkHeaders(accessToken: string, betas: string): Record<string, string> {
   return {
     authorization: `Bearer ${accessToken}`,
     'anthropic-beta': betas,
@@ -314,7 +314,7 @@ function headerValue(headers: HeaderLike | undefined, name: string): string {
  * 上游把机器可读的原因藏在响应体里，字段名随接口而异；这里按已知的几个位置找一遍。
  * 例如 429 会带 `detail.code = "usage_limit_reached"`，它比状态码本身有用得多。
  */
-export function detailCodeOf(body: string): string {
+function detailCodeOf(body: string): string {
   let payload: unknown;
   try {
     payload = JSON.parse(body);

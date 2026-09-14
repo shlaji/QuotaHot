@@ -14,6 +14,27 @@ export type SendProvider = 'claude' | 'codex';
  */
 export type Provider = SendProvider | 'qoder';
 
+/**
+ * 本机某个客户端此刻登录着的那个账户。
+ *
+ * 「这台电脑现在用的是哪个账户」只写在客户端自己的凭证文件里，服务端定时核对一遍
+ * （见 server/inuse.ts），界面据此在账户列表上标出来。
+ */
+export interface ClientUse {
+  /** 客户端标识，例如 'claude-cli'。 */
+  source: string;
+  /** 客户端展示名，例如 'Claude Code'。 */
+  label: string;
+  /** 核对的是哪个凭证文件。 */
+  path: string;
+  /** 认出来的账户 id；它登录的账户不在本程序的账户目录里时为空串。 */
+  accountId: string;
+  /** 它登录的是谁，邮箱优先；认不出来时为空串。 */
+  who: string;
+  /** 凭证读不出来时的原因；读到了就是空串。 */
+  error: string;
+}
+
 export interface AccountView {
   id: string;
   provider: Provider;
@@ -59,6 +80,13 @@ export interface AccountView {
    * 为空表示这个账户没有可写回的客户端（Qoder 的凭证在加密的 state.vscdb 里）。
    */
   syncTargets: string[];
+  /**
+   * 本机哪些客户端此刻正用着这个账户；为空表示这台电脑当前没在用它。
+   * 由定时核对刷新，见 server/inuse.ts。
+   */
+  inUseBy: ClientUse[];
+  /** 上一次核对本机客户端的时刻，毫秒时间戳；还没核对过时为 null。 */
+  inUseCheckedAt: number | null;
   consecutiveFailures: number;
   state: 'idle' | 'waiting' | 'sending' | 'stopped' | 'error';
   lastError: string;
@@ -100,8 +128,15 @@ export interface AppConfig {
   /**
    * 后台自动刷新额度的间隔，单位分钟。
    * 设为 0 表示关闭自动刷新，只保留手动“查询额度”按钮。
+   * 只在每日时段内刷新：时段外没有账户会发送，卡片上的数字也就没人看，
+   * 没必要为它整夜打上游的额度接口。
    */
   usageRefreshMinutes: number;
+  /**
+   * 核对本机客户端在用哪个账户的间隔，单位分钟。
+   * 设为 0 表示不再核对，账户列表上的「本机在用」标记就停在最后一次的结果上。
+   */
+  clientCheckMinutes: number;
   /** 按邮箱子串筛选；include 为空表示包含全部账户。 */
   include: string[];
   exclude: string[];
@@ -109,6 +144,24 @@ export interface AppConfig {
   proxy: string;
   /** 按 NO_PROXY 语义配置的直连主机规则；proxy 为空时忽略。 */
   noProxy: string[];
+  /**
+   * 进程起来之后自动把调度跑起来。
+   *
+   * 记的是用户的意图，不是进程的状态：只有界面上的启动/停止会改它，收到 SIGTERM 时
+   * 内部那次 stop() 不碰。反过来的话，systemd 重启前的那次 SIGTERM 会先把它关掉，
+   * 重启之后就再也不会自己跑起来——恰好是这个开关要解决的那件事。
+   *
+   * 保活服务被 `Restart=always` 拉起来却停在那儿不发送，是最不容易被发现的一种断，
+   * 因为界面上的「下次发送」倒计时照走不误。
+   */
+  autoStart: boolean;
+  /**
+   * 自动启动时纳入哪些账户，空数组表示全部可保活账户。
+   *
+   * 跟着 autoStart 一起记，是因为「只跑选中的几个」是用户明确挑过的：重启之后悄悄
+   * 扩成全部，等于替他给没打算保活的账户也发了。
+   */
+  autoStartIds: string[];
 }
 
 export interface LogEntry {

@@ -232,6 +232,21 @@ button.mode.auto:hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent) 26%, var(--card));
 }
 .card-sub { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+/*
+  「本机在用」独占一行：它说的是**这台电脑**，不是账户自己的属性，跟 plan、续期方式
+  不是一类东西，挤在同一排既读错了归属，客户端名一长还会把卡头挤到换行。
+  一个圆点加一句话，主色，扫一列卡片时就是这一行在跳出来。
+  卡片本身 12px 的行距对一行小字太宽，往上收 4px，让它贴着邮箱那一块。
+*/
+.card-inuse {
+  display: flex; align-items: center; gap: 6px; margin: -4px 0 0;
+  font-size: 11px; font-weight: 600; color: var(--accent);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.card-inuse-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+  background: var(--accent);
+}
 
 .state-dot { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .state-dot.state-sending { color: var(--accent); }

@@ -134,7 +134,7 @@ test('触限归 429、认证失败归 401，其余按可重试处理', () => {
 
 /**
  * 真实日志里出现过的那句话。认不出来的代价不是少一条日志：这一发会被当成接口故障，
- * 重试几轮之后账户被判「连续失败过多」直接停掉，保活断在这里。
+ * 重试几轮全白费，下一拍还按失败退避排，额度明明重置了也没人去发。
  */
 test('“You’ve hit your weekly limit” 也算触限，不是接口故障', () => {
   const detail = "You've hit your weekly limit · resets 10pm (Asia/Singapore)";

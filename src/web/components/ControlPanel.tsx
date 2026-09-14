@@ -282,7 +282,9 @@ export function ControlPanel({
             <span>
               额度刷新（分钟）
               <em className="hint">
-                {draft.usageRefreshMinutes > 0 ? '后台自动只读查询' : '0 = 只在点按钮时查询'}
+                {draft.usageRefreshMinutes > 0
+                  ? `后台自动只读查询，仅 ${draft.dailyStart}–${draft.dailyEnd} 时段内`
+                  : '0 = 只在点按钮时查询'}
               </em>
             </span>
             <input
@@ -291,6 +293,28 @@ export function ControlPanel({
               max={1440}
               value={draft.usageRefreshMinutes}
               onChange={(e) => patch({ usageRefreshMinutes: Number(e.target.value) })}
+            />
+          </label>
+        </div>
+      </Group>
+
+      <Group title="本机客户端" hint="多久回头看一眼这台电脑在用哪个账户">
+        <div className="panel-row">
+          <label className="field">
+            <span>
+              客户端核对（分钟）
+              <em className="hint">
+                {draft.clientCheckMinutes > 0
+                  ? '只读本机凭证文件，不发请求'
+                  : '0 = 不再核对，标记停在最后一次结果'}
+              </em>
+            </span>
+            <input
+              type="number"
+              min={0}
+              max={1440}
+              value={draft.clientCheckMinutes}
+              onChange={(e) => patch({ clientCheckMinutes: Number(e.target.value) })}
             />
           </label>
         </div>

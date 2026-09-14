@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Window } from '../src/shared/types.js';
+import type { AppConfig, Window } from '../src/shared/types.js';
 
 /**
  * 只读刷新（界面上的查额度按钮、后台定时器）写回库里的那个窗口，必须和调度器排下一拍
@@ -31,9 +31,11 @@ mock.module('../src/server/usage.js', {
 mock.module('../src/server/creds.js', {
   exports: {
     ensureFresh: async () => true,
-    // 这两个是 import 链上别的模块要的；少一个导出，整条链都起不来
+    // 这几个是 import 链上别的模块要的；少一个导出，整条链都起不来
     emailOf: () => '',
     auditOf: () => ({}),
+    identityOf: () => ({ kind: 'unknown', who: '' }),
+    whoOf: () => '',
     loadAccounts: async () => [
       {
         id: 'claude:a@x.com', provider: 'claude', email: 'a@x.com', path: '/tmp/a.json',
@@ -44,7 +46,9 @@ mock.module('../src/server/creds.js', {
   },
 });
 
-const { refreshAccountUsage } = await import('../src/server/refresh.js');
+const { refreshAccountUsage, nextRefreshDelay, shouldRefreshUsage } = await import(
+  '../src/server/refresh.js'
+);
 const { nextSendWindow } = await import('../src/server/ratelimit.js');
 const { Store } = await import('../src/server/store.js');
 
@@ -113,4 +117,100 @@ test('账户不存在时交白卷，由调用方给 404', async () => {
   const store = makeStore();
   assert.equal(await refreshAccountUsage(store, 'claude:nobody@x.com'), null);
   store.close();
+});
+
+/**
+ * 界面上的刷新按钮和后台定时器走的是同一个 refreshOne，两边都得把这一轮的查询时刻写回：
+ * 调度器读缓存时靠 usage_checked_at 判断这份窗口新不新，时刻不往前走，它就分不出
+ * 手里这份是刚查的还是上一轮的。
+ */
+test('刷新把这一轮的查询时刻写回，后一轮盖过前一轮', async () => {
+  const store = makeStore();
+  const resetAt = Date.now() + 300 * 60_000;
+  usageOk = true;
+  usageWindows = [
+    { name: '5h', resetAt, usedPercent: 10, windowMinutes: 300, source: 'usage:5h' },
+  ];
+
+  const before = Date.now();
+  await refreshAccountUsage(store, ID);
+  const first = store.getState(ID)!;
+  assert.ok(first.usageCheckedAt >= before, '查询时刻要记下来');
+
+  // 后台定时器那一轮走的是同一条路径
+  usageWindows = [
+    { name: '5h', resetAt, usedPercent: 40, windowMinutes: 300, source: 'usage:5h' },
+  ];
+  await new Promise((r) => setTimeout(r, 20));
+  await refreshAccountUsage(store, ID);
+  const second = store.getState(ID)!;
+  assert.ok(second.usageCheckedAt > first.usageCheckedAt, '时刻要跟着这一轮往前走');
+  assert.equal(second.windows[0].usedPercent, 40, '窗口也是这一轮的');
+  store.close();
+});
+
+/**
+ * 后台刷新的门禁：只在每日时段内刷。
+ *
+ * 时段外没有账户会发送，那时还按周期去打上游的额度接口，只是在给它自己的限流计数加数，
+ * 而那个计数和发送共用——凌晨白加的每一笔，都可能让天亮后第一拍的窗口查询撞上 429。
+ */
+const { DEFAULT_CONFIG } = await import('../src/server/config.js');
+
+function cfgWith(over: Partial<AppConfig>): AppConfig {
+  return { ...DEFAULT_CONFIG, ...over };
+}
+
+/** 今天本地时间的 HH:MM 那一刻。 */
+function todayAt(hhmm: string): number {
+  const [h, m] = hhmm.split(':').map(Number);
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  return d.getTime();
+}
+
+test('时段内按周期刷，时段外一轮都不刷', () => {
+  const cfg = cfgWith({ usageRefreshMinutes: 10, dailyStart: '06:00', dailyEnd: '23:00' });
+  assert.equal(shouldRefreshUsage(cfg, todayAt('06:00')), true, '开窗那一刻就该刷');
+  assert.equal(shouldRefreshUsage(cfg, todayAt('12:00')), true);
+  assert.equal(shouldRefreshUsage(cfg, todayAt('22:59')), true);
+  assert.equal(shouldRefreshUsage(cfg, todayAt('23:00')), false, '关窗那一刻起就停');
+  assert.equal(shouldRefreshUsage(cfg, todayAt('03:00')), false);
+});
+
+test('跨零点的时段照样认，全天时段则一直刷', () => {
+  const overnight = cfgWith({ usageRefreshMinutes: 10, dailyStart: '22:00', dailyEnd: '06:00' });
+  assert.equal(shouldRefreshUsage(overnight, todayAt('23:30')), true);
+  assert.equal(shouldRefreshUsage(overnight, todayAt('02:00')), true);
+  assert.equal(shouldRefreshUsage(overnight, todayAt('12:00')), false);
+
+  const allDay = cfgWith({ usageRefreshMinutes: 10, dailyStart: '06:00', dailyEnd: '06:00' });
+  assert.equal(shouldRefreshUsage(allDay, todayAt('03:00')), true, '两端相等是全天');
+});
+
+test('周期设成 0 就只剩手动，时段内也不刷', () => {
+  const cfg = cfgWith({ usageRefreshMinutes: 0, dailyStart: '06:00', dailyEnd: '23:00' });
+  assert.equal(shouldRefreshUsage(cfg, todayAt('12:00')), false);
+});
+
+/**
+ * 时段外醒来一次做不成任何事，因此干脆睡到开窗。但不能真睡到那一刻就不管了：用户随时可能
+ * 把时段改宽，睡过头的话，改完要等到按旧时段算出来的开窗时刻才认账。
+ */
+test('时段外睡到开窗，但以一个周期封顶', () => {
+  const cfg = cfgWith({ usageRefreshMinutes: 10, dailyStart: '06:00', dailyEnd: '23:00' });
+  const period = 10 * 60_000;
+
+  assert.equal(nextRefreshDelay(cfg, todayAt('12:00')), period, '时段内就是一个周期');
+
+  // 23:55 距开窗还有 6 小时 05 分，远超一个周期
+  assert.equal(nextRefreshDelay(cfg, todayAt('23:55')), period, '离开窗太远时按周期回来看一眼');
+
+  // 05:57 距开窗只剩 3 分钟，这时就该正好睡到开窗，而不是错过 6 分钟
+  assert.equal(nextRefreshDelay(cfg, todayAt('05:57')), 3 * 60_000, '临近开窗就睡到那一刻');
+});
+
+test('周期为 0 时仍会回来看一眼，好让改回非 0 能生效', () => {
+  const cfg = cfgWith({ usageRefreshMinutes: 0, dailyStart: '06:00', dailyEnd: '23:00' });
+  assert.equal(nextRefreshDelay(cfg, todayAt('03:00')), 10 * 60_000);
 });

@@ -9,7 +9,7 @@
  * 而不会与 creds.ts 形成循环依赖。认不出来的一律返回 null，由调用方决定怎么提示。
  * Qoder 的来源不是 JSON 文件而是一个加密的 SQLite 库，那部分委托给 qoder.ts。
  */
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { profileOf, qoderStateDbPath, readQoderSnapshot } from './qoder.js';
@@ -31,6 +31,16 @@ export interface ClientTokens {
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
+}
+
+/** 这个路径上有没有东西。判断“客户端装没装”只看文件在不在，读不读得动是下一步的事。 */
+export async function fileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function readJsonFile(path: string): Promise<Record<string, unknown> | null> {
@@ -74,7 +84,7 @@ export async function readClaudeCodeEmail(): Promise<string> {
 }
 
 /** Claude Code：令牌挂在 claudeAiOauth 下，到期时间是毫秒时间戳。 */
-export async function readClaudeCodeFile(path: string): Promise<ClientTokens | null> {
+async function readClaudeCodeFile(path: string): Promise<ClientTokens | null> {
   const data = await readJsonFile(path);
   const oauth = data?.claudeAiOauth;
   if (!oauth || typeof oauth !== 'object') return null;
@@ -88,7 +98,7 @@ export async function readClaudeCodeFile(path: string): Promise<ClientTokens | n
 }
 
 /** Codex CLI：令牌挂在 tokens 下，文件本身不记到期时间。 */
-export async function readCodexCliFile(path: string): Promise<ClientTokens | null> {
+async function readCodexCliFile(path: string): Promise<ClientTokens | null> {
   const data = await readJsonFile(path);
   const tokens = data?.tokens;
   if (!tokens || typeof tokens !== 'object') return null;
@@ -100,7 +110,7 @@ export async function readCodexCliFile(path: string): Promise<ClientTokens | nul
  * 与 clientsync.ts 写回时用的那一组一一对应。它不存 id_token，因此身份只能靠
  * accountId 和 access_token 本身来认。
  */
-export async function readOpencodeFile(path: string): Promise<ClientTokens | null> {
+async function readOpencodeFile(path: string): Promise<ClientTokens | null> {
   const data = await readJsonFile(path);
   const openai = data?.openai;
   if (!openai || typeof openai !== 'object') return null;
@@ -119,7 +129,7 @@ export async function readOpencodeFile(path: string): Promise<ClientTokens | nul
 }
 
 /** cli-proxy-api：字段名与我们自己的存储一致，到期时间是 ISO 串。 */
-export async function readCliProxyApiFile(path: string): Promise<ClientTokens | null> {
+async function readCliProxyApiFile(path: string): Promise<ClientTokens | null> {
   const data = await readJsonFile(path);
   if (!data) return null;
   const expired = Date.parse(str(data.expired));
@@ -133,7 +143,7 @@ export async function readCliProxyApiFile(path: string): Promise<ClientTokens | 
  * Qoder 没有可用的 refresh_token 链路，令牌也不一定带 exp，因此这两项常常为空——
  * 跟随模式下每次都回到这个库里重读一遍即可，成本只是一次本地 SQLite 查询。
  */
-export async function readQoderIdeFile(path = qoderStateDbPath()): Promise<ClientTokens | null> {
+async function readQoderIdeFile(path = qoderStateDbPath()): Promise<ClientTokens | null> {
   let profile: ReturnType<typeof profileOf>;
   try {
     profile = profileOf(readQoderSnapshot(path));
@@ -202,9 +212,14 @@ export function followSourceOf(
   return null;
 }
 
-const CLIENT_LABELS: Record<string, string> = {
+/**
+ * 各客户端在界面和日志里的名字。
+ * 认得出格式的都列在这儿，包括不会被跟随的 OpenCode——「本机在用」的标记要报它的名字。
+ */
+export const CLIENT_LABELS: Record<string, string> = {
   'claude-cli': 'Claude Code',
   'codex-cli': 'Codex CLI',
+  opencode: 'OpenCode',
   'qoder-ide': 'Qoder IDE',
 };
 

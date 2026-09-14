@@ -25,11 +25,11 @@ import { diagnose, qoderHeaders, type QoderMachine } from './headers.js';
 import type { Account } from './creds.js';
 import type { UsageResult, Window } from '../shared/types.js';
 
-export const QODER_OPENAPI_BASE = 'https://openapi.qoder.sh';
+const QODER_OPENAPI_BASE = 'https://openapi.qoder.sh';
 /** 额度总览；这是本模块唯一必须成功的请求。 */
-export const QODER_QUOTA_PATH = '/api/v2/quota/usage';
+const QODER_QUOTA_PATH = '/api/v2/quota/usage';
 /** 套餐名称；拿不到就退回 state.vscdb 里缓存的那份，因此失败不影响结果。 */
-export const QODER_PLAN_PATH = '/api/v2/user/plan';
+const QODER_PLAN_PATH = '/api/v2/user/plan';
 
 /** IDE 把这三段 JSON 分别加密后存进 ItemTable。 */
 const SECRET_USER_INFO = 'secret://aicoding.auth.userInfo';
@@ -168,7 +168,7 @@ function decryptCbc(payload: Buffer, key: Buffer): string {
  * Windows 用的是 DPAPI + AES-256-GCM，密钥只能通过 Win32 API 拿到，纯 Node 做不了——
  * 那里如实报错，而不是给出一段乱码让用户以为是别的问题。
  */
-export function decryptSafeStorage(encrypted: Buffer): string {
+function decryptSafeStorage(encrypted: Buffer): string {
   const prefix = encrypted.subarray(0, 3).toString('latin1');
   if (prefix !== 'v10' && prefix !== 'v11') {
     throw new Error(`无法识别的 safeStorage 密文前缀: ${JSON.stringify(prefix)}`);
@@ -568,7 +568,7 @@ async function fetchPlan(
  * `deviceToken/poll` 把令牌取回来。授权页的 redirect_uri 是 `qoder://` 自定义协议，
  * 本机监听接不住，所以这条链路只能靠服务端轮询收尾——反过来说，用户也不用粘贴任何东西。
  */
-export const QODER_DEVICE_LOGIN_URL = 'https://qoder.com/device/selectAccounts';
+const QODER_DEVICE_LOGIN_URL = 'https://qoder.com/device/selectAccounts';
 /** 授权页要求的回调地址，必须与官方 IDE 注册的完全一致，否则页面会拒绝。 */
 export const QODER_DEVICE_REDIRECT_URI = 'qoder://aicoding.aicoding-agent/login-success';
 const QODER_DEVICE_POLL_PATH = '/api/v1/deviceToken/poll';

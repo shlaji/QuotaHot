@@ -11,7 +11,7 @@ import type { AppConfig } from '../shared/types.js';
  * 从哪个路径启动都读到同一份配置和账户，systemd 单元也不必再指定 WorkingDirectory。
  */
 export const DATA_DIR = process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), '.quotahot');
-export const CONFIG_PATH = join(DATA_DIR, 'config.json');
+const CONFIG_PATH = join(DATA_DIR, 'config.json');
 export const DB_PATH = join(DATA_DIR, 'state.db');
 /** 程序自己的账户目录；凭证从别处导入后就只在这里读写。 */
 export const ACCOUNTS_DIR = join(DATA_DIR, 'accounts');
@@ -31,6 +31,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   retryBackoffSeconds: 30,
   models: { claude: 'claude-sonnet-5', codex: 'gpt-5.6-luna' },
   usageRefreshMinutes: 10,
+  clientCheckMinutes: 5,
   include: [],
   exclude: [],
   proxy: 'http://127.0.0.1:7897',
@@ -45,6 +46,9 @@ export const DEFAULT_CONFIG: AppConfig = {
     '169.254.0.0/16',
     '100.64.0.0/10',
   ],
+  // 全新安装时不自动跑：用户还没点过一次启动，就不该替他开始发送
+  autoStart: false,
+  autoStartIds: [],
 };
 
 function clampNumber(v: unknown, fallback: number, min: number, max: number): number {
@@ -95,10 +99,13 @@ export function normalize(raw: unknown): AppConfig {
       codex: String(r.models?.codex ?? d.models.codex).trim() || d.models.codex,
     },
     usageRefreshMinutes: clampNumber(r.usageRefreshMinutes, d.usageRefreshMinutes, 0, 1440),
+    clientCheckMinutes: clampNumber(r.clientCheckMinutes, d.clientCheckMinutes, 0, 1440),
     include: toStringArray(r.include),
     exclude: toStringArray(r.exclude),
     proxy: typeof r.proxy === 'string' ? r.proxy.trim() : d.proxy,
     noProxy: toStringArray(r.noProxy),
+    autoStart: Boolean(r.autoStart),
+    autoStartIds: toStringArray(r.autoStartIds),
   };
 }
 

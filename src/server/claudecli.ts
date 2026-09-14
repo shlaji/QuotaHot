@@ -27,7 +27,7 @@ import type { RequestRecord } from '../shared/types.js';
 import { DATA_DIR } from './config.js';
 
 /** CLI 启动加上模型回一句短话，正常在十几秒内结束；余量是留给代理链路抖动的。 */
-export const DEFAULT_TIMEOUT_MS = 180_000;
+const DEFAULT_TIMEOUT_MS = 180_000;
 /** SIGTERM 之后还赖着不走就不再等了。 */
 const KILL_GRACE_MS = 5_000;
 /** 连 SIGKILL 都没能让 'close' 到来时的兜底，见 spawnOnce 里的说明。 */
@@ -123,7 +123,7 @@ async function listFlags(command: string): Promise<Set<string>> {
 const flagCache = new Map<string, Promise<Set<string>>>();
 
 /** 同一个可执行文件只探测一次：这个进程里它不会中途换版本。 */
-export async function optionalFlags(command: string): Promise<string[]> {
+async function optionalFlags(command: string): Promise<string[]> {
   let probe = flagCache.get(command);
   if (probe === undefined) {
     probe = listFlags(command);
@@ -278,8 +278,8 @@ export function parseResult(stdout: string): CliResult | null {
  *   `Claude usage limit reached`
  *   `You've hit your weekly limit · resets 10pm (Asia/Singapore)`
  *   `5-hour limit reached · resets 3am`
- * 认不出来的后果不是少记一条日志，而是这一发被当成接口故障：重试若干次后
- * 账户被判为“连续失败过多”直接停掉，保活就此中断——所以宁可把 limit 认宽一点。
+ * 认不出来的后果不是少记一条日志，而是这一发被当成接口故障：重试若干次都白重试，
+ * 下一拍还要照失败退避排，等额度真重置了也没人去发——所以宁可把 limit 认宽一点。
  */
 const LIMIT_RE =
   /usage limit reached|rate[_ -]?limit|\b429\b|too many requests|(?:hit|reached|exceeded|out of)[^.\n]{0,40}\blimits?\b|\blimits?\b[^.\n]{0,20}(?:reached|exceeded)|quota exceeded/i;

@@ -66,3 +66,18 @@ test('自定义模型 ID 能存下来，清单只是建议而非白名单', () =
   assert.equal(blank.models.claude, DEFAULT_CONFIG.models.claude);
   assert.equal(blank.models.codex, DEFAULT_CONFIG.models.codex);
 });
+
+test('自动启动是用户意图，全新配置默认关着', () => {
+  assert.equal(DEFAULT_CONFIG.autoStart, false, '还没点过启动就替用户发送，不合适');
+  assert.deepEqual(DEFAULT_CONFIG.autoStartIds, []);
+
+  // 记下来的那一份要能原样读回来，否则重启之后恢复的是错的一批账户
+  const kept = normalize({ autoStart: true, autoStartIds: ['codex:a@x.com'] });
+  assert.equal(kept.autoStart, true);
+  assert.deepEqual(kept.autoStartIds, ['codex:a@x.com']);
+
+  // 老配置文件里没有这两个字段，按“关着”读，而不是读成 undefined 往下传
+  const legacy = normalize({ dailyStart: '06:00' });
+  assert.equal(legacy.autoStart, false);
+  assert.deepEqual(legacy.autoStartIds, []);
+});

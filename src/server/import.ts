@@ -163,7 +163,7 @@ async function readQoderIde(path: string): Promise<AccountInput[]> {
 }
 
 /** 已知来源；每一处都是对应客户端在本机的固定位置，不需要用户配置。 */
-export function knownSources(): Source[] {
+function knownSources(): Source[] {
   return [
     {
       id: 'cli-proxy-api',

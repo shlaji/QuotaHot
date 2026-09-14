@@ -20,12 +20,23 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS account_state (
   account_id TEXT PRIMARY KEY,
   next_due_at TEXT,
+  -- next_due_at 是照哪个重置时刻排出来的；重启续跑时要拿它接回排期依据，
+  -- 不能借用 last_reset_at——那一列会被后台额度刷新覆盖成「当前跟踪窗口」
+  planned_reset_at TEXT,
   last_sent_at TEXT,
   last_reset_at TEXT,
   last_source TEXT NOT NULL DEFAULT '',
   used_percent REAL,
   consecutive_failures INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT NOT NULL DEFAULT ''
+  last_error TEXT NOT NULL DEFAULT '',
+  plan TEXT NOT NULL DEFAULT '',
+  subscription_ends_at TEXT,
+  usage_checked_at TEXT,
+  -- 这个是张数，不是时刻
+  reset_credits REAL,
+  reset_credits_expires_at TEXT,
+  -- 完整窗口列表以 JSON 形式保存；每账户一行比拆侧表更简单
+  windows_json TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS request_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,7 +48,9 @@ CREATE TABLE IF NOT EXISTS request_log (
   body TEXT NOT NULL DEFAULT '',
   status INTEGER NOT NULL DEFAULT 0,
   duration_ms REAL NOT NULL DEFAULT 0,
-  error TEXT NOT NULL DEFAULT ''
+  error TEXT NOT NULL DEFAULT '',
+  -- 只有状态码时，看不出上游到底在抱怨什么
+  response TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_request_log_acct ON request_log(account_id, id DESC);
 CREATE TABLE IF NOT EXISTS app_log (
@@ -50,30 +63,11 @@ CREATE TABLE IF NOT EXISTS app_log (
 CREATE INDEX IF NOT EXISTS idx_app_log_ts ON app_log(ts DESC);
 `;
 
-/**
- * 首次发布后新增的列。
- * 这里通过 ALTER TABLE 追加，而不是直接并入上面的 SCHEMA，
- * 因为 CREATE TABLE IF NOT EXISTS 对已存在表不会补列，只会悄悄跳过。
- */
-const ADDED_COLUMNS: Record<string, [string, string][]> = {
-  account_state: [
-    ['plan', "TEXT NOT NULL DEFAULT ''"],
-    ['subscription_ends_at', 'TEXT'],
-    ['usage_checked_at', 'TEXT'],
-    // 这个是张数，不是时刻
-    ['reset_credits', 'REAL'],
-    ['reset_credits_expires_at', 'TEXT'],
-    // 完整窗口列表以 JSON 形式保存；每账户一行比拆侧表更简单
-    ['windows_json', "TEXT NOT NULL DEFAULT ''"],
-  ],
-  request_log: [
-    // 响应体后补：只有状态码时，看不出上游到底在抱怨什么
-    ['response', "TEXT NOT NULL DEFAULT ''"],
-  ],
-};
-
 /** 每个账户在 request_log 里保留的条数。 */
 const REQUEST_LOG_KEEP = 200;
+
+/** app_log 里保留的总条数；界面一次最多取 1000 条，再往前的翻不到。 */
+const APP_LOG_KEEP = 2000;
 
 /** 一次真实发送的结果，只用来推进 account_state。 */
 export interface SendRecord {
@@ -95,6 +89,8 @@ export interface AccountState {
   usedPercent: number | null;
   consecutiveFailures: number;
   lastError: string;
+  /** nextDueAt 是照哪个重置时刻排出来的；0 表示这一拍不是照窗口排的。 */
+  plannedResetAt: number;
   plan: string;
   subscriptionEndsAt: number;
   usageCheckedAt: number;
@@ -121,21 +117,6 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec(SCHEMA);
-    this.migrate();
-  }
-
-  /** 给已存在的旧数据库补上后续版本新增的列。 */
-  private migrate(): void {
-    for (const [table, columns] of Object.entries(ADDED_COLUMNS)) {
-      const existing = new Set(
-        (this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[]).map(
-          (r) => String(r.name),
-        ),
-      );
-      for (const [name, decl] of columns) {
-        if (!existing.has(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
-      }
-    }
   }
 
   getState(accountId: string): AccountState | null {
@@ -150,20 +131,28 @@ export class Store {
     return new Map(rows.map((r) => [String(r.account_id), mapState(r)]));
   }
 
-  setNextDue(accountId: string, ts: number): void {
+  /**
+   * 记下这一拍排在什么时候，以及它是照哪个重置时刻排出来的。
+   *
+   * 两列一起写：分开写的话，进程恰好死在中间时，恢复出来的排期和它的依据对不上，
+   * 等待期第一次核对就会白改一次期。
+   */
+  setNextDue(accountId: string, ts: number, plannedResetAt = 0): void {
     this.db
       .prepare(
-        `INSERT INTO account_state (account_id, next_due_at) VALUES (?, ?)
-         ON CONFLICT(account_id) DO UPDATE SET next_due_at = excluded.next_due_at`,
+        `INSERT INTO account_state (account_id, next_due_at, planned_reset_at) VALUES (?, ?, ?)
+         ON CONFLICT(account_id) DO UPDATE SET
+           next_due_at = excluded.next_due_at,
+           planned_reset_at = excluded.planned_reset_at`,
       )
-      .run(accountId, toDateText(ts));
+      .run(accountId, toDateText(ts), toDateText(plannedResetAt));
   }
 
   /**
    * 把连续失败计数清零。
    *
    * 「额度还没重置」不是失败：上游拒绝这一发完全正常，记进计数器只会让一个健康的账户
-   * 在几轮之后被判成“连续失败过多”而停掉。
+   * 在界面上挂着一串“连续失败”，真出故障时反倒看不出来。
    */
   clearFailures(accountId: string): void {
     this.db
@@ -335,14 +324,25 @@ export class Store {
       status: Number(r.status),
       durationMs: Number(r.duration_ms),
       error: String(r.error),
-      response: String(r.response ?? ''),
+      response: String(r.response),
     }));
   }
 
+  /**
+   * 记一条给人看的日志。
+   *
+   * 和 request_log 一样是滚动的，只留最近 APP_LOG_KEEP 条：这是个常驻服务，不裁就一直长，
+   * 而超出界面取数上限的那些行谁也翻不到。
+   */
   appendLog(entry: Omit<LogEntry, 'id'>): LogEntry {
     const info = this.db
       .prepare('INSERT INTO app_log (ts, level, account_id, message) VALUES (?, ?, ?, ?)')
       .run(toDateText(entry.ts), entry.level, entry.accountId, entry.message);
+    this.db
+      .prepare(
+        'DELETE FROM app_log WHERE id NOT IN (SELECT id FROM app_log ORDER BY id DESC LIMIT ?)',
+      )
+      .run(APP_LOG_KEEP);
     return { ...entry, id: Number(info.lastInsertRowid) };
   }
 
@@ -380,9 +380,7 @@ function toDateText(ms: number | null | undefined): string | null {
 
 /** 库里的日期文本 → 毫秒时间戳。认不出来就当没有，绝不返回 NaN 让它往上游荡。 */
 function toMs(raw: unknown): number {
-  if (raw === null || raw === undefined || raw === '') return 0;
-  // 1.0.1 及更早的库里这一列是毫秒数，手工接着用时还认得出来
-  if (typeof raw === 'number') return raw;
+  if (raw === null || raw === '') return 0;
   const ms = Date.parse(String(raw));
   return Number.isNaN(ms) ? 0 : ms;
 }
@@ -425,13 +423,12 @@ function mapState(r: Record<string, unknown>): AccountState {
     lastSource: String(r.last_source),
     usedPercent: r.used_percent === null ? null : Number(r.used_percent),
     consecutiveFailures: Number(r.consecutive_failures),
-    lastError: String(r.last_error ?? ''),
-    plan: String(r.plan ?? ''),
+    lastError: String(r.last_error),
+    plannedResetAt: toMs(r.planned_reset_at),
+    plan: String(r.plan),
     subscriptionEndsAt: toMs(r.subscription_ends_at),
     usageCheckedAt: toMs(r.usage_checked_at),
-    resetCredits: r.reset_credits === null || r.reset_credits === undefined
-      ? null
-      : Number(r.reset_credits),
+    resetCredits: r.reset_credits === null ? null : Number(r.reset_credits),
     resetCreditsExpiresAt: toMsOrNull(r.reset_credits_expires_at),
     windows: parseWindows(r.windows_json),
   };

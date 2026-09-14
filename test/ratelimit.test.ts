@@ -103,21 +103,6 @@ test('限额解析接受 undici 的 Headers（不能依赖 instanceof 全局 Hea
   assert.ok(rl.parseRetryAfter({ 'Retry-After': '120' }, now), '普通对象的 retry-after');
 });
 
-test('nextReset 只看还没到点的窗口，全过去了就交白卷', () => {
-  const w = (name: string, offset: number) => ({
-    name,
-    resetAt: now + offset,
-    usedPercent: 100,
-    windowMinutes: null,
-    source: 'h',
-  });
-  // 「还有窗口没到点」正是判断“这是额度限制而不是接口故障”的依据
-  assert.equal(rl.nextReset([w('7d', 90_000), w('5h', 30_000)], now)!.name, '5h');
-  assert.equal(rl.nextReset([w('5h', -1), w('7d', 60_000)], now)!.name, '7d');
-  assert.equal(rl.nextReset([w('5h', -1_000)], now), null);
-  assert.equal(rl.nextReset([], now), null);
-});
-
 /**
  * 真实事故的回归：周额度用满，5 小时窗口一小时后就重置，调度器跟着更早的那个排，
  * 于是一小时后发出去又被顶回来——周额度没到点之前，发几次都是一样的结果。

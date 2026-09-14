@@ -7,6 +7,7 @@ import { streamSSE } from 'hono/streaming';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  loadAccount,
   loadAccounts,
   ensureFresh,
   refreshViaOAuth,
@@ -19,9 +20,16 @@ import { syncToClient } from './clientsync.js';
 import { catalogFor, clearCatalogCache } from './catalog.js';
 import { importFrom, importIfEmpty, scanSources } from './import.js';
 import { cancelLogin, completeLogin, loginStatus, startLogin } from './oauth.js';
-import { refreshAccountUsage, refreshUsage } from './refresh.js';
+import {
+  nextRefreshDelay,
+  refreshAccountUsage,
+  refreshUsage,
+  shouldRefreshUsage,
+} from './refresh.js';
+import { refreshClientsInUse } from './inuse.js';
 import { Store } from './store.js';
-import { Scheduler, selectAccounts, selectSchedulable } from './scheduler.js';
+import { Scheduler } from './scheduler.js';
+import { selectAccounts, selectSchedulable } from './accounts-view.js';
 import * as bus from './bus.js';
 import * as cfgMod from './config.js';
 import { EMBEDDED_ASSETS } from './assets.js';
@@ -56,16 +64,51 @@ try {
 }
 const scheduler = new Scheduler(store, config);
 
+/** 把最新的账户列表推给所有界面；凡是改动了账户或调度状态的路由都以它收尾。 */
+async function pushAccounts(): Promise<void> {
+  bus.emit({ type: 'accounts', accounts: await scheduler.snapshot() });
+}
+
+/**
+ * 记下用户这一次是让调度跑着还是停着，下次进程起来时照着恢复。
+ *
+ * 只有界面上的启动/停止会调它。写进 config.json 而不是状态库，是为了让无人值守的
+ * 部署可以直接把 `"autoStart": true` 写进配置文件，不必先开一次界面点一下。
+ */
+async function rememberAutoStart(autoStart: boolean, ids: string[]): Promise<void> {
+  const next: AppConfig = { ...scheduler.getConfig(), autoStart, autoStartIds: ids };
+  scheduler.setConfig(next);
+  await cfgMod.saveConfig(next);
+}
+
+/**
+ * 按上次的意图把调度跑起来。
+ *
+ * 没有这一步的话，`Restart=always` 只保证 Web 服务活着：进程崩溃或机器重启之后，
+ * 保活循环停在那儿，要等有人打开界面点一次启动才继续——而界面上每个账户的
+ * 「下次发送」倒计时照走不误（它读的是库里的 nextDue），所以这件事没人看得出来。
+ * 库里那份 nextDue 也正是在这条路上被接回去的，见 Scheduler.runAccount。
+ */
+async function autoStartScheduler(): Promise<void> {
+  if (!config.autoStart) return;
+  // 等首次导入落地：全新装机那一轮账户还在从 cli-proxy-api 搬过来，
+  // 抢在它前面启动只会看到一个空目录，然后报「没有可保活的账户」
+  await firstRunImport;
+  const ids = config.autoStartIds;
+  console.log(`自动启动调度: ${ids.length > 0 ? ids.join(', ') : '全部可保活账户'}`);
+  await scheduler.start(ids);
+}
+
 // 首次运行时把 cli-proxy-api 的账户搬进自己的目录，让升级上来的用户不必先手动导入。
 // 不挡在启动前面：迁移只在首次运行时真的做事，而顶层 await 会挡住 CommonJS 打包。
 // 界面可能比迁移先一步打开，因此完成后补推一次账户列表。
-void importIfEmpty(cfgMod.ACCOUNTS_DIR)
+const firstRunImport = importIfEmpty(cfgMod.ACCOUNTS_DIR)
   .then(async (migrated) => {
     if (!migrated) return;
     console.log(
       `已从 ${cfgMod.CLI_PROXY_API_DIR} 导入 ${migrated.imported.length} 个账户到 ${cfgMod.ACCOUNTS_DIR}`,
     );
-    bus.emit({ type: 'accounts', accounts: await scheduler.snapshot() });
+    await pushAccounts();
   })
   .catch((err) => console.error(`导入 cli-proxy-api 账户失败: ${String(err)}`));
 
@@ -95,6 +138,12 @@ api.put('/config', async (c) => {
   const err = cfgMod.validateSchedule(raw) ?? validateProxy(next.proxy);
   if (err) return c.json({ error: err }, 400);
 
+  // autoStart 记的是用户点没点过启动，不是设置项：界面保存一次设置就把它连带清掉的话，
+  // 重启之后保活就不会自己跑起来了，而这件事在界面上看不出来
+  const cur = scheduler.getConfig();
+  next.autoStart = cur.autoStart;
+  next.autoStartIds = cur.autoStartIds;
+
   // 运行中改配置只影响下一拍，不会中断当前这次等待
   scheduler.setConfig(next);
   await cfgMod.saveConfig(next);
@@ -110,11 +159,16 @@ api.post('/scheduler/start', async (c) => {
   const body = await c.req.json<{ ids?: unknown }>().catch(() => ({}) as { ids?: unknown });
   const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
   await scheduler.start(ids);
+  // 真跑起来了才记：start() 也可能因为一个可保活账户都没有而放弃，
+  // 把那一次记下来只会让每次重启都重演一遍同样的失败
+  if (scheduler.status().running) await rememberAutoStart(true, ids);
   return c.json(scheduler.status());
 });
 
 api.post('/scheduler/stop', async (c) => {
   await scheduler.stop();
+  // 用户自己按的停止才算数；收到 SIGTERM 时内部那次 stop() 不走这里，见 AppConfig.autoStart
+  await rememberAutoStart(false, scheduler.getConfig().autoStartIds);
   return c.json(scheduler.status());
 });
 
@@ -135,7 +189,7 @@ api.get('/accounts/:id/requests', async (c) => {
   // 这条路由只是“看日志”，不该因为凭证出问题就整个失败：刷新失败也好、
   // 账户文件读不动也好，都退回占位符继续把日志给出去。
   try {
-    const account = (await loadAccounts(cfgMod.ACCOUNTS_DIR)).find((a) => a.id === id);
+    const account = await loadAccount(cfgMod.ACCOUNTS_DIR, id);
     if (account && (await ensureFresh(account, () => {}))) {
       const page: RequestLogPage = {
         rows,
@@ -157,9 +211,11 @@ api.post('/accounts/:id/usage', async (c) => {
   } catch (err) {
     return c.json({ error: (err as Error).message }, 400);
   }
-  const result = await refreshAccountUsage(store, decodeURIComponent(c.req.param('id')));
+  const id = decodeURIComponent(c.req.param('id'));
+  const result = await refreshAccountUsage(store, id);
   if (result === null) return c.json({ error: '找不到该账户' }, 404);
-  bus.emit({ type: 'accounts', accounts: await scheduler.snapshot() });
+  scheduler.usageChanged([id]);
+  await pushAccounts();
   return c.json(result);
 });
 
@@ -195,8 +251,10 @@ api.post('/usage', async (c) => {
     return c.json({ error: (err as Error).message }, 400);
   }
   const results = await refreshUsage(store, cfg, body.ids);
+  // 等着的账户就靠这份新数据改期，叫醒它们，别让用户盯着一个不动的倒计时等下一次醒来
+  scheduler.usageChanged(body.ids ?? []);
   // 卡片上的数字来自 store，因此刷新完要把最新快照主动推给前端
-  bus.emit({ type: 'accounts', accounts: await scheduler.snapshot() });
+  await pushAccounts();
   return c.json(results);
 });
 
@@ -208,7 +266,9 @@ api.post('/accounts/import', async (c) => {
   const sources = Array.isArray(body.sources) ? body.sources.map(String) : [];
   try {
     const result = await importFrom(cfgMod.ACCOUNTS_DIR, sources);
-    bus.emit({ type: 'accounts', accounts: await scheduler.snapshot() });
+    // 刚导进来的多半正是本机客户端此刻用着的那个账户，顺手认一次，标记不必等下一个核对周期
+    await checkClients();
+    await pushAccounts();
     return c.json(result);
   } catch (err) {
     return c.json({ error: (err as Error).message }, 400);
@@ -238,7 +298,7 @@ api.patch('/accounts/:id', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { autoRefresh?: unknown };
   if (typeof body.autoRefresh !== 'boolean') return c.json({ error: '需要 autoRefresh 布尔值' }, 400);
 
-  const account = (await loadAccounts(cfgMod.ACCOUNTS_DIR)).find((a) => a.id === id);
+  const account = await loadAccount(cfgMod.ACCOUNTS_DIR, id);
   if (!account) return c.json({ error: '找不到该账户' }, 404);
   // Qoder 根本没有 refresh 端点（见 creds.ensureFresh：它一律回 IDE 的库里重读），
   // 允许切到自动刷新只会在界面上摆出一个并不存在的模式
@@ -261,7 +321,7 @@ api.patch('/accounts/:id', async (c) => {
       ? `注意：${check.label} 上登录的还是这个账户，本程序刷新后它手里那份会立刻失效，需要时用「同步账户」写回去`
       : '';
   }
-  bus.emit({ type: 'accounts', accounts: await scheduler.snapshot() });
+  await pushAccounts();
   const result: AutoRefreshResult = { id, autoRefresh: body.autoRefresh, note };
   return c.json(result);
 });
@@ -285,7 +345,7 @@ api.post('/accounts/:id/refresh-token', async (c) => {
     return c.json({ error: (err as Error).message }, 400);
   }
 
-  const account = (await loadAccounts(cfgMod.ACCOUNTS_DIR)).find((a) => a.id === id);
+  const account = await loadAccount(cfgMod.ACCOUNTS_DIR, id);
   if (!account) return c.json({ error: '找不到该账户' }, 404);
   if (account.provider === 'qoder') {
     return c.json({ error: 'Qoder 没有可用的 refresh 端点，请在 Qoder IDE 里重新登录后再同步进来' }, 400);
@@ -302,7 +362,7 @@ api.post('/accounts/:id/refresh-token', async (c) => {
   log('info', `手动更新 token（原有效期至 ${before ? new Date(before).toLocaleString() : '未知'}）`);
   const ok = await refreshViaOAuth(account, log);
   if (ok) scheduler.adoptTokens(account);
-  bus.emit({ type: 'accounts', accounts: await scheduler.snapshot() });
+  await pushAccounts();
   if (!ok) return c.json({ error: '刷新失败，原因见日志面板和该账户的请求日志' }, 502);
 
   const result: ForceRefreshResult = { accountId: id, expiresAt: account.expiresAt };
@@ -321,7 +381,7 @@ api.post('/accounts/:id/refresh-token', async (c) => {
  */
 api.post('/accounts/:id/sync-to-client', async (c) => {
   const id = decodeURIComponent(c.req.param('id'));
-  const account = (await loadAccounts(cfgMod.ACCOUNTS_DIR)).find((a) => a.id === id);
+  const account = await loadAccount(cfgMod.ACCOUNTS_DIR, id);
   if (!account) return c.json({ error: '找不到该账户' }, 404);
 
   const log = (level: 'info' | 'warn' | 'error', msg: string) => scheduler.log(level, id, msg);
@@ -346,6 +406,8 @@ api.post('/accounts/:id/sync-to-client', async (c) => {
     if (results.every((r) => r.error)) {
       return c.json({ error: results.map((r) => `${r.label}: ${r.error}`).join('；') }, 400);
     }
+    // 刚刚改的正是「这台电脑在用哪个账户」的依据，别让列表上的标记等到下一个核对周期
+    await checkClients();
     return c.json(results);
   } catch (err) {
     const message = (err as Error).message;
@@ -356,10 +418,10 @@ api.post('/accounts/:id/sync-to-client', async (c) => {
 
 api.delete('/accounts/:id', async (c) => {
   const id = decodeURIComponent(c.req.param('id'));
-  const account = (await loadAccounts(cfgMod.ACCOUNTS_DIR)).find((a) => a.id === id);
+  const account = await loadAccount(cfgMod.ACCOUNTS_DIR, id);
   if (!account) return c.json({ error: '找不到该账户' }, 404);
   await deleteAccount(account.path);
-  bus.emit({ type: 'accounts', accounts: await scheduler.snapshot() });
+  await pushAccounts();
   return c.json({ removed: id });
 });
 
@@ -390,7 +452,7 @@ api.post('/login/start', async (c) => {
     return c.json({ error: (err as Error).message }, 400);
   }
   // 监听路径在浏览器那边收尾，没有请求可以借力推送，因此这里预先挂一个回调
-  const notify = () => void scheduler.snapshot().then((accounts) => bus.emit({ type: 'accounts', accounts }));
+  const notify = () => void pushAccounts();
   try {
     return c.json(await startLogin(provider, cfgMod.ACCOUNTS_DIR, notify, mode));
   } catch (err) {
@@ -413,7 +475,7 @@ api.post('/login/complete', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { loginId?: unknown; input?: unknown };
   try {
     const id = await completeLogin(cfgMod.ACCOUNTS_DIR, String(body.loginId ?? ''), String(body.input ?? ''));
-    bus.emit({ type: 'accounts', accounts: await scheduler.snapshot() });
+    await pushAccounts();
     return c.json({ accountId: id });
   } catch (err) {
     return c.json({ error: (err as Error).message }, 400);
@@ -486,13 +548,18 @@ api.get('/events', (c) =>
       while (queue.length > 0) {
         await stream.writeSSE({ data: queue.shift()! });
       }
-      // 每 25 秒发一次心跳，避免链路中的代理因空闲超时而断开
+      // 每 25 秒发一次心跳，避免链路中的代理因空闲超时而断开。
+      // 事件先到时要把心跳定时器清掉：否则每来一个事件都留下一个空跑 25 秒的 timer。
+      let heartbeat: ReturnType<typeof setTimeout> | undefined;
       await Promise.race([
         new Promise<void>((r) => {
           wake = r;
         }),
-        new Promise<void>((r) => setTimeout(r, 25_000)),
+        new Promise<void>((r) => {
+          heartbeat = setTimeout(r, 25_000);
+        }),
       ]);
+      clearTimeout(heartbeat);
       wake = null;
       if (!closed) await stream.writeSSE({ event: 'ping', data: '' });
     }
@@ -531,16 +598,24 @@ if (EMBEDDED_ASSETS.size > 0) {
 
 /**
  * 后台定时刷新额度，让卡片无需手动点击也能显示最新数字。
+ *
+ * 只在每日时段内刷新。时段外没有账户会发送，卡片上的数字也没人在看，整夜去打上游的额度接口
+ * 只会给它自己的限流计数加数——而那个计数是和发送共用的，凌晨白加的每一笔，都可能让天亮后
+ * 第一拍的窗口查询撞上 429。想在时段外看一眼，界面上点「查询额度」照样查得动。
+ *
  * 每轮从结束时重新安排下一轮，而不是固定间隔硬触发，以免慢轮次不断堆积。
  */
 let refreshTimer: NodeJS.Timeout | null = null;
 
 async function refreshLoop(): Promise<void> {
   const cfg = scheduler.getConfig();
-  if (cfg.usageRefreshMinutes > 0) {
+  if (shouldRefreshUsage(cfg)) {
     try {
       const results = await refreshUsage(store, cfg);
-      bus.emit({ type: 'accounts', accounts: await scheduler.snapshot() });
+      // 等着的账户就靠这份新数据改期，叫醒它们；查失败的那些库里没写新数据，叫了也是白叫
+      const fresh = results.filter((r) => r.ok).map((r) => r.accountId);
+      if (fresh.length > 0) scheduler.usageChanged(fresh);
+      await pushAccounts();
       const failed = results.filter((r) => !r.ok);
       if (failed.length > 0) {
         console.error(`额度刷新: ${results.length} 个账户中 ${failed.length} 个失败 · ${failed[0].error.slice(0, 120)}`);
@@ -551,9 +626,40 @@ async function refreshLoop(): Promise<void> {
     }
   }
   // 每轮都重新读取配置，让编辑从下一轮开始生效
-  const minutes = scheduler.getConfig().usageRefreshMinutes;
-  refreshTimer = setTimeout(() => void refreshLoop(), Math.max(1, minutes || 10) * 60_000);
+  refreshTimer = setTimeout(() => void refreshLoop(), nextRefreshDelay(scheduler.getConfig()));
   refreshTimer.unref();
+}
+
+/**
+ * 定时核对本机客户端在用哪个账户。
+ *
+ * 客户端那边换账户的路子不止一条：用户自己重新登录、quotahot-hook 在额度撞墙时替他切、
+ * 界面上点一次「同步账户」。这些本程序都拦不住也收不到通知，只能隔一段时间自己去看一眼，
+ * 否则账户列表上的标记就会一直停在旧结论上——那比不标还糟。
+ *
+ * 变化才写日志：没换人的那些轮次一声不吭，用户翻日志时看到的每一条都是真的换过人。
+ */
+let clientTimer: NodeJS.Timeout | null = null;
+
+async function checkClients(): Promise<void> {
+  const { changes } = await refreshClientsInUse(await loadAccounts(cfgMod.ACCOUNTS_DIR));
+  for (const change of changes) scheduler.log('info', change.accountId, change.message);
+  if (changes.length > 0) await pushAccounts();
+}
+
+async function clientLoop(): Promise<void> {
+  if (scheduler.getConfig().clientCheckMinutes > 0) {
+    try {
+      await checkClients();
+    } catch (err) {
+      // 读客户端凭证失败不该把定时器打死：文件可能只是正被对方改写到一半
+      console.error(`核对本机客户端失败: ${(err as Error).message}`);
+    }
+  }
+  // 每轮都重新读取配置，让编辑从下一轮开始生效
+  const minutes = scheduler.getConfig().clientCheckMinutes;
+  clientTimer = setTimeout(() => void clientLoop(), Math.max(1, minutes || 5) * 60_000);
+  clientTimer.unref();
 }
 
 const server = serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) => {
@@ -564,14 +670,25 @@ const server = serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) =>
   const bypass = getBypass();
   console.log(`出站代理: ${getProxy() || '直连'}${bypass.length ? ` · 忽略 ${bypass.join(', ')}` : ''}`);
   const every = config.usageRefreshMinutes;
-  console.log(`额度刷新: ${every > 0 ? `每 ${every} 分钟` : '仅手动'}`);
+  console.log(
+    `额度刷新: ${every > 0 ? `每 ${every} 分钟（仅 ${config.dailyStart}–${config.dailyEnd} 时段内）` : '仅手动'}`,
+  );
+  const check = config.clientCheckMinutes;
+  console.log(`客户端核对: ${check > 0 ? `每 ${check} 分钟` : '已关闭'}`);
+  console.log(`自动启动: ${config.autoStart ? '开（沿用上次的运行状态）' : '关'}`);
   void refreshLoop();
+  void clientLoop();
+  void autoStartScheduler().catch((err) => {
+    // 自动启动失败不该把整个服务拖下水：界面还得能打开，好让用户看见发生了什么
+    console.error(`自动启动调度失败: ${(err as Error).message}`);
+  });
 });
 
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
     console.log(`\n收到 ${sig}，正在停止…`);
     if (refreshTimer) clearTimeout(refreshTimer);
+    if (clientTimer) clearTimeout(clientTimer);
     void scheduler.stop().finally(() => {
       server.close();
       store.close();

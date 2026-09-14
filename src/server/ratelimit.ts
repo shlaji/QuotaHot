@@ -2,7 +2,7 @@
  * 把上游限额信息归一化成 Window 对象。
  *
  * 字段名按前缀正则匹配，而不是写死完整名字，因此上游即使改后缀也不至于立刻解析失败。
- * 如果完全读不出窗口，调用方应停止该账户的自动调度，而不是猜测下一次发送时间。
+ * 如果完全读不出窗口，调用方应退避着等下一个周期重来，而不是猜测下一次发送时间。
  */
 import type { Window } from '../shared/types.js';
 
@@ -178,28 +178,35 @@ export function merge(...groups: Window[][]): Window[] {
 }
 
 /**
- * 还没到点的那些重置时刻里最早的一个。
- *
- * 发送失败之后要靠它回答一个问题：这是接口坏了，还是额度压根还没重置？
- * 只要 5 小时或周窗口里还有一个没到点，上游拒绝这一发就是完全正常的，
- * 该做的是等到那一刻，而不是把账户当成故障停掉。
- */
-export function nextReset(windows: readonly Window[], nowMs: number): Window | null {
-  const pending = windows.filter((w) => w.resetAt > nowMs);
-  if (pending.length === 0) return null;
-  return pending.reduce((a, b) => (a.resetAt <= b.resetAt ? a : b));
-}
-
-/**
  * 用到这个比例就认为这个窗口是满的。
  *
  * 不写死 100 是因为上游报的百分比会被四舍五入，而且撞限之后还可能小幅回落；
  * 差几个点的窗口本来也发不出什么东西。
  */
-export const EXHAUSTED_PERCENT = 99;
+const EXHAUSTED_PERCENT = 99;
 
-export function isExhausted(w: Window): boolean {
+function isExhausted(w: Window): boolean {
   return (w.usedPercent ?? 0) >= EXHAUSTED_PERCENT;
+}
+
+/**
+ * 这个窗口管不管得着「下一发能不能发出去」。
+ *
+ * 用满的窗口和 5 小时窗口是真门槛：等多久都是应该的。其余窗口（典型情况是这一刻上游只
+ * 报得出周窗口）不是——周额度用掉三成，丝毫不妨碍 5 小时窗口被这一发打开；凭它判定
+ * 「不该发」或者把下一拍推到几天后，等于放着 5 小时窗口不管，而它多半只是已经关了，
+ * 正等着被下一发打开，不发就永远开不出来。
+ *
+ * 上游自己报出来的那条限额（source 为 cli-message）也算：它不是我们从残缺数据里推出来的
+ * 兜底，而是 CLI 在拒绝这一发时说的原话——「撞到周限，X 点重置」。把它当成管不着的窗口，
+ * cappedResetAt 会把等待砍到 5 小时，于是整整一周里每 5 小时去撞一次，每次都被顶回来，
+ * 而 noteLimited 会把失败计数清掉，日志里看着一切正常。
+ *
+ * 调度器有三处要问同一个问题——起跑该不该发、核对时改不改期、发完等多久（cappedResetAt）——
+ * 判据放在这里，三处就只有一个定义点。
+ */
+export function isThresholdWindow(w: Window): boolean {
+  return isExhausted(w) || isFiveHour(w) || w.source === 'cli-message';
 }
 
 /**
@@ -244,7 +251,7 @@ export function hasStarted(w: Window, observedAt: number): boolean {
  * 或者拿钱的额度去挡它，账户会一直等到那个窗口重置——周窗口就是好几天，而这期间
  * 每一发其实都能成功。
  */
-export function isGlobalWindow(w: Window): boolean {
+function isGlobalWindow(w: Window): boolean {
   const name = w.name.toLowerCase();
   return !/_(opus|sonnet)$/.test(name) && !name.includes('overage') && !/_oi$/.test(name);
 }
