@@ -150,7 +150,7 @@ function readClaims(data: Record<string, unknown>, acct: Account): void {
  * OpenAI 把它挂在 URL 命名空间下（'https://api.openai.com/auth' -> chatgpt_account_id），
  * 而这个前缀历史上变过，所以仍然按键名匹配而不是按完整路径取。
  */
-function accountIdOf(token: string): string {
+export function accountIdOf(token: string): string {
   const claims = decodeJwt(token);
   if (!claims) return '';
   const v = findClaim(claims, (k) => k === 'chatgpt_account_id' || k === 'account_id');
@@ -701,6 +701,16 @@ async function performOAuthRefresh(
   acct.expiresAt = Date.now() + Number(body.expires_in ?? 3600) * 1000;
   if (!acct.accountId) acct.accountId = accountIdOf(idToken || accessToken);
   await writeBack(acct);
+  try {
+    const { syncRefreshedTokenToClients } = await import('./clientsync.js');
+    for (const result of await syncRefreshedTokenToClients(acct)) {
+      if (result.error) log('warn', `刷新后写回 ${result.label} 失败: ${result.error}`);
+      else if (result.warning) log('warn', result.warning);
+      else if (result.changes.length > 0) log('info', `刷新后已更新 ${result.label} 的凭证文件 ${result.path}`);
+    }
+  } catch (error) {
+    log('warn', `刷新后同步客户端失败: ${error instanceof Error ? error.message : String(error)}`);
+  }
   log('info', `token 已刷新，有效期至 ${new Date(acct.expiresAt).toLocaleString()}`);
   return true;
 }

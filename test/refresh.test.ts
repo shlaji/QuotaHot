@@ -31,6 +31,8 @@ mock.module('../src/server/usage.js', {
 mock.module('../src/server/creds.js', {
   exports: {
     ensureFresh: async () => true,
+    accountIdMismatch: () => { throw new Error('unexpected accountIdMismatch call'); },
+    accountIdOf: () => { throw new Error('unexpected accountIdOf call'); },
     // 这几个是 import 链上别的模块要的；少一个导出，整条链都起不来
     emailOf: () => '',
     auditOf: () => ({}),

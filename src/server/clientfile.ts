@@ -84,9 +84,8 @@ export async function readClaudeCodeEmail(): Promise<string> {
 }
 
 /** Claude Code：令牌挂在 claudeAiOauth 下，到期时间是毫秒时间戳。 */
-async function readClaudeCodeFile(path: string): Promise<ClientTokens | null> {
-  const data = await readJsonFile(path);
-  const oauth = data?.claudeAiOauth;
+async function readClaudeCodeData(data: Record<string, unknown>): Promise<ClientTokens | null> {
+  const oauth = data.claudeAiOauth;
   if (!oauth || typeof oauth !== 'object') return null;
   const o = oauth as Record<string, unknown>;
   const expiresAt = Number(o.expiresAt ?? 0);
@@ -97,12 +96,21 @@ async function readClaudeCodeFile(path: string): Promise<ClientTokens | null> {
   );
 }
 
-/** Codex CLI：令牌挂在 tokens 下，文件本身不记到期时间。 */
-async function readCodexCliFile(path: string): Promise<ClientTokens | null> {
+async function readClaudeCodeFile(path: string): Promise<ClientTokens | null> {
   const data = await readJsonFile(path);
-  const tokens = data?.tokens;
+  return data ? readClaudeCodeData(data) : null;
+}
+
+/** Codex CLI：令牌挂在 tokens 下，文件本身不记到期时间。 */
+function readCodexCliData(data: Record<string, unknown>): ClientTokens | null {
+  const tokens = data.tokens;
   if (!tokens || typeof tokens !== 'object') return null;
   return tokensOf(tokens as Record<string, unknown>, 0);
+}
+
+async function readCodexCliFile(path: string): Promise<ClientTokens | null> {
+  const data = await readJsonFile(path);
+  return data ? readCodexCliData(data) : null;
 }
 
 /**
@@ -110,9 +118,8 @@ async function readCodexCliFile(path: string): Promise<ClientTokens | null> {
  * 与 clientsync.ts 写回时用的那一组一一对应。它不存 id_token，因此身份只能靠
  * accountId 和 access_token 本身来认。
  */
-async function readOpencodeFile(path: string): Promise<ClientTokens | null> {
-  const data = await readJsonFile(path);
-  const openai = data?.openai;
+function readOpencodeData(data: Record<string, unknown>): ClientTokens | null {
+  const openai = data.openai;
   if (!openai || typeof openai !== 'object') return null;
   const o = openai as Record<string, unknown>;
   const accessToken = str(o.access);
@@ -121,19 +128,27 @@ async function readOpencodeFile(path: string): Promise<ClientTokens | null> {
   return {
     accessToken,
     refreshToken: str(o.refresh),
-    idToken: '',
+    idToken: str(o.id_token) || str(o.idToken),
     accountId: str(o.accountId),
-    email: '',
+    email: str(o.email),
     expiresAt: Number.isFinite(expires) && expires > 0 ? expires : 0,
   };
 }
 
-/** cli-proxy-api：字段名与我们自己的存储一致，到期时间是 ISO 串。 */
-async function readCliProxyApiFile(path: string): Promise<ClientTokens | null> {
+async function readOpencodeFile(path: string): Promise<ClientTokens | null> {
   const data = await readJsonFile(path);
-  if (!data) return null;
+  return data ? readOpencodeData(data) : null;
+}
+
+/** cli-proxy-api：字段名与我们自己的存储一致，到期时间是 ISO 串。 */
+function readCliProxyApiData(data: Record<string, unknown>): ClientTokens | null {
   const expired = Date.parse(str(data.expired));
   return tokensOf(data, Number.isNaN(expired) ? 0 : expired);
+}
+
+async function readCliProxyApiFile(path: string): Promise<ClientTokens | null> {
+  const data = await readJsonFile(path);
+  return data ? readCliProxyApiData(data) : null;
 }
 
 /**
@@ -233,5 +248,16 @@ export async function readClientTokens(
   if (source === 'opencode') return readOpencodeFile(path);
   if (source === 'cli-proxy-api') return readCliProxyApiFile(path);
   if (source === 'qoder-ide') return readQoderIdeFile(path);
+  return null;
+}
+
+export async function tokensOfClientData(
+  source: string,
+  data: Record<string, unknown>,
+): Promise<ClientTokens | null> {
+  if (source === 'claude-cli') return readClaudeCodeData(data);
+  if (source === 'codex-cli') return readCodexCliData(data);
+  if (source === 'opencode') return readOpencodeData(data);
+  if (source === 'cli-proxy-api') return readCliProxyApiData(data);
   return null;
 }

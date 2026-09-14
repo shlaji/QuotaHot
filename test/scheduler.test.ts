@@ -102,6 +102,8 @@ mock.module('../src/server/providers.js', {
 mock.module('../src/server/creds.js', {
   exports: {
     ensureFresh: async () => tokenReady,
+    accountIdMismatch: () => { throw new Error('unexpected accountIdMismatch call'); },
+    accountIdOf: () => { throw new Error('unexpected accountIdOf call'); },
     // 调度器经 clientsync 用到它来判断目标配置文件原先属于谁，经 inuse 用后两个认出
     // 本机客户端在用哪个账户；模块里少一个导出，整条 import 链都起不来
     emailOf: () => '',

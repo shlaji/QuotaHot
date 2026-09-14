@@ -13,11 +13,26 @@
  * 2. 只改令牌相关的那几个键，其余字段（模型偏好、API key 等）逐字保留。
  * 3. 逐项报出改了什么，由调用方写进日志——用户必须知道自己的配置文件被动了哪里。
  */
-import { copyFile, mkdir, rename, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, open, rename, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileExists, readJsonFile } from './clientfile.js';
-import { emailOf, type Account } from './creds.js';
+import {
+  fileExists,
+  readJsonFile,
+} from './clientfile.js';
+import {
+  readClientCredentialSnapshot,
+  type ClientCredentialSnapshot,
+  writeVerifiedClientSnapshot,
+} from './clientfilesnapshot.js';
+import {
+  accountIdOf,
+  emailOf,
+  identityOf,
+  type Account,
+  type IdentityVerdict,
+} from './creds.js';
 import type { ConfigChange, SyncToClientResult } from '../shared/types.js';
 
 /** 认得出格式、并且确实能写回的来源。Qoder 不在其中：它的凭证在加密的 state.vscdb 里。 */
@@ -34,6 +49,10 @@ export interface SyncTarget {
   source: string;
   label: string;
   path: string;
+}
+
+export interface AutomaticSyncOptions {
+  readonly onTargetValidated?: (target: SyncTarget) => Promise<void>;
 }
 
 /** OpenCode 的凭证库：遵循 XDG，默认落在 ~/.local/share/opencode/auth.json。 */
@@ -243,7 +262,10 @@ async function writeJson(path: string, data: Record<string, unknown>): Promise<v
  * 写不进去时不抛出：一个账户可能有好几个目标，某个文件没权限不该连累另一个，
  * 失败原因原样记在结果里，由调用方报给用户。
  */
-async function syncOne(acct: Account, target: SyncTarget): Promise<SyncToClientResult> {
+async function syncOne(
+  acct: Account,
+  target: SyncTarget,
+): Promise<SyncToClientResult> {
   const base = { path: target.path, source: target.source, label: target.label };
   try {
     const created = !(await fileExists(target.path));
@@ -305,5 +327,157 @@ export async function syncToClient(
   // 一个个来而不是并发：日志里的顺序就是目标列表的顺序，用户照着看得下去
   const results: SyncToClientResult[] = [];
   for (const target of targets) results.push(await syncOne(acct, target));
+  return results;
+}
+
+function safeSkipMessage(target: SyncTarget, verdict: IdentityVerdict): string {
+  switch (verdict.kind) {
+    case 'same':
+      return '';
+    case 'other-id':
+      return `${target.label} 的凭证属于其他账户，已跳过自动写回`;
+    case 'other-email':
+      return `${target.label} 的凭证邮箱与当前账户不同，已跳过自动写回`;
+    case 'unknown':
+      return `无法确认 ${target.label} 的凭证属于当前账户，已跳过自动写回`;
+  }
+}
+
+function skippedTarget(target: SyncTarget, warning: string): SyncToClientResult {
+  return {
+    path: target.path,
+    source: target.source,
+    label: target.label,
+    created: false,
+    backupPath: '',
+    changes: [],
+    warning,
+    error: '',
+  };
+}
+
+async function syncSnapshot(
+  acct: Account,
+  target: SyncTarget,
+  snapshot: ClientCredentialSnapshot,
+  onTargetValidated?: (target: SyncTarget) => Promise<void>,
+): Promise<SyncToClientResult> {
+  const base = { path: target.path, source: target.source, label: target.label };
+  const backupPath = `${target.path}.quotahot-bak`;
+  const stagedBackupPath = `${backupPath}.${randomUUID()}.tmp`;
+  let publishedBackupPath = '';
+  try {
+    const changes = apply(snapshot.data, tokenPatches(target.source, acct));
+    if (changes.length === 0) {
+      return { ...base, created: false, backupPath: '', changes: [], warning: '', error: '' };
+    }
+    changes.push(...apply(snapshot.data, stampPatches(target.source)));
+
+    const stagedBackup = await open(stagedBackupPath, 'wx', 0o600);
+    try {
+      await stagedBackup.writeFile(snapshot.text, 'utf8');
+      await stagedBackup.sync();
+    } finally {
+      await stagedBackup.close();
+    }
+    const written = await writeVerifiedClientSnapshot(
+      target.path,
+      snapshot,
+      `${JSON.stringify(snapshot.data, null, 2)}\n`,
+      {
+        beforeWrite: onTargetValidated ? () => onTargetValidated(target) : undefined,
+        publishBackup: async () => {
+          let publicationError: unknown;
+          try {
+            await rename(stagedBackupPath, backupPath);
+            publishedBackupPath = backupPath;
+          } catch (error) {
+            publicationError = error;
+            const recoveryPath = `${backupPath}.${randomUUID()}.recovery`;
+            await rename(stagedBackupPath, recoveryPath);
+            publishedBackupPath = recoveryPath;
+          }
+          const directory = await open(dirname(target.path), 'r');
+          try {
+            await directory.sync();
+          } finally {
+            await directory.close();
+          }
+          if (publicationError) throw publicationError;
+        },
+      },
+    );
+    if (written === 'changed' || written === 'replaced') {
+      return {
+        ...skippedTarget(target, `${target.label} 的凭证已变化或不存在，已跳过自动写回`),
+        backupPath: publishedBackupPath,
+      };
+    }
+    if (written === 'failed') {
+      return {
+        ...base,
+        created: false,
+        backupPath: publishedBackupPath,
+        changes: [],
+        warning: '',
+        error: `自动写回 ${target.label} 失败，已尝试恢复原凭证；恢复副本保留在 ${publishedBackupPath}`,
+      };
+    }
+
+    return { ...base, created: false, backupPath, changes, warning: '', error: '' };
+  } catch {
+    return {
+      ...base,
+      created: false,
+      backupPath: publishedBackupPath,
+      changes: [],
+      warning: '',
+      error: `自动写回 ${target.label} 失败${publishedBackupPath ? `；恢复副本保留在 ${publishedBackupPath}` : ''}`,
+    };
+  } finally {
+    await rm(stagedBackupPath, { force: true });
+  }
+}
+
+export async function syncRefreshedTokenToClients(
+  acct: Account,
+  options: AutomaticSyncOptions = {},
+): Promise<SyncToClientResult[]> {
+  if (!acct.autoRefresh) return [];
+
+  const results: SyncToClientResult[] = [];
+  for (const target of await syncTargetsOf(acct)) {
+    if (!(await fileExists(target.path))) continue;
+
+    const snapshot = await readClientCredentialSnapshot(target.source, target.path);
+    if (!snapshot) {
+      results.push(skippedTarget(target, `无法读取 ${target.label} 的凭证，已跳过自动写回`));
+      continue;
+    }
+
+    try {
+      const tokens = snapshot.tokens;
+      const ids = [tokens.accountId, accountIdOf(tokens.idToken), accountIdOf(tokens.accessToken)].filter(Boolean);
+      const emails = [tokens.email, emailOf(tokens.idToken), emailOf(tokens.accessToken)]
+        .filter(Boolean).map((email) => email.toLowerCase());
+      const myId = acct.accountId || accountIdOf(acct.idToken) || accountIdOf(acct.accessToken);
+      if (new Set(ids).size > 1 || new Set(emails).size > 1 ||
+          ids.some((id) => Boolean(myId) && id !== myId) ||
+          emails.some((email) => acct.email.includes('@') && email !== acct.email.toLowerCase())) {
+        results.push(skippedTarget(target, `${target.label} 的令牌账户不一致，已跳过自动写回`));
+        continue;
+      }
+
+      const verdict = identityOf(snapshot.tokens, acct);
+      if (verdict.kind !== 'same') {
+        results.push(skippedTarget(target, safeSkipMessage(target, verdict)));
+        continue;
+      }
+
+      results.push(await syncSnapshot(acct, target, snapshot, options.onTargetValidated));
+    } finally {
+      await snapshot.close();
+    }
+  }
   return results;
 }

@@ -1,10 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { loadAccounts } from '../src/server/creds.js';
-import { syncTargetsOf, syncToClient } from '../src/server/clientsync.js';
+import {
+  readClientCredentialSnapshot,
+  writeVerifiedClientSnapshot,
+} from '../src/server/clientfilesnapshot.js';
+import {
+  syncRefreshedTokenToClients,
+  syncTargetsOf,
+  syncToClient,
+} from '../src/server/clientsync.js';
 
 /**
  * 把令牌写回客户端配置文件。
@@ -156,6 +164,223 @@ const codexAccount = {
   account_id: 'acct-123',
   expired: new Date(1_800_000_000_000).toISOString(),
 };
+
+function jwt(claims: Record<string, string>): string {
+  return `header.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.signature`;
+}
+
+test('自动回写只更新已存在且同账户的客户端凭证', async () => {
+  await setOpencode({
+    openai: { type: 'oauth', access: 'old-open-code', refresh: 'old-refresh', accountId: 'acct-123' },
+  });
+  const { dir, clientPath } = await fixture(
+    { ...codexAccount, source: 'codex-cli', sync_source: 'codex-cli' },
+    { name: 'auth.json', content: { tokens: { access_token: 'old-codex', account_id: 'acct-123' } } },
+  );
+
+  const [acct] = await loadAccounts(dir);
+  const results = await syncRefreshedTokenToClients(acct);
+
+  assert.equal(results.every((result) => result.error === ''), true);
+  assert.equal(JSON.parse(await readFile(clientPath, 'utf8')).tokens.access_token, 'codex-access');
+  assert.equal(JSON.parse(await readFile(opencodePath, 'utf8')).openai.access, 'codex-access');
+});
+
+for (const { name, content } of [
+  { name: '其他账户 ID', content: { tokens: { access_token: 'old', account_id: 'other' } } },
+  {
+    name: '其他邮箱',
+    content: { tokens: { access_token: jwt({ email: 'other@example.com' }) } },
+  },
+  { name: '未知身份', content: { tokens: { access_token: 'opaque-old' } } },
+]) {
+  test(`自动回写跳过${name}的客户端凭证`, async () => {
+    await setOpencode(null);
+    const { dir, clientPath } = await fixture(
+      { ...codexAccount, source: 'codex-cli', sync_source: 'codex-cli' },
+      { name: 'auth.json', content },
+    );
+    const before = await readFile(clientPath, 'utf8');
+
+    const [acct] = await loadAccounts(dir);
+    const [result] = await syncRefreshedTokenToClients(acct);
+
+    assert.equal(await readFile(clientPath, 'utf8'), before);
+    assert.equal(result.changes.length, 0);
+    assert.match(result.warning, /跳过/);
+  });
+}
+
+test('自动回写跳过 id_token 与 access_token 冲突的客户端凭证', async () => {
+  await setOpencode(null);
+  const { dir, clientPath } = await fixture(
+    { ...codexAccount, source: 'codex-cli', sync_source: 'codex-cli' },
+    {
+      name: 'auth.json',
+      content: {
+        tokens: {
+          access_token: jwt({ chatgpt_account_id: 'acct-123' }),
+          id_token: jwt({ chatgpt_account_id: 'other' }),
+          account_id: 'acct-123',
+        },
+      },
+    },
+  );
+  const before = await readFile(clientPath, 'utf8');
+
+  const [acct] = await loadAccounts(dir);
+  const [result] = await syncRefreshedTokenToClients(acct);
+
+  assert.equal(await readFile(clientPath, 'utf8'), before);
+  assert.equal(result.changes.length, 0);
+  assert.match(result.warning, /不一致/);
+});
+
+test('自动回写不会创建缺失的客户端凭证文件', async () => {
+  await setOpencode(null);
+  const { dir, clientPath } = await fixture({
+    ...codexAccount,
+    source: 'codex-cli',
+    sync_source: 'codex-cli',
+  });
+
+  const [acct] = await loadAccounts(dir);
+  const results = await syncRefreshedTokenToClients(acct);
+
+  assert.deepEqual(results, []);
+  await assert.rejects(() => readFile(clientPath, 'utf8'));
+});
+
+test('跟随客户端的账户不会自动写回凭证', async () => {
+  await setOpencode(null);
+  const { dir, clientPath } = await fixture(
+    { ...codexAccount, source: 'codex-cli', sync_source: 'codex-cli', auto_refresh: false },
+    { name: 'auth.json', content: { tokens: { access_token: 'old', account_id: 'acct-123' } } },
+  );
+  const before = await readFile(clientPath, 'utf8');
+
+  const [acct] = await loadAccounts(dir);
+  const results = await syncRefreshedTokenToClients(acct);
+
+  assert.deepEqual(results, []);
+  assert.equal(await readFile(clientPath, 'utf8'), before);
+});
+
+test('自动回写跳过无法读取的客户端目标', async () => {
+  await setOpencode(null);
+  const { dir, clientPath } = await fixture({
+    ...codexAccount,
+    source: 'codex-cli',
+    sync_source: 'codex-cli',
+  });
+  await mkdir(clientPath);
+
+  const [acct] = await loadAccounts(dir);
+  const [result] = await syncRefreshedTokenToClients(acct);
+
+  assert.equal(result.changes.length, 0);
+  assert.match(result.warning, /无法读取/);
+});
+
+test('自动回写跳过无效 JSON 的客户端目标', async () => {
+  await setOpencode(null);
+  const { dir, clientPath } = await fixture(
+    { ...codexAccount, source: 'codex-cli', sync_source: 'codex-cli' },
+    { name: 'auth.json', content: { tokens: { access_token: 'old', account_id: 'acct-123' } } },
+  );
+  await writeFile(clientPath, '{not-json', 'utf8');
+  const before = await readFile(clientPath, 'utf8');
+
+  const [acct] = await loadAccounts(dir);
+  const [result] = await syncRefreshedTokenToClients(acct);
+
+  assert.equal(await readFile(clientPath, 'utf8'), before);
+  assert.equal(result.changes.length, 0);
+  assert.match(result.warning, /无法读取/);
+});
+
+test('自动回写在预写钩子发现内容变化时不留下或覆盖备份', async () => {
+  await setOpencode(null);
+  const { dir, clientPath } = await fixture(
+    { ...codexAccount, source: 'codex-cli', sync_source: 'codex-cli' },
+    { name: 'auth.json', content: { tokens: { access_token: 'old', account_id: 'acct-123' } } },
+  );
+  const backupPath = `${clientPath}.quotahot-bak`;
+  await writeFile(backupPath, 'existing backup', 'utf8');
+  const changed = '{"tokens":{"access_token":"changed","account_id":"acct-123"}}\n';
+
+  const [acct] = await loadAccounts(dir);
+  const [result] = await syncRefreshedTokenToClients(acct, {
+    onTargetValidated: async (target) => writeFile(target.path, changed, 'utf8'),
+  });
+
+  assert.equal(await readFile(clientPath, 'utf8'), changed);
+  assert.equal(await readFile(backupPath, 'utf8'), 'existing backup');
+  assert.equal((await readdir(dir)).some((name) => name.startsWith('auth.json.quotahot-bak.')), false);
+  assert.match(result.warning, /跳过/);
+});
+
+test('自动同步拒绝验证后原地变化的凭证内容', async () => {
+  const { clientPath } = await fixture(
+    { ...codexAccount, source: 'codex-cli', sync_source: 'codex-cli' },
+    { name: 'auth.json', content: { tokens: { access_token: 'old', account_id: 'acct-123' } } },
+  );
+  const snapshot = await readClientCredentialSnapshot('codex-cli', clientPath);
+  assert.ok(snapshot);
+
+  const replacement = '{"tokens":{"access_token":"changed","account_id":"acct-123"}}\n';
+  await writeFile(clientPath, replacement, 'utf8');
+
+  try {
+    assert.equal(await writeVerifiedClientSnapshot(clientPath, snapshot, '{"safe":true}\n'), 'changed');
+    assert.equal(await readFile(clientPath, 'utf8'), replacement);
+  } finally {
+    await snapshot.close();
+  }
+});
+
+test('自动同步不会在句柄打开后替换已删除重建的凭证文件', async () => {
+  const { clientPath } = await fixture(
+    { ...codexAccount, source: 'codex-cli', sync_source: 'codex-cli' },
+    { name: 'auth.json', content: { tokens: { access_token: 'old', account_id: 'acct-123' } } },
+  );
+  const snapshot = await readClientCredentialSnapshot('codex-cli', clientPath);
+  assert.ok(snapshot);
+
+  await rm(clientPath);
+  const replacement = '{"tokens":{"access_token":"replacement","account_id":"other"}}\n';
+  await writeFile(clientPath, replacement, 'utf8');
+
+  try {
+    assert.equal(await writeVerifiedClientSnapshot(clientPath, snapshot, '{"safe":true}\n'), 'replaced');
+    assert.equal(await readFile(clientPath, 'utf8'), replacement);
+  } finally {
+    await snapshot.close();
+  }
+});
+
+test('自动回写在一个目标发生写入错误时仍更新另一个已验证目标', async () => {
+  await setOpencode({
+    openai: { type: 'oauth', access: 'old-open-code', refresh: 'old-refresh', accountId: 'acct-123' },
+  });
+  const { dir, clientPath } = await fixture(
+    { ...codexAccount, source: 'codex-cli', sync_source: 'codex-cli' },
+    { name: 'auth.json', content: { tokens: { access_token: 'old', account_id: 'acct-123' } } },
+  );
+  const before = await readFile(clientPath, 'utf8');
+  await mkdir(`${clientPath}.quotahot-bak`);
+
+  const [acct] = await loadAccounts(dir);
+  const results = await syncRefreshedTokenToClients(acct);
+
+  assert.equal(await readFile(clientPath, 'utf8'), before);
+  assert.equal(JSON.parse(await readFile(opencodePath, 'utf8')).openai.access, 'codex-access');
+  assert.equal(results.length, 2);
+  assert.notEqual(results[0]?.error, '');
+  assert.match(results[0]?.backupPath ?? '', /\.recovery$/);
+  assert.equal((await readdir(dir)).some((name) => name.endsWith('.tmp')), false);
+  assert.equal(results[1]?.error, '');
+});
 
 test('写回 Codex CLI：令牌挂在 tokens 下，并顺手更新 last_refresh', async () => {
   await setOpencode(opencodeFile);
