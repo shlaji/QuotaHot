@@ -1,4 +1,6 @@
 /** 服务端与前端共享的类型契约。 */
+import type { GatewayAccountView, GatewayConfig, GatewayStatus } from './gateway.js';
+import type { ClientPaths } from './clientpaths.js';
 
 /**
  * 会被调度的 provider：有滚动限额窗口，所以保活才有意义。
@@ -90,6 +92,8 @@ export interface AccountView {
   consecutiveFailures: number;
   state: 'idle' | 'waiting' | 'sending' | 'stopped' | 'error';
   lastError: string;
+  /** 这个账户在 API 服务里的开关、优先级与战绩；卡片上单独一块。 */
+  gateway: GatewayAccountView;
 }
 
 export interface SchedulerStatus {
@@ -145,6 +149,13 @@ export interface AppConfig {
   /** 按 NO_PROXY 语义配置的直连主机规则；proxy 为空时忽略。 */
   noProxy: string[];
   /**
+   * 本机客户端凭证的位置覆盖，按来源标识存；没填的来源不出现在这里。
+   *
+   * 导入、跟随客户端、写回客户端、「本机在用」核对全都认这一份：默认值是各客户端在本机的
+   * 固定位置，只有装在非默认位置（CODEX_HOME 改过、凭证放在另一块盘上）的人才需要填。
+   */
+  clientPaths: ClientPaths;
+  /**
    * 进程起来之后自动把调度跑起来。
    *
    * 记的是用户的意图，不是进程的状态：只有界面上的启动/停止会改它，收到 SIGTERM 时
@@ -162,6 +173,13 @@ export interface AppConfig {
    * 扩成全部，等于替他给没打算保活的账户也发了。
    */
   autoStartIds: string[];
+  /**
+   * API 服务（多账号转发路由）的设置。
+   *
+   * 和保活是两件事，只是共用同一批账户，因此单独一段而不是把开关摊进上面：
+   * 保活替账户发最小请求把窗口撑住，网关替用户的真实请求找一个还有额度的账户。
+   */
+  gateway: GatewayConfig;
 }
 
 export interface LogEntry {
@@ -271,8 +289,13 @@ export interface UsageResult {
 export interface ImportCandidate {
   /** 来源标识。 */
   source: string;
-  /** 该来源在本机的路径。 */
+  /** 该来源在本机的路径；用户改过就是改过之后的那个。 */
   path: string;
+  /**
+   * 这个来源的默认位置。
+   * 与 path 相等就表示用户没改过；界面拿它当输入框的 placeholder 和「恢复默认」的目标。
+   */
+  defaultPath: string;
   /** 是否存在且可读。 */
   available: boolean;
   /** 在该来源中发现的账户，仅含展示所需字段。 */
@@ -286,6 +309,16 @@ export interface ImportCandidate {
   }[];
   /** 不可用时的原因。 */
   error: string;
+}
+
+/**
+ * 改完某个来源的路径之后，服务端一次把两样东西给回来：
+ * 按新位置重扫的结果，以及保存后的完整配置——界面别处（配置页）拿着的那份配置
+ * 立刻就过期了，不同步回去的话，下一次在配置页按保存会把这次改动顶掉。
+ */
+export interface SourcePathResult {
+  sources: ImportCandidate[];
+  config: AppConfig;
 }
 
 /** 客户端配置文件里被改写的一处内容。 */
@@ -410,4 +443,6 @@ export interface StateResponse {
   proxy: string;
   /** 当前实际生效的忽略代理规则。 */
   noProxy: string[];
+  /** API 服务此刻的状态：接到哪里、要不要带 key、几个账户能接活。 */
+  gateway: GatewayStatus;
 }

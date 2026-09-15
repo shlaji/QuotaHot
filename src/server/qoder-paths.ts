@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { qoderStateDbPath } from './qoder.js';
+import { clientPath } from './clientpaths.js';
 import type { QoderClient } from '../shared/qoder.js';
 
 export const QODER_CLIENTS: readonly QoderClient[] = ['qoder-cli', 'qoder-desktop', 'qoder-ide'];
@@ -10,12 +10,9 @@ export const QODER_LABELS: Readonly<Record<QoderClient, string>> = {
   'qoder-ide': 'Qoder IDE',
 };
 
+/** 三个 Qoder 客户端各自的凭证位置；默认值和用户的覆盖值都在 clientpaths.ts 里。 */
 export function qoderClientPath(client: QoderClient): string {
-  switch (client) {
-    case 'qoder-cli': return join(process.env.QODER_CONFIG_DIR || join(homedir(), '.qoder'), '.auth', 'user');
-    case 'qoder-desktop': return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'com.qoder.app.stable', 'auth.v1.dat');
-    case 'qoder-ide': return qoderStateDbPath();
-  }
+  return clientPath(client);
 }
 
 export function qoderExecutable(client: QoderClient): string {

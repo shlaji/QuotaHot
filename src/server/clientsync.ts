@@ -15,12 +15,12 @@
  */
 import { copyFile, mkdir, open, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import {
   fileExists,
   readJsonFile,
 } from './clientfile.js';
+import { clientPath } from './clientpaths.js';
 import {
   readClientCredentialSnapshot,
   type ClientCredentialSnapshot,
@@ -57,8 +57,7 @@ export interface AutomaticSyncOptions {
 
 /** OpenCode 的凭证库：遵循 XDG，默认落在 ~/.local/share/opencode/auth.json。 */
 export function opencodeAuthPath(): string {
-  const dataHome = process.env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share');
-  return join(dataHome, 'opencode', 'auth.json');
+  return clientPath('opencode');
 }
 
 /**
@@ -97,10 +96,7 @@ export async function syncTargetsOfMany(
 function targetsOf(acct: Account, opencodePresent: boolean): SyncTarget[] {
   const source = acct.syncSource || acct.source;
   if (acct.provider === 'codex') {
-    const cliPath =
-      source === 'codex-cli' && acct.syncPath
-        ? acct.syncPath
-        : join(homedir(), '.codex', 'auth.json');
+    const cliPath = source === 'codex-cli' && acct.syncPath ? acct.syncPath : clientPath('codex-cli');
     const targets = [{ source: 'codex-cli', label: WRITABLE['codex-cli'], path: cliPath }];
     if (opencodePresent) {
       targets.push({ source: 'opencode', label: WRITABLE.opencode, path: opencodeAuthPath() });
@@ -111,13 +107,7 @@ function targetsOf(acct: Account, opencodePresent: boolean): SyncTarget[] {
     return [{ source, label: WRITABLE[source], path: acct.syncPath }];
   }
   if (acct.provider === 'claude') {
-    return [
-      {
-        source: 'claude-cli',
-        label: WRITABLE['claude-cli'],
-        path: join(homedir(), '.claude', '.credentials.json'),
-      },
-    ];
+    return [{ source: 'claude-cli', label: WRITABLE['claude-cli'], path: clientPath('claude-cli') }];
   }
   return [];
 }

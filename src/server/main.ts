@@ -34,15 +34,21 @@ import * as bus from './bus.js';
 import * as cfgMod from './config.js';
 import { EMBEDDED_ASSETS } from './assets.js';
 import { setAuditSink, setProxy, validateProxy, getProxy, getBypass } from './http.js';
+import { clientPath, setClientPaths } from './clientpaths.js';
+import { isClientPathKey } from '../shared/clientpaths.js';
 import type {
   AppConfig,
   AutoRefreshResult,
   ForceRefreshResult,
   RequestLogPage,
+  SourcePathResult,
   StateResponse,
 } from '../shared/types.js';
 import { APP_VERSION } from '../version.js';
 import { qoderRoutes } from './qoder-routes.js';
+import { GatewayPool } from './gateway/pool.js';
+import { gatewayAdminRoutes, gatewayRoutes, gatewayStatus } from './gateway/routes.js';
+import type { GatewayDeps } from './gateway/service.js';
 
 const PORT = Number(process.env.PORT ?? 8686);
 const HOST = process.env.QUOTAHOT_HOST || '127.0.0.1';
@@ -56,6 +62,8 @@ setAuditSink({
   updateResponse: (rowId, response) => store.updateRequestResponse(rowId, response),
 });
 const config: AppConfig = cfgMod.loadConfig();
+// 要赶在首次导入之前：那一轮已经会去读客户端凭证文件了，晚了就会读默认位置
+setClientPaths(config.clientPaths);
 const webAuth = webCredentials();
 try {
   setProxy(config.proxy, config.noProxy);
@@ -64,6 +72,41 @@ try {
   console.error(`代理配置无效，已忽略: ${(err as Error).message}`);
 }
 const scheduler = new Scheduler(store, config);
+
+/**
+ * 转发用的账号池。
+ *
+ * 和调度器共用同一批账户文件与同一个状态库，但各管各的：调度器按窗口节奏替账户发保活请求，
+ * 池子替用户的真实请求挑一个还有额度的账户。两者唯一的交汇点是下面那个 setGatewayView——
+ * 卡片上要把两份状态并排显示。
+ */
+const pool = new GatewayPool(store);
+
+/**
+ * 客户端该把 base URL 填成什么。
+ *
+ * 监听 0.0.0.0 时不能把它原样写进界面：那不是一个能连的地址。这种情况下给回环地址，
+ * 从别的机器访问的用户自己知道要换成本机 IP。
+ */
+function gatewayBaseUrl(): string {
+  const host = HOST === '0.0.0.0' || HOST === '::' ? '127.0.0.1' : HOST;
+  return `http://${host.includes(':') ? `[${host}]` : host}:${PORT}`;
+}
+
+const gatewayDeps: GatewayDeps = {
+  store,
+  pool,
+  accounts: () => loadAccounts(cfgMod.ACCOUNTS_DIR),
+  states: () => store.allStates(),
+  config: () => scheduler.getConfig(),
+  log: (level, message, accountId) => scheduler.log(level, accountId ?? '', message),
+  changed: () => void pushAccounts(),
+};
+
+// 卡片上的网关那一块由池子算，但调度器不认识池子（它只负责保活循环），因此用回调接进去
+scheduler.setGatewayView((account, state) =>
+  pool.viewOf(account, state?.usedPercent ?? null, scheduler.getConfig().gateway),
+);
 
 /** 把最新的账户列表推给所有界面；凡是改动了账户或调度状态的路由都以它收尾。 */
 async function pushAccounts(): Promise<void> {
@@ -107,15 +150,19 @@ const firstRunImport = importIfEmpty(cfgMod.ACCOUNTS_DIR)
   .then(async (migrated) => {
     if (!migrated) return;
     console.log(
-      `已从 ${cfgMod.CLI_PROXY_API_DIR} 导入 ${migrated.imported.length} 个账户到 ${cfgMod.ACCOUNTS_DIR}`,
+      `已从 ${clientPath('cli-proxy-api')} 导入 ${migrated.imported.length} 个账户到 ${cfgMod.ACCOUNTS_DIR}`,
     );
     await pushAccounts();
   })
   .catch((err) => console.error(`导入 cli-proxy-api 账户失败: ${String(err)}`));
 
 const app = new Hono();
+// `/v1/*` 必须挂在 Web 的 Basic Auth 之前：编码客户端带的是 API key，
+// 让它去应付一次浏览器式的 Basic Auth 挑战是不现实的。这条路由自己校验 key，见 denyReason
+app.route('/', gatewayRoutes(gatewayDeps));
 app.use('*', accessGuard(webAuth));
 const api = new Hono();
+api.route('/', gatewayAdminRoutes(gatewayDeps, gatewayBaseUrl));
 api.route('/', qoderRoutes({ accountsDir: cfgMod.ACCOUNTS_DIR, changed: async () => {
   await checkClients(false);
   await pushAccounts();
@@ -130,6 +177,7 @@ api.get('/state', async (c) => {
     accountsDir: cfgMod.ACCOUNTS_DIR,
     proxy: getProxy(),
     noProxy: getBypass(),
+    gateway: await gatewayStatus(gatewayDeps, gatewayBaseUrl()),
   };
   return c.json(body);
 });
@@ -140,7 +188,8 @@ api.put('/config', async (c) => {
   const raw = await c.req.json();
   const next = cfgMod.normalize(raw);
   // 这里校验原始请求体：如果先走 normalize()，错误时间会被默认值悄悄替换掉
-  const err = cfgMod.validateSchedule(raw) ?? validateProxy(next.proxy);
+  const err =
+    cfgMod.validateSchedule(raw) ?? cfgMod.validateClientPaths(raw) ?? validateProxy(next.proxy);
   if (err) return c.json({ error: err }, 400);
 
   // autoStart 记的是用户点没点过启动，不是设置项：界面保存一次设置就把它连带清掉的话，
@@ -151,6 +200,8 @@ api.put('/config', async (c) => {
 
   // 运行中改配置只影响下一拍，不会中断当前这次等待
   scheduler.setConfig(next);
+  // 客户端路径不经调度器：导入、跟随、写回、核对四处都是纯函数，各自向 clientpaths 要位置
+  setClientPaths(next.clientPaths);
   await cfgMod.saveConfig(next);
   bus.emit({ type: 'scheduler', status: scheduler.status() });
   return c.json(next);
@@ -265,6 +316,43 @@ api.post('/usage', async (c) => {
 
 /** 列出本机可导入的凭证来源；只返回邮箱和过期时间，不含任何令牌内容。 */
 api.get('/accounts/sources', async (c) => c.json(await scanSources()));
+
+/**
+ * 改某个来源的凭证位置。
+ *
+ * 写的是 config.clientPaths，入口只有导入弹窗这一处——「本机没有这个路径」这句话正是在
+ * 那儿看见的，让人当场就能把位置填对，不必再去别处找一遍设置。传空串表示恢复默认位置。
+ *
+ * 保存之后顺手按新位置重扫一次并把配置一起回给前端：界面上那份配置立刻就过期了，
+ * 不带回去的话，用户下一次在配置页按保存会把这次改动顶掉。
+ */
+api.put('/accounts/sources/:id/path', async (c) => {
+  const id = c.req.param('id');
+  if (!isClientPathKey(id)) return c.json({ error: `不认识的来源: ${id}` }, 400);
+  const body = (await c.req.json().catch(() => ({}))) as { path?: unknown };
+  const path = typeof body.path === 'string' ? body.path : '';
+
+  const cur = scheduler.getConfig();
+  const clientPaths = { ...cur.clientPaths };
+  if (path.trim()) {
+    const err = cfgMod.validateClientPaths({ clientPaths: { [id]: path } });
+    if (err) return c.json({ error: err }, 400);
+    Object.assign(clientPaths, cfgMod.normalizeClientPaths({ [id]: path }));
+  } else {
+    // 空串是「恢复默认」，所以整个删掉而不是留个空值：留着就分不清没配过和特意清空
+    delete clientPaths[id];
+  }
+
+  const next: AppConfig = { ...cur, clientPaths };
+  scheduler.setConfig(next);
+  setClientPaths(next.clientPaths);
+  await cfgMod.saveConfig(next);
+  // 位置变了，「本机在用」标记指着的就可能是另一个文件里的另一个账户，别等下一个核对周期
+  await checkClients(false);
+  await pushAccounts();
+  const result: SourcePathResult = { sources: await scanSources(), config: next };
+  return c.json(result);
+});
 
 api.post('/accounts/import', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as { sources?: unknown };
@@ -682,6 +770,14 @@ const server = serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) =>
   const check = config.clientCheckMinutes;
   console.log(`客户端核对: ${check > 0 ? `每 ${check} 分钟` : '已关闭'}`);
   console.log(`自动启动: ${config.autoStart ? '开（沿用上次的运行状态）' : '关'}`);
+  const gw = config.gateway;
+  console.log(
+    `API 服务: ${
+      gw.enabled
+        ? `开 · ${gatewayBaseUrl()} · ${gw.apiKeys.filter(Boolean).length > 0 ? '需要 API key' : '未设 key（仅本机可用）'}`
+        : '关'
+    }`,
+  );
   void refreshLoop();
   void clientLoop();
   void autoStartScheduler().catch((err) => {

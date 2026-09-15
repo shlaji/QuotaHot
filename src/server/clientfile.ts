@@ -10,9 +10,8 @@
  * Qoder 的来源不是 JSON 文件而是一个加密的 SQLite 库，那部分委托给 qoder.ts。
  */
 import { readFile, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { profileOf, qoderStateDbPath, readQoderSnapshot } from './qoder.js';
+import { claudeProfilePath, clientPath } from './clientpaths.js';
+import { profileOf, readQoderSnapshot } from './qoder.js';
 
 /** 从客户端凭证文件里读到的令牌。字段读不到时为空串或 0，不做猜测。 */
 export interface ClientTokens {
@@ -77,7 +76,7 @@ function tokensOf(
  * 账号」时，它是唯一能作数的依据。读不到就返回空串，由调用方决定怎么办。
  */
 export async function readClaudeCodeEmail(): Promise<string> {
-  const profile = await readJsonFile(join(homedir(), '.claude.json'));
+  const profile = await readJsonFile(claudeProfilePath());
   const account = profile?.oauthAccount;
   if (!account || typeof account !== 'object') return '';
   return str((account as Record<string, unknown>).emailAddress);
@@ -158,7 +157,7 @@ async function readCliProxyApiFile(path: string): Promise<ClientTokens | null> {
  * Qoder 没有可用的 refresh_token 链路，令牌也不一定带 exp，因此这两项常常为空——
  * 跟随模式下每次都回到这个库里重读一遍即可，成本只是一次本地 SQLite 查询。
  */
-async function readQoderIdeFile(path = qoderStateDbPath()): Promise<ClientTokens | null> {
+async function readQoderIdeFile(path = clientPath('qoder-ide')): Promise<ClientTokens | null> {
   let profile: ReturnType<typeof profileOf>;
   try {
     profile = profileOf(readQoderSnapshot(path));
@@ -190,8 +189,9 @@ export interface FollowSource {
  * 这个账户要跟随的是本机哪个客户端文件。
  *
  * 「跟随客户端」跟随的是**这台机器上那个客户端现在的登录**，所以位置按 provider 定：
- * Claude 是 ~/.claude/.credentials.json，Codex 是 ~/.codex/auth.json，Qoder 是它的
- * state.vscdb。只有来源本身就是这些客户端时才回 syncPath——它可能不在默认位置。
+ * Claude 是它的 .credentials.json，Codex 是 auth.json，Qoder 是 state.vscdb，具体路径
+ * 由 clientpaths.ts 给（默认位置或用户在配置里改过的位置）。只有来源本身就是这些客户端时
+ * 才回 syncPath——那是这个账户当初真正被读出来的地方，可能既不是默认位置也不是配置值。
  *
  * cli-proxy-api 不算：它是另一个程序的账户目录，一个账户一个文件，拿它去核对等于拿这个账户
  * 自己的副本跟自己比，永远一致，校验就成了摆设。要跟随的是真正的客户端，不是导入来源。
@@ -208,21 +208,13 @@ export function followSourceOf(
     return { source, label: CLIENT_LABELS[source], path: syncPath };
   }
   if (provider === 'claude') {
-    return {
-      source: 'claude-cli',
-      label: CLIENT_LABELS['claude-cli'],
-      path: join(homedir(), '.claude', '.credentials.json'),
-    };
+    return { source: 'claude-cli', label: CLIENT_LABELS['claude-cli'], path: clientPath('claude-cli') };
   }
   if (provider === 'codex') {
-    return {
-      source: 'codex-cli',
-      label: CLIENT_LABELS['codex-cli'],
-      path: join(homedir(), '.codex', 'auth.json'),
-    };
+    return { source: 'codex-cli', label: CLIENT_LABELS['codex-cli'], path: clientPath('codex-cli') };
   }
   if (provider === 'qoder') {
-    return { source: 'qoder-ide', label: CLIENT_LABELS['qoder-ide'], path: syncPath || qoderStateDbPath() };
+    return { source: 'qoder-ide', label: CLIENT_LABELS['qoder-ide'], path: syncPath || clientPath('qoder-ide') };
   }
   return null;
 }

@@ -11,6 +11,7 @@ import { clientsUsing, lastCheckedAt } from './inuse.js';
 import type { Account } from './creds.js';
 import type { AccountState } from './store.js';
 import type { AccountView, AppConfig } from '../shared/types.js';
+import type { GatewayAccountView } from '../shared/gateway.js';
 
 /**
  * 参与调度与保活发送的账户。
@@ -47,6 +48,7 @@ export async function buildAccountViews(
   accounts: readonly Account[],
   states: Map<string, AccountState>,
   runInfoOf: (accountId: string) => RunInfo | null,
+  gatewayOf: (account: Account, state: AccountState | undefined) => GatewayAccountView,
 ): Promise<AccountView[]> {
   const targets = await syncTargetsOfMany(accounts);
   return accounts.map((a) => {
@@ -84,6 +86,7 @@ export async function buildAccountViews(
       // 没进本次调度的账户（没被勾中，或者本来就是 Qoder）不在跑，即使调度器开着
       state: run?.state ?? 'stopped',
       lastError: run?.lastError ?? st?.lastError ?? '',
+      gateway: gatewayOf(a, st),
     };
   });
 }

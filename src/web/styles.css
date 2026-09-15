@@ -6,6 +6,7 @@
   --text: #e6e8ee;
   --muted: #8b93a5;
   --accent: #5b8cff;
+  --accent-strong: #9bb7ff;
   --ok: #3ecf8e;
   --warn: #f0b429;
   --danger: #f2555a;
@@ -24,6 +25,7 @@
     --line: #e2e5eb;
     --text: #1a1d24;
     --muted: #6b7280;
+    --accent-strong: #2454be;
     /* 同一套 provider 色压暗一档：浅色底上组头标题和徽章文字才读得清 */
     --p-claude: #c2643a;
     --p-codex: #0f8168;
@@ -289,6 +291,216 @@ button.mode.auto:hover:not(:disabled) {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 /*
+  卡片上的「API 服务」块。
+
+  它紧跟额度条，讲的是同一件事的另一面：上面是还剩多少，这里是愿不愿意分给转发。
+  未参与时整块压成一行灰色，只留那个开关——一列卡片里多数账户不会参与转发，
+  让它们各占四行会把真正在转发的那几个淹掉。参与之后才展开统计和优先级。
+*/
+.gateway {
+  display: flex; flex-direction: column; gap: 8px;
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+}
+.gateway.on {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.gateway-head { display: flex; align-items: center; gap: 8px; }
+
+.gateway-toggle {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 600; line-height: 1.5;
+  padding: 1px 8px 1px 6px; border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 14%, var(--card));
+  border-color: color-mix(in srgb, var(--muted) 55%, var(--line)); color: var(--muted);
+  transition: color .12s, border-color .12s, background .12s;
+}
+.gateway-toggle:hover:not(:disabled) {
+  filter: none; color: var(--text);
+  background: color-mix(in srgb, var(--muted) 26%, var(--card)); border-color: var(--muted);
+}
+.gateway-toggle.on {
+  background: color-mix(in srgb, var(--accent) 16%, var(--card));
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); color: var(--accent);
+}
+.gateway-toggle.on:hover:not(:disabled) {
+  color: var(--accent); border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 28%, var(--card));
+}
+
+/* 状态只用文字和颜色说，不再加一枚点：同一行里已经有开关的图标了 */
+.gateway-state { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.gateway-state.ready { color: var(--ok); }
+.gateway-state.busy { color: var(--accent); }
+.gateway-state.cooling { color: var(--warn); }
+.gateway-state.exhausted { color: var(--danger); }
+
+/* 优先级：一个紧凑的 −/+，不用 number 框，免得在卡片里再出现一个能打字的地方 */
+.gateway-prio { display: inline-flex; align-items: center; gap: 2px; }
+.gateway-prio span {
+  min-width: 20px; text-align: center; font-size: 12px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.gateway-prio button {
+  width: 20px; height: 20px; padding: 0; border-radius: 6px; line-height: 1;
+  background: var(--card); color: var(--muted); font-size: 13px;
+}
+.gateway-prio button:hover:not(:disabled) { filter: none; color: var(--accent); border-color: var(--accent); }
+
+.gateway-stats { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--muted); }
+.gateway-stats em { font-style: normal; }
+.gateway-stats em.warn { color: var(--warn); }
+
+.gateway-cool {
+  margin: 0; display: flex; align-items: baseline; gap: 8px;
+  font-size: 11px; color: var(--warn); font-variant-numeric: tabular-nums;
+}
+.gateway-error {
+  margin: 0; font-size: 11px; color: var(--danger);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Qoder 专用的 PAT 行：贴在 API 服务开关下面，收起时只报状态，要改才展开输入 */
+.gateway-pat { display: flex; flex-direction: column; gap: 6px; }
+.gateway-pat-head { display: flex; align-items: center; gap: 8px; }
+.gateway-pat-state { font-size: 11px; }
+.gateway-pat-state.set { color: var(--ok); }
+.gateway-pat-state.unset { color: var(--warn); }
+.gateway-pat-edit { display: flex; align-items: center; gap: 6px; }
+.gateway-pat-input {
+  flex: 1 1 auto; min-width: 0; font-size: 12px; padding: 5px 8px;
+  border: 1px solid var(--line); border-radius: 7px; background: var(--bg);
+  font-family: var(--mono, ui-monospace, monospace);
+}
+.gateway-pat-input:focus { border-color: var(--accent); outline: none; }
+
+.gateway-setting {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  min-height: 37px; padding: 7px 10px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg); cursor: pointer;
+}
+.field input.gateway-setting-checkbox {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  border: 0; overflow: hidden; clip-path: inset(50%); opacity: 0;
+}
+.gateway-setting-switch {
+  position: relative; flex: 0 0 auto; width: 38px; height: 22px;
+  padding: 2px; border: 1px solid var(--muted);
+  border-radius: 999px;
+  background: var(--muted);
+  transition: background .15s, box-shadow .15s;
+}
+.gateway-setting-thumb {
+  display: block; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--card); box-shadow: 0 1px 3px rgb(0 0 0 / 18%);
+  transition: transform .15s;
+}
+.gateway-setting-checkbox:checked + .gateway-setting-switch {
+  border-color: var(--accent-strong); background: var(--accent-strong);
+}
+.gateway-setting-checkbox:checked + .gateway-setting-switch .gateway-setting-thumb {
+  transform: translateX(16px);
+}
+.gateway-setting-checkbox:focus-visible + .gateway-setting-switch {
+  outline: 2px solid var(--accent-strong); outline-offset: 2px;
+}
+.gateway-setting-label { word-break: keep-all; }
+.gateway-setting-state {
+  flex: 0 0 auto; color: var(--text); font-size: 12px; font-weight: 600;
+}
+.gateway-setting-checkbox:checked ~ .gateway-setting-state { color: var(--accent-strong); }
+.gateway-setting-address {
+  min-width: 0; overflow-wrap: anywhere; word-break: keep-all;
+  color: var(--muted); font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gateway-setting-switch,
+  .gateway-setting-thumb { transition: none; }
+}
+
+.cross-provider-decision {
+  --decision-tone: var(--muted);
+  display: flex; flex: 1 1 360px; align-items: center; justify-content: space-between;
+  gap: 16px; min-width: min(100%, 320px); padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: color-mix(in srgb, var(--muted) 4%, var(--bg)); cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+.cross-provider-decision.on {
+  --decision-tone: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent-strong) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+}
+.cross-provider-decision:hover {
+  border-color: color-mix(in srgb, var(--decision-tone) 90%, var(--line));
+  background: color-mix(in srgb, var(--decision-tone) 15%, var(--bg));
+}
+.cross-provider-copy { display: grid; gap: 4px; min-width: 0; }
+.cross-provider-heading {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.cross-provider-heading strong { color: var(--text); font-size: 13px; font-weight: 600; }
+.cross-provider-status {
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  color: var(--decision-tone); font-size: 11px; font-weight: 600;
+}
+.cross-provider-status::before {
+  content: ''; width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor; box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 14%, transparent);
+}
+.cross-provider-summary,
+.cross-provider-detail {
+  display: block; line-break: strict; overflow-wrap: break-word; text-wrap: pretty;
+}
+.cross-provider-summary { color: var(--text); font-size: 12px; line-height: 1.55; }
+.cross-provider-detail { color: var(--muted); font-size: 11px; line-height: 1.55; }
+.cross-provider-nowrap { white-space: nowrap; }
+.cross-provider-control {
+  position: relative; display: inline-flex; flex: 0 0 auto; border-radius: 999px;
+}
+.cross-provider-checkbox {
+  position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%;
+  margin: 0; opacity: 0; cursor: pointer;
+}
+.cross-provider-switch {
+  display: flex; align-items: center; width: 44px; height: 24px; padding: 2px;
+  border: 1px solid color-mix(in srgb, var(--muted) 65%, var(--line));
+  border-radius: 999px; background: color-mix(in srgb, var(--muted) 22%, var(--card));
+  transition: background .12s, border-color .12s;
+}
+.cross-provider-thumb {
+  width: 18px; height: 18px; border-radius: 50%; background: var(--text);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--bg) 70%, transparent);
+  transform: translateX(0); transition: transform .16s ease;
+}
+.cross-provider-checkbox:checked + .cross-provider-switch {
+  border-color: var(--accent); background: var(--accent);
+}
+.cross-provider-checkbox:checked + .cross-provider-switch .cross-provider-thumb {
+  transform: translateX(20px); background: var(--panel);
+}
+.cross-provider-checkbox:focus-visible + .cross-provider-switch {
+  outline: 3px solid var(--accent-strong);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cross-provider-decision,
+  .cross-provider-switch,
+  .cross-provider-thumb { transition: none; }
+}
+
+@media (max-width: 560px) {
+  .cross-provider-decision {
+    flex-basis: 100%; flex-direction: column; align-items: stretch; gap: 10px;
+    min-width: 100%;
+  }
+  .cross-provider-control { align-self: flex-end; }
+}
+
+/*
   卡片底部动作条。以前这里混着 ghost / icon / link 三种按钮，高矮和权重都不一样，
   一排看下来读不出哪个更重要。现在统一成一族 .act：同样的高度、字号和图标，
   只用颜色分层——主色是唯一会真发请求的动作，中性色是常规动作，
@@ -445,6 +657,18 @@ button.act.danger:hover:not(:disabled) {
   padding: 8px 10px; border-radius: 6px; font-size: 13px; margin-top: 8px;
 }
 .modal-actions { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+/* 导入来源的路径：一行一个输入框，右边跟着「恢复默认」或一句「默认位置」 */
+.source-path { display: flex; align-items: center; gap: 8px; }
+.source-path input {
+  flex: 1; min-width: 0;
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 6px 8px; font-size: 12px; font-family: inherit;
+}
+.source-path input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: -1px; }
+.source-path input:disabled { opacity: 0.6; }
+.source-path button { flex-shrink: 0; }
+.source-path .hint { flex-shrink: 0; font-style: normal; opacity: 0.75; }
+
 .probe-meta a { color: var(--accent); word-break: break-all; }
 .probe-meta code { background: var(--bg); padding: 2px 6px; border-radius: 4px; overflow-wrap: anywhere; }
 

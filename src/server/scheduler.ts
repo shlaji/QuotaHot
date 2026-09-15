@@ -32,6 +32,8 @@ import {
 import { Store } from './store.js';
 import { buildAccountViews, selectAccounts, selectSchedulable } from './accounts-view.js';
 import * as bus from './bus.js';
+import { offGatewayView, type GatewayAccountView } from '../shared/gateway.js';
+import type { AccountState } from './store.js';
 import type {
   AccountView,
   AppConfig,
@@ -39,6 +41,9 @@ import type {
   SendNowResult,
   Window,
 } from '../shared/types.js';
+
+/** 卡片上「API 服务」那一块的取值方式，由 main.ts 从账号池接过来。 */
+export type GatewayViewOf = (account: Account, state: AccountState | undefined) => GatewayAccountView;
 
 /** 等待分片的粒度。 */
 const TICK_MS = 30_000;
@@ -268,10 +273,24 @@ export class Scheduler {
    */
   private readonly windowTickMs: number;
 
+  /**
+   * 卡片上「API 服务」那一块从哪儿来。
+   *
+   * 默认给一份「没参与」的视图：调度器不认识网关，也不该为了拼一个字段去 import 它——
+   * 那条依赖方向和 accounts-view 当初被拆出来的理由是同一个。main.ts 起网关之后会把
+   * 真正的取值函数接上来。
+   */
+  private gatewayView: GatewayViewOf = (account) => offGatewayView(account.provider);
+
   constructor(store: Store, config: AppConfig, windowTickMs = WINDOW_TICK_MS) {
     this.store = store;
     this.config = config;
     this.windowTickMs = windowTickMs;
+  }
+
+  /** 由 main.ts 接上账号池；不接就是「这台机器没开 API 服务」。 */
+  setGatewayView(gatewayView: GatewayViewOf): void {
+    this.gatewayView = gatewayView;
   }
 
   get running(): boolean {
@@ -412,10 +431,15 @@ export class Scheduler {
       this.adoptNewer(a);
       return this.workers.get(a.id)?.account ?? a;
     });
-    return buildAccountViews(accounts, this.store.allStates(), (id) => {
-      const worker = this.workers.get(id);
-      return worker ? { state: worker.state, lastError: worker.lastError } : null;
-    });
+    return buildAccountViews(
+      accounts,
+      this.store.allStates(),
+      (id) => {
+        const worker = this.workers.get(id);
+        return worker ? { state: worker.state, lastError: worker.lastError } : null;
+      },
+      this.gatewayView,
+    );
   }
 
   private async broadcast(): Promise<void> {

@@ -8,7 +8,6 @@
  * 各来源的文件格式都不一样，所以每个来源单独解析，统一收敛成 AccountInput。
  */
 import { readdir, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   emailOf,
@@ -20,16 +19,17 @@ import {
   type AccountInput,
 } from './creds.js';
 import { readClaudeCodeEmail, readJsonFile as readJson } from './clientfile.js';
-import { CLI_PROXY_API_DIR } from './config.js';
-import { profileOf, qoderStateDbPath, readQoderSnapshot } from './qoder.js';
+import { clientPath, defaultClientPath } from './clientpaths.js';
+import { profileOf, readQoderSnapshot } from './qoder.js';
 import { captureQoderSession } from './qoder-native.js';
-import { qoderClientPath, QODER_LABELS } from './qoder-paths.js';
+import { QODER_LABELS } from './qoder-paths.js';
+import type { ClientPathKey } from '../shared/clientpaths.js';
 import type { ImportCandidate, ImportResult, Provider } from '../shared/types.js';
 
 /** 一处可导入的来源。 */
 interface Source {
-  /** 稳定标识，前端按它请求导入。 */
-  id: string;
+  /** 稳定标识，前端按它请求导入；同时也是这个来源在配置里的路径 key。 */
+  id: ClientPathKey;
   label: string;
   path: string;
   read: (path: string) => Promise<AccountInput[]>;
@@ -167,35 +167,38 @@ async function readQoderIde(path: string): Promise<AccountInput[]> {
   ];
 }
 
-/** 已知来源；每一处都是对应客户端在本机的固定位置，不需要用户配置。 */
+/**
+ * 已知来源；路径来自 clientpaths.ts：默认是对应客户端在本机的固定位置，
+ * 装在别处的人可以在配置页「本机客户端」里改，其余三处（跟随、写回、核对）跟着一起走。
+ */
 function knownSources(): Source[] {
   return [
     {
       id: 'cli-proxy-api',
       label: 'cli-proxy-api 认证目录',
-      path: CLI_PROXY_API_DIR,
+      path: clientPath('cli-proxy-api'),
       read: readCliProxyApi,
     },
     {
       id: 'codex-cli',
       label: 'Codex CLI',
-      path: join(homedir(), '.codex', 'auth.json'),
+      path: clientPath('codex-cli'),
       read: readCodexCli,
     },
     {
       id: 'claude-cli',
       label: 'Claude Code',
-      path: join(homedir(), '.claude', '.credentials.json'),
+      path: clientPath('claude-cli'),
       read: readClaudeCli,
     },
     {
       id: 'qoder-ide',
       label: 'Qoder IDE',
-      path: qoderStateDbPath(),
+      path: clientPath('qoder-ide'),
       read: readQoderIde,
     },
     ...(['qoder-cli', 'qoder-desktop'] as const).map((client) => ({
-      id: client, label: QODER_LABELS[client], path: qoderClientPath(client),
+      id: client, label: QODER_LABELS[client], path: clientPath(client),
       read: async (path: string): Promise<AccountInput[]> => {
         const profile = await captureQoderSession(client, path);
         return [{ provider: 'qoder', email: profile.email || profile.userId, userId: profile.userId,
@@ -216,6 +219,7 @@ export async function scanSources(): Promise<ImportCandidate[]> {
       out.push({
         source: src.id,
         path: src.path,
+        defaultPath: defaultClientPath(src.id),
         available: true,
         accounts: accounts.map((a) => ({
           id: `${a.provider}:${a.email}`,
@@ -231,6 +235,7 @@ export async function scanSources(): Promise<ImportCandidate[]> {
       out.push({
         source: src.id,
         path: src.path,
+        defaultPath: defaultClientPath(src.id),
         available: false,
         accounts: [],
         error: code === 'ENOENT' ? '本机没有这个路径' : String((err as Error).message ?? err),

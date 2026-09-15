@@ -166,9 +166,12 @@ test('没点过启动的全新安装不自动跑', async (context) => {
 });
 
 /** 起一个服务并让它一直跑着，返回它的地址；调用方负责在 context.after 里收掉。 */
-async function serveOn(dataDir: string): Promise<{ base: string; kill: () => Promise<void> }> {
+async function serveOn(
+  dataDir: string,
+  extraEnv: Readonly<Record<string, string>> = {},
+): Promise<{ base: string; kill: () => Promise<void> }> {
   const child = spawn(process.execPath, ['--import', 'tsx', entry], {
-    env: { ...process.env, PORT: '0', QUOTAHOT_DATA_DIR: dataDir },
+    env: { ...process.env, PORT: '0', QUOTAHOT_DATA_DIR: dataDir, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const base = await new Promise<string>((resolveBase, reject) => {
@@ -288,4 +291,92 @@ test('用户自己按的停止会记下来，重启之后不再自动跑', async
 
   const output = await outputUntil(dataDir, /自动启动: 关/, 500);
   assert.doesNotMatch(output, /自动启动调度:/);
+});
+
+/**
+ * 导入弹窗里那一行路径是可以改的：装在非默认位置的人，在看见「本机没有这个路径」的地方
+ * 就能把位置填对。这条用例盯的是三件事——填错当场退回、填对立刻按新位置扫、留空回到默认，
+ * 并且每一次都得落到 config.json 里：只在内存里生效的话，重启之后又要再填一遍。
+ *
+ * HOME 指到临时目录，默认位置因此也在临时目录下，跑测试不会碰到真实的登录状态。
+ */
+test('导入来源的位置可以当场改，留空回到默认', async (context) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'quotahot-srcpath-'));
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-srcpath-home-'));
+  context.after(() => rm(dataDir, { recursive: true, force: true }));
+  context.after(() => rm(home, { recursive: true, force: true }));
+
+  // 一份放在别处的 cli-proxy-api 账户目录：默认位置上什么都没有
+  const alt = join(home, 'elsewhere');
+  await mkdir(alt, { recursive: true });
+  await writeFile(
+    join(alt, 'one.json'),
+    JSON.stringify({
+      type: 'claude',
+      email: 'a@example.com',
+      access_token: 'not-a-real-token',
+      refresh_token: 'not-a-real-token',
+      expired: new Date(Date.now() + 86_400_000).toISOString(),
+    }),
+    'utf8',
+  );
+
+  type Source = { source: string; path: string; defaultPath: string; available: boolean; accounts: { email: string }[] };
+  type PathResult = { sources: Source[]; config: { clientPaths: Record<string, string> } };
+  const server = await serveOn(dataDir, {
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, '.config'),
+    XDG_DATA_HOME: join(home, '.local', 'share'),
+  });
+  const put = (id: string, path: string): Promise<Response> =>
+    fetch(`${server.base}/api/accounts/sources/${id}/path`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+  const proxySource = async (): Promise<Source> => {
+    const listed = (await (await fetch(`${server.base}/api/accounts/sources`)).json()) as Source[];
+    const found = listed.find((s) => s.source === 'cli-proxy-api');
+    assert.ok(found, '来源列表里应当有 cli-proxy-api');
+    return found;
+  };
+
+  try {
+    // 填错：相对路径在终端和 systemd 下指向两个地方，不能收下
+    const bad = await put('cli-proxy-api', 'elsewhere');
+    assert.equal(bad.status, 400);
+    assert.match(((await bad.json()) as { error: string }).error, /绝对路径/);
+    const unknown = await put('not-a-client', '/tmp/x');
+    assert.equal(unknown.status, 400);
+    assert.equal((await proxySource()).path, join(home, '.cli-proxy-api'), '退回之后位置不该变');
+
+    // 填对：`~` 展开成主目录，不用逼着人手敲一遍
+    const ok = await put('cli-proxy-api', '~/elsewhere');
+    assert.equal(ok.status, 200);
+    const saved = (await ok.json()) as PathResult;
+    const found = saved.sources.find((s) => s.source === 'cli-proxy-api');
+    assert.equal(found?.path, alt);
+    assert.equal(found?.available, true);
+    assert.deepEqual(found?.accounts.map((a) => a.email), ['a@example.com'], '改完就该看见那边的账户');
+    assert.equal(saved.config.clientPaths['cli-proxy-api'], alt, '配置要一起回给前端，否则下次保存会顶掉');
+    assert.equal(
+      ((await readConfig(dataDir)).clientPaths as Record<string, string>)['cli-proxy-api'],
+      alt,
+      '得落盘，重启之后不该要求再填一遍',
+    );
+    // 对整个进程生效，不只是这一次响应
+    assert.equal((await proxySource()).path, alt);
+
+    // 留空：回到默认位置，配置里那一项整个删掉
+    const back = await put('cli-proxy-api', '   ');
+    assert.equal(back.status, 200);
+    const restored = (await back.json()) as PathResult;
+    const atDefault = restored.sources.find((s) => s.source === 'cli-proxy-api');
+    assert.equal(atDefault?.path, join(home, '.cli-proxy-api'));
+    assert.equal(atDefault?.path, atDefault?.defaultPath, 'placeholder 上写的就是这个位置');
+    assert.deepEqual(restored.config.clientPaths, {});
+    assert.deepEqual((await readConfig(dataDir)).clientPaths, {});
+  } finally {
+    await server.kill();
+  }
 });

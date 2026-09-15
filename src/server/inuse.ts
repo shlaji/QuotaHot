@@ -13,12 +13,9 @@
  * 还要解密一次 SQLite）不值得。真正的核对由 server/main.ts 里的定时任务按配置周期跑，
  * 用户在别处换了账号，最迟一个周期后列表就会跟上。
  */
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { CLIENT_LABELS, fileExists, readClientTokens } from './clientfile.js';
-import { opencodeAuthPath } from './clientsync.js';
-import { qoderStateDbPath } from './qoder.js';
-import { qoderClientPath, QODER_LABELS } from './qoder-paths.js';
+import { clientPath } from './clientpaths.js';
+import { QODER_LABELS } from './qoder-paths.js';
 import { identityOf, whoOf, type Account } from './creds.js';
 import type { ClientUse, Provider } from '../shared/types.js';
 
@@ -35,31 +32,17 @@ interface ClientSlot {
  *
  * 与 clientfile.followSourceOf 同源，只是那边一次只回一个（某账户跟随谁），这边要的是
  * 全体。cli-proxy-api 同样不算：它是另一个程序的账户目录，一个账户一个文件，谁都没在
- * 「用」其中某一个。位置每次现算，因为 homedir() 和 XDG_DATA_HOME 都可能在运行期变。
+ * 「用」其中某一个。位置每次现算：clientpaths.ts 里的默认值看的是 homedir() 和 XDG_*，
+ * 而用户也可能刚在配置页里把某个客户端指到别处。
  */
 function defaultSlots(): ClientSlot[] {
   return [
-    {
-      source: 'claude-cli',
-      label: CLIENT_LABELS['claude-cli'],
-      path: join(homedir(), '.claude', '.credentials.json'),
-      provider: 'claude',
-    },
-    {
-      source: 'codex-cli',
-      label: CLIENT_LABELS['codex-cli'],
-      path: join(homedir(), '.codex', 'auth.json'),
-      provider: 'codex',
-    },
-    { source: 'opencode', label: CLIENT_LABELS.opencode, path: opencodeAuthPath(), provider: 'codex' },
-    {
-      source: 'qoder-ide',
-      label: CLIENT_LABELS['qoder-ide'],
-      path: qoderStateDbPath(),
-      provider: 'qoder',
-    },
+    { source: 'claude-cli', label: CLIENT_LABELS['claude-cli'], path: clientPath('claude-cli'), provider: 'claude' },
+    { source: 'codex-cli', label: CLIENT_LABELS['codex-cli'], path: clientPath('codex-cli'), provider: 'codex' },
+    { source: 'opencode', label: CLIENT_LABELS.opencode, path: clientPath('opencode'), provider: 'codex' },
+    { source: 'qoder-ide', label: CLIENT_LABELS['qoder-ide'], path: clientPath('qoder-ide'), provider: 'qoder' },
     ...(['qoder-cli', 'qoder-desktop'] as const).map((source): ClientSlot => ({
-      source, label: QODER_LABELS[source], path: qoderClientPath(source), provider: 'qoder',
+      source, label: QODER_LABELS[source], path: clientPath(source), provider: 'qoder',
     })),
   ];
 }

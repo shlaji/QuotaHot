@@ -9,6 +9,8 @@ interface Props {
   onTestSelected: () => void;
   onUsage: () => void;
   onAccounts: () => void;
+  /** 把作用范围内的账户批量加入 / 退出 API 服务。 */
+  onGatewayBulk: (enabled: boolean) => void;
 }
 
 /**
@@ -30,6 +32,7 @@ export function RunBar({
   onTestSelected,
   onUsage,
   onAccounts,
+  onGatewayBulk,
 }: Props) {
   const scope = selected === 0 ? `全部 ${total}` : `${selected}`;
 
@@ -69,6 +72,29 @@ export function RunBar({
         title="只读查询勾选账户的当前额度，不发消息、不消耗配额、不会开启 5 小时窗口"
       >
         查询额度（{scope}）
+      </button>
+
+      {/*
+        决定「哪些账户参与 API 转发」的批量入口。作用范围跟着上面的勾选走，和测试/查额度一致。
+        只作用于支持转发的 provider，别的会被服务端跳过。加入是把额度交出去，退出是收回来，
+        两件事分成两个明确的按钮，比一个会随状态变文案的开关更不容易点错。
+      */}
+      <button
+        className="ghost"
+        disabled={busy || total === 0}
+        onClick={() => onGatewayBulk(true)}
+        title="把作用范围内的账户加入 API 服务的账号池，它们的额度会被转发请求用掉（不影响全局开关）"
+      >
+        加入 API 服务（{scope}）
+      </button>
+
+      <button
+        className="ghost"
+        disabled={busy || total === 0}
+        onClick={() => onGatewayBulk(false)}
+        title="把作用范围内的账户移出 API 服务，不再派新的转发请求给它们"
+      >
+        退出 API 服务（{scope}）
       </button>
     </div>
   );

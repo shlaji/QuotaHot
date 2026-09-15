@@ -15,11 +15,13 @@ import type {
   SchedulerStatus,
   SendNowResult,
   ServerEvent,
+  SourcePathResult,
   StateResponse,
   SyncToClientResult,
   UsageResult,
 } from '../shared/types.js';
 import type { QoderClient, QoderClientTarget, QoderSwitchResult } from '../shared/qoder.js';
+import type { GatewayStatus } from '../shared/gateway.js';
 
 async function json<T>(input: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(input, {
@@ -49,6 +51,12 @@ export const api = {
   accountRequests: (id: string, limit = 50) =>
     json<RequestLogPage>(`/api/accounts/${encodeURIComponent(id)}/requests?limit=${limit}`),
   sources: () => json<ImportCandidate[]>('/api/accounts/sources'),
+  /** 改这个来源读哪个路径；path 传空串表示恢复默认位置。 */
+  setSourcePath: (source: string, path: string) =>
+    json<SourcePathResult>(`/api/accounts/sources/${encodeURIComponent(source)}/path`, {
+      method: 'PUT',
+      body: JSON.stringify({ path }),
+    }),
   importAccounts: (sources: string[]) =>
     json<ImportResult>('/api/accounts/import', {
       method: 'POST',
@@ -106,6 +114,37 @@ export const api = {
   accountUsage: (id: string) =>
     json<UsageResult>(`/api/accounts/${encodeURIComponent(id)}/usage`, { method: 'POST' }),
   logs: (limit = 200) => json<LogEntry[]>(`/api/logs?limit=${limit}`),
+  /** API 服务的整体状态：接到哪里、要不要带 key、此刻有几个账户能接活。 */
+  gateway: () => json<GatewayStatus>('/api/gateway'),
+  /** 改某个账户的转发设置。只传要改的那一项，另一项保持不动。 */
+  setAccountGateway: (id: string, patch: { enabled?: boolean; priority?: number }) =>
+    json<{ ok: boolean }>(`/api/accounts/${encodeURIComponent(id)}/gateway`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+  /**
+   * 批量把一组账户加入或退出 API 服务；ids 为空表示全部账户。
+   * 语义和单个的 setAccountGateway 一致，只改 enabled。
+   */
+  setAccountGatewayMany: (ids: string[], enabled: boolean) =>
+    json<{ ok: boolean; changed: number }>('/api/accounts/gateway/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ ids, enabled }),
+    }),
+  /** 让一个在冷却里的账户立刻归队。 */
+  resetAccountGateway: (id: string) =>
+    json<{ ok: boolean }>(`/api/accounts/${encodeURIComponent(id)}/gateway/reset`, {
+      method: 'POST',
+    }),
+  /**
+   * 设置或清空某个账户的 Qoder PAT；传空串表示清除。
+   * 服务端会先拿它去 Qoder 换一次令牌校验，换不出来就不落库并返回错误。
+   */
+  setAccountPat: (id: string, pat: string) =>
+    json<{ ok: boolean; hasPat: boolean; uid?: string }>(
+      `/api/accounts/${encodeURIComponent(id)}/gateway/pat`,
+      { method: 'PUT', body: JSON.stringify({ pat }) },
+    ),
 };
 
 /** 订阅 SSE，返回一个取消订阅函数。 */

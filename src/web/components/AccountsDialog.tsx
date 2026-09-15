@@ -1,16 +1,97 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ImportCandidate, LoginMode, LoginStart, Provider } from '../../shared/types.js';
+import type {
+  AppConfig,
+  ImportCandidate,
+  LoginMode,
+  LoginStart,
+  Provider,
+} from '../../shared/types.js';
 import { api } from '../api.js';
 import { day } from '../format.js';
 
 const SOURCE_LABEL: Record<string, string> = {
   'cli-proxy-api': 'cli-proxy-api 认证目录',
-  'codex-cli': 'Codex CLI（~/.codex/auth.json）',
-  'claude-cli': 'Claude Code（~/.claude/.credentials.json）',
+  'codex-cli': 'Codex CLI',
+  'claude-cli': 'Claude Code',
   'qoder-cli': 'Qoder CLI',
   'qoder-desktop': 'Qoder Desktop',
-  'qoder-ide': 'Qoder IDE（globalStorage/state.vscdb）',
+  'qoder-ide': 'Qoder IDE',
 };
+
+/**
+ * 这个来源从哪个文件读账户，可以当场改。
+ *
+ * 会来看这一行的人，多半刚在上面读到一句「本机没有这个路径」——位置就摆在眼前，
+ * 让他在原地把它填对，比先记住路径再去配置页找一遍要短得多。
+ *
+ * 失焦即保存，不另设按钮：这里只有一个字段，一个「保存」按钮不会让人更放心，只会多一步。
+ * 保存的是全局配置里的 clientPaths，导入、跟随客户端、写回客户端、「本机在用」核对四处
+ * 一起跟着走。留空 = 恢复默认位置，placeholder 里那个灰字就是默认值。
+ */
+function SourcePath({
+  source,
+  busy,
+  onSave,
+}: {
+  source: ImportCandidate;
+  busy: boolean;
+  onSave: (path: string) => Promise<void>;
+}) {
+  const custom = source.path === source.defaultPath ? '' : source.path;
+  const [text, setText] = useState(custom);
+  // 服务端的值变了（自己刚存完、或者别处改过）就跟上，但别打断正在输入的人
+  const [editing, setEditing] = useState(false);
+  useEffect(() => {
+    if (!editing) setText(custom);
+  }, [custom, editing]);
+
+  const commit = (): void => {
+    setEditing(false);
+    if (text.trim() === custom) return;
+    void onSave(text.trim());
+  };
+
+  return (
+    <p className="probe-meta source-path">
+      <input
+        type="text"
+        value={text}
+        disabled={busy}
+        spellCheck={false}
+        placeholder={source.defaultPath}
+        title="留空使用默认位置"
+        onChange={(e) => {
+          setEditing(true);
+          setText(e.target.value);
+        }}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur();
+          if (e.key === 'Escape') {
+            setEditing(false);
+            setText(custom);
+            e.currentTarget.blur();
+          }
+        }}
+      />
+      {custom ? (
+        <button
+          className="link"
+          disabled={busy}
+          onClick={() => {
+            setEditing(false);
+            setText('');
+            void onSave('');
+          }}
+        >
+          恢复默认
+        </button>
+      ) : (
+        <em className="hint">默认位置</em>
+      )}
+    </p>
+  );
+}
 
 /** 开着本地监听时的轮询间隔。 */
 const POLL_MS = 2000;
@@ -237,10 +318,15 @@ interface Props {
   accountsDir: string;
   onClose: () => void;
   onNotify: (msg: string) => void;
+  /**
+   * 在这里改过来源路径之后，把服务端存下来的那份配置交回去。
+   * 配置页拿着的是同一份配置，不同步过去的话，下一次在那儿按保存会把这次改动顶掉。
+   */
+  onConfigChange: (config: AppConfig) => void;
 }
 
 /** 账户管理：从本机其他客户端导入，或直接在这里登录一个新账户。 */
-export function AccountsDialog({ open, accountsDir, onClose, onNotify }: Props) {
+export function AccountsDialog({ open, accountsDir, onClose, onNotify, onConfigChange }: Props) {
   const [sources, setSources] = useState<ImportCandidate[] | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -271,6 +357,29 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify }: Props) 
     }
   };
 
+  /** 改某个来源的位置：存下来，用新位置重扫，顺手把配置同步给外层。 */
+  const saveSourcePath = async (source: ImportCandidate, path: string): Promise<void> => {
+    setBusy(true);
+    try {
+      const result = await api.setSourcePath(source.source, path);
+      setSources(result.sources);
+      onConfigChange(result.config);
+      const label = SOURCE_LABEL[source.source] ?? source.source;
+      const now = result.sources.find((s) => s.source === source.source);
+      onNotify(
+        path
+          ? `${label} 改为读 ${now?.path ?? path}`
+          : `${label} 已恢复默认位置 ${now?.defaultPath ?? ''}`,
+      );
+    } catch (err) {
+      onNotify(String(err instanceof Error ? err.message : err));
+      // 存失败时把界面拉回服务端的真实状态，免得输入框里留着一个没生效的路径
+      await reload();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const usable = (sources ?? []).filter((s) => s.accounts.length > 0);
 
   return (
@@ -292,6 +401,10 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify }: Props) 
           </p>
 
           <h3>从本机导入</h3>
+          <p className="probe-meta">
+            每一处的路径都能直接改：留空用默认位置，填绝对路径（<code>~</code> 会展开成主目录）。
+            改完立刻按新位置重扫，跟随客户端、写回客户端、「本机在用」核对也一起跟着走。
+          </p>
           {sources === null ? (
             <p className="empty">扫描中…</p>
           ) : (
@@ -303,9 +416,11 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify }: Props) 
                     {s.accounts.length > 0 ? `${s.accounts.length} 个账户` : s.error || '没有账户'}
                   </span>
                 </h3>
-                <p className="probe-meta">
-                  <code>{s.path}</code>
-                </p>
+                <SourcePath
+                  source={s}
+                  busy={busy}
+                  onSave={(path) => saveSourcePath(s, path)}
+                />
                 {s.accounts.length > 0 && (
                   <>
                     <table>

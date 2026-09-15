@@ -7,6 +7,7 @@ import type {
   SchedulerStatus,
   UsageResult,
 } from '../shared/types.js';
+import type { GatewayStatus } from '../shared/gateway.js';
 import { api, subscribeEvents } from './api.js';
 import { useNow } from './useNow.js';
 import { AccountCard } from './components/AccountCard.js';
@@ -27,7 +28,8 @@ const MAX_LOGS = 500;
 const PROVIDER_GROUPS: { provider: string; label: string; note?: string }[] = [
   { provider: 'claude', label: 'Claude', note: '5 小时滚动窗口' },
   { provider: 'codex', label: 'Codex', note: '5 小时滚动窗口' },
-  { provider: 'qoder', label: 'Qoder', note: '按订阅周期发放，不参与保活调度' },
+  // Qoder 的推理端点要求官方客户端的签名，本程序给不出来，因此它也不能用于 API 转发
+  { provider: 'qoder', label: 'Qoder', note: '按订阅周期发放，不参与保活调度和 API 转发' },
 ];
 
 /**
@@ -62,6 +64,10 @@ export function App() {
   const [proxy, setProxy] = useState('');
   const [noProxy, setNoProxy] = useState<string[]>([]);
   const [toast, setToast] = useState('');
+  // API 服务的整体状态（接到哪里、要不要 key）；卡片上那份每账户状态跟着账户快照走
+  const [gateway, setGateway] = useState<GatewayStatus | null>(null);
+  const [gatewayBusyId, setGatewayBusyId] = useState<string | null>(null);
+  const [patBusyId, setPatBusyId] = useState<string | null>(null);
   // 刷新后停在原来那一页；用户多半是在同一件事上来回
   const [tab, setTab] = useState<Tab>(() => {
     const saved = localStorage.getItem(TAB_KEY);
@@ -107,6 +113,7 @@ export function App() {
         setNoProxy(state.noProxy);
         setStatus(state.scheduler);
         setAccounts(state.accounts);
+        setGateway(state.gateway);
         setLogs(history);
       } catch (err) {
         notify(`加载失败: ${String(err)}`);
@@ -145,6 +152,8 @@ export function App() {
       // 代理在服务端应用前已经校验过，因此保存成功就代表已生效
       setProxy(saved.proxy);
       setNoProxy(saved.noProxy);
+      // API 服务的开关和 key 也在这一份配置里，顶栏那枚状态得跟着改
+      setGateway(await api.gateway());
       notify('配置已保存');
     });
 
@@ -207,6 +216,22 @@ export function App() {
       setUsage(results);
       const failed = results.filter((r) => !r.ok).length;
       notify(failed === 0 ? '额度已刷新' : `${results.length} 个账户中 ${failed} 个查询失败`);
+    });
+
+  /**
+   * 批量决定哪些账户参与 API 转发。作用范围跟顶部动作条的勾选走：勾了就只作用于勾选的，
+   * 一个没勾就是全部（和测试文本 / 查询额度同一约定）。服务端只对支持转发的 provider 生效，
+   * 别的会被跳过，所以这里报的是「实际改动的数目」。
+   */
+  const handleGatewayBulk = (enabled: boolean) =>
+    guard(async () => {
+      const res = await api.setAccountGatewayMany(targetIds, enabled);
+      setGateway(await api.gateway());
+      notify(
+        enabled
+          ? `已把 ${res.changed} 个账户加入 API 服务，它们的额度会被转发请求用掉`
+          : `已把 ${res.changed} 个账户移出 API 服务`,
+      );
     });
 
   const toggleSelected = useCallback((id: string, on: boolean) => {
@@ -295,6 +320,51 @@ export function App() {
     }).finally(() => setSendingId(null));
   };
 
+  /**
+   * 卡片上改这个账户参不参与转发、排第几位。
+   *
+   * 服务端改完会推一次账户快照，卡片上的数字和状态因此不用在这里手动改；这里只补拉一次
+   * 网关整体状态，好让顶栏那枚「N 个账户待命」当场对上。
+   */
+  const handleGatewayChange = (id: string, patch: { enabled?: boolean; priority?: number }) => {
+    setGatewayBusyId(id);
+    void guard(async () => {
+      await api.setAccountGateway(id, patch);
+      setGateway(await api.gateway());
+      if (patch.enabled !== undefined) {
+        notify(
+          patch.enabled
+            ? `${id} 已加入 API 服务的账号池，它的额度会被转发请求用掉`
+            : `${id} 已退出 API 服务，不再派新的转发请求给它`,
+        );
+      }
+    }).finally(() => setGatewayBusyId(null));
+  };
+
+  const handleGatewayReset = (id: string) => {
+    setGatewayBusyId(id);
+    void guard(async () => {
+      await api.resetAccountGateway(id);
+      setGateway(await api.gateway());
+      notify(`${id} 已结束冷却，重新参与派活`);
+    }).finally(() => setGatewayBusyId(null));
+  };
+
+  /**
+   * 设置或清空某个账户的 Qoder PAT。
+   *
+   * 服务端会先真拿它去 Qoder 换一次令牌校验，所以这里可能转个一两秒；校验通过它会推一次账户
+   * 快照，卡片上的「已设置」和转发状态因此不用在这里手动改。校验失败时 api 抛错，交给 guard 提示。
+   */
+  const handleSetPat = (id: string, pat: string) => {
+    setPatBusyId(id);
+    void guard(async () => {
+      const res = await api.setAccountPat(id, pat);
+      setGateway(await api.gateway());
+      notify(res.hasPat ? `${id} 的 Qoder PAT 已校验并保存` : `${id} 的 Qoder PAT 已清除`);
+    }).finally(() => setPatBusyId(null));
+  };
+
   const reloadAccounts = useCallback(async () => {
     try {
       const state = await api.state();
@@ -335,6 +405,26 @@ export function App() {
           <span className={`pill ${connected ? 'on' : 'warn'}`}>
             {connected ? '实时已连接' : '连接中断'}
           </span>
+          {/*
+            API 服务是一个会替用户花掉额度的对外端点，开着的时候必须一眼看得到；
+            关着时也留着这枚胶囊，否则「我到底开没开」得翻到配置页才知道。
+          */}
+          {gateway && (
+            <span
+              className={`pill ${gateway.enabled ? 'on' : 'muted'}`}
+              title={
+                gateway.enabled
+                  ? `转发端点 ${gateway.baseUrl}/v1 · ${
+                      gateway.keyRequired ? '需要 API key' : '未设 key，只接受本机请求'
+                    } · ${gateway.enabledAccounts} 个账户参与，其中 ${gateway.readyAccounts} 个此刻能接活`
+                  : 'API 服务未开启：不会有请求用掉账号池里的额度。在配置页打开它'
+              }
+            >
+              {gateway.enabled
+                ? `API 服务 ${gateway.readyAccounts}/${gateway.enabledAccounts}`
+                : 'API 服务未开启'}
+            </span>
+          )}
           <span
             className="pill muted"
             title={
@@ -391,6 +481,7 @@ export function App() {
           onTestSelected={handleTestSelected}
           onUsage={handleUsage}
           onAccounts={() => setAccountsOpen(true)}
+          onGatewayBulk={handleGatewayBulk}
         />
 
         <main className="accounts">
@@ -431,6 +522,12 @@ export function App() {
                       selected={selected.has(a.id)}
                       onSelectChange={toggleSelected}
                       onQoderSwitched={() => void reloadAccounts()}
+                      gatewayEnabled={gateway?.enabled ?? false}
+                      onGatewayChange={handleGatewayChange}
+                      onGatewayReset={handleGatewayReset}
+                      gatewayBusy={gatewayBusyId === a.id}
+                      onSetPat={handleSetPat}
+                      patBusy={patBusyId === a.id}
                     />
                   ))}
                 </div>
@@ -466,6 +563,7 @@ export function App() {
           onSave={handleSave}
           catalog={catalog}
           onRefreshModels={() => void loadCatalog(true)}
+          gateway={gateway}
           onDirtyChange={setConfigDirty}
         />
       </div>
@@ -478,6 +576,7 @@ export function App() {
         accountsDir={accountsDir}
         onClose={() => setAccountsOpen(false)}
         onNotify={notify}
+        onConfigChange={setConfig}
       />
     </div>
   );

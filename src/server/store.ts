@@ -6,8 +6,10 @@
  */
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import type { LogEntry, RequestLogRow, RequestRecord, Window } from '../shared/types.js';
+import type { GatewayAccountSetting, GatewayAccountStat } from '../shared/gateway.js';
 
 /**
  * 库里所有时刻一律存 ISO-8601 UTC 文本（见 toDateText），不存毫秒数：直接查库时能读，
@@ -53,6 +55,23 @@ CREATE TABLE IF NOT EXISTS request_log (
   response TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_request_log_acct ON request_log(account_id, id DESC);
+-- API 服务（转发路由）里每个账户的设置与累计战绩。
+-- 不写进账户文件：重新导入同一个账户会按固定字段集重写那个文件，写在那里的开关会被悄悄抹掉。
+CREATE TABLE IF NOT EXISTS gateway_account (
+  account_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  priority INTEGER NOT NULL DEFAULT 0,
+  requests INTEGER NOT NULL DEFAULT 0,
+  failures INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  last_used_at TEXT,
+  -- Qoder 转发用的 PAT 与本账户固定的 machine_id：都只对 Qoder 账户有意义，别的
+  -- provider 用导入登录的令牌就能转发，这两列留空。machine_id 在第一次设 PAT 时随机生成
+  -- 并固定下来，Qoder 的反作弊要求同一账户每次请求带同一个机器标识。
+  pat TEXT NOT NULL DEFAULT '',
+  machine_id TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS app_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT,
@@ -117,6 +136,24 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /**
+   * 补齐旧库缺的列。
+   *
+   * schema 用的都是 `CREATE TABLE IF NOT EXISTS`：表已经存在时，后加进 schema 的列不会被
+   * 自动补上。这里按 `table_info` 挨个查一遍，缺哪列补哪列——`ADD COLUMN` 带默认值，旧行
+   * 读出来就是默认值，不必回填。
+   */
+  private migrate(): void {
+    const columnsOf = (table: string): Set<string> =>
+      new Set(
+        (this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[]).map((r) => String(r.name)),
+      );
+    const gateway = columnsOf('gateway_account');
+    if (!gateway.has('pat')) this.db.exec("ALTER TABLE gateway_account ADD COLUMN pat TEXT NOT NULL DEFAULT ''");
+    if (!gateway.has('machine_id')) this.db.exec("ALTER TABLE gateway_account ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''");
   }
 
   getState(accountId: string): AccountState | null {
@@ -361,9 +398,123 @@ export class Store {
       .reverse();
   }
 
+  /* ── API 服务 ─────────────────────────────────────────────────────────── */
+
+  /** 全部账户的网关设置与统计；没有行的账户按默认值处理，不在这里补行。 */
+  gatewayAccounts(): Map<string, GatewayAccountRow> {
+    const rows = this.db.prepare('SELECT * FROM gateway_account').all() as Record<string, unknown>[];
+    return new Map(
+      rows.map((r) => [
+        String(r.account_id),
+        {
+          enabled: Number(r.enabled) === 1,
+          priority: Number(r.priority) || 0,
+          requests: Number(r.requests) || 0,
+          failures: Number(r.failures) || 0,
+          inputTokens: Number(r.input_tokens) || 0,
+          outputTokens: Number(r.output_tokens) || 0,
+          lastUsedAt: toMs(r.last_used_at),
+          pat: String(r.pat ?? ''),
+          machineId: String(r.machine_id ?? ''),
+        },
+      ]),
+    );
+  }
+
+  /** 单个账户那一行；没有行时返回 null，由调用方按默认值处理。 */
+  gatewayAccount(accountId: string): GatewayAccountRow | null {
+    const row = this.db
+      .prepare('SELECT * FROM gateway_account WHERE account_id = ?')
+      .get(accountId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      enabled: Number(row.enabled) === 1,
+      priority: Number(row.priority) || 0,
+      requests: Number(row.requests) || 0,
+      failures: Number(row.failures) || 0,
+      inputTokens: Number(row.input_tokens) || 0,
+      outputTokens: Number(row.output_tokens) || 0,
+      lastUsedAt: toMs(row.last_used_at),
+      pat: String(row.pat ?? ''),
+      machineId: String(row.machine_id ?? ''),
+    };
+  }
+
+  /**
+   * 改某个账户的网关设置；只动传进来的那几项，统计不受影响。
+   *
+   * pat 一旦设成非空且这个账户还没有 machine_id，就随机生成一个并固定下来：Qoder 的反作弊
+   * 认的是「同一账户每次都用同一台机器」，machine_id 每次换会被判成异常。清空 PAT 时保留
+   * machine_id——用户过一会儿再把 PAT 填回来，身份不该跟着变。
+   */
+  setGatewayAccount(accountId: string, patch: Partial<GatewayAccountSetting> & { pat?: string }): void {
+    this.db
+      .prepare('INSERT OR IGNORE INTO gateway_account (account_id) VALUES (?)')
+      .run(accountId);
+    if (patch.enabled !== undefined) {
+      this.db
+        .prepare('UPDATE gateway_account SET enabled = ? WHERE account_id = ?')
+        .run(patch.enabled ? 1 : 0, accountId);
+    }
+    if (patch.priority !== undefined) {
+      this.db
+        .prepare('UPDATE gateway_account SET priority = ? WHERE account_id = ?')
+        .run(Math.trunc(patch.priority), accountId);
+    }
+    if (patch.pat !== undefined) {
+      const pat = patch.pat.trim();
+      this.db.prepare('UPDATE gateway_account SET pat = ? WHERE account_id = ?').run(pat, accountId);
+      if (pat) {
+        this.db
+          .prepare("UPDATE gateway_account SET machine_id = ? WHERE account_id = ? AND (machine_id IS NULL OR machine_id = '')")
+          .run(randomUUID(), accountId);
+      }
+    }
+  }
+
+  /**
+   * 记一次转发的结果。
+   *
+   * token 数是上游报的，可能一个都没报（流被客户端中途掐断时就是这样），此时只累计次数。
+   * 失败也要落账：卡片上「这个账户替我挡了多少次失败」和「用掉了多少 token」同样重要。
+   */
+  recordGatewayUse(
+    accountId: string,
+    ok: boolean,
+    inputTokens: number,
+    outputTokens: number,
+    usedAt = Date.now(),
+  ): void {
+    this.db.prepare('INSERT OR IGNORE INTO gateway_account (account_id) VALUES (?)').run(accountId);
+    this.db
+      .prepare(
+        `UPDATE gateway_account SET
+           requests = requests + 1,
+           failures = failures + ?,
+           input_tokens = input_tokens + ?,
+           output_tokens = output_tokens + ?,
+           last_used_at = ?
+         WHERE account_id = ?`,
+      )
+      .run(ok ? 0 : 1, Math.max(0, Math.trunc(inputTokens)), Math.max(0, Math.trunc(outputTokens)), toDateText(usedAt), accountId);
+  }
+
   close(): void {
     this.db.close();
   }
+}
+
+/**
+ * 库里那一行网关数据：设置与统计并在一起，读的时候本来就是一起读。
+ *
+ * pat / machineId 只服务端用，不进 GatewayAccountView，也就不会随卡片下发到浏览器——
+ * PAT 是密钥，界面只需要知道「设没设」，不需要拿到原文。
+ */
+export interface GatewayAccountRow extends GatewayAccountSetting, GatewayAccountStat {
+  /** Qoder 转发用的 PAT；非 Qoder 账户或未设置时为空串。 */
+  pat: string;
+  /** 本账户固定的 machine_id；设 PAT 时随机生成一次，之后不变。 */
+  machineId: string;
 }
 
 /**

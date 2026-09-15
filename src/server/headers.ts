@@ -136,6 +136,31 @@ export function claudeModelsHeaders(accessToken: string): Record<string, string>
   return claudeSdkHeaders(accessToken, CLAUDE_OAUTH_BETA);
 }
 
+/** Claude Code 自己那一族 beta 标记；转发对话时要跟着真实 CLI 一起声明。 */
+export const CLAUDE_CODE_BETA = 'claude-code-20250219';
+
+/**
+ * API 服务转发 `/v1/messages` 时用的请求头。
+ *
+ * 和保活那条路不同：保活是我们自己造一条最小请求，造得再像也是在追一个会变的目标，
+ * 所以交给本机的官方 CLI 去发（见 claudecli.ts）。转发不一样——请求体本来就出自一个
+ * 真实客户端，我们只是替它换一份凭证，因此这里补齐 SDK 身份就够了，剩下的照原样送出去。
+ *
+ * `extraBetas` 是客户端自己在 `anthropic-beta` 里声明的那些：它知道自己用了哪些实验特性，
+ * 我们不该替它删掉，但 OAuth 那个标记必须在——缺了它 OAuth 令牌会被 401 拒绝。
+ */
+export function claudeMessagesHeaders(
+  accessToken: string,
+  extraBetas: readonly string[] = [],
+): Record<string, string> {
+  const betas = [...new Set([CLAUDE_OAUTH_BETA, CLAUDE_CODE_BETA, ...extraBetas].filter(Boolean))];
+  return {
+    ...claudeSdkHeaders(accessToken, betas.join(',')),
+    // 转发一律走流式，因此 accept 不是 SDK 默认的 application/json
+    accept: 'text/event-stream',
+  };
+}
+
 /** chatgpt.com/backend-api 下 JSON 接口的浏览器身份请求头。 */
 export function codexWebHeaders(accessToken: string, accountId: string): Record<string, string> {
   const h: Record<string, string> = {

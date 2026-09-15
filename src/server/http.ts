@@ -255,6 +255,11 @@ export interface FetchOptions {
   method?: string;
   headers?: Record<string, string>;
   body?: string;
+  /**
+   * 真正要发出去的字节,给已经过签名/加密、原文不是 UTF-8 的请求体用(如 Qoder 转发)。
+   * 给了它就用它发送,而 body 仍是落库那份可读的明文——请求日志因此看得懂,发出去的是签名体。
+   */
+  bodyBytes?: Uint8Array;
   timeoutMs?: number;
   signal?: AbortSignal;
   audit?: Audit;
@@ -308,10 +313,13 @@ function toHeaders(raw: Record<string, string | string[] | undefined>): Headers 
 }
 
 export async function request(url: string, opts: FetchOptions = {}): Promise<HttpResponse> {
-  const { timeoutMs = 120_000, audit, method = 'GET', headers = {}, body, transport = 'undici' } = opts;
+  const { timeoutMs = 120_000, audit, method = 'GET', headers = {}, body, bodyBytes, transport = 'undici' } = opts;
   const signal = opts.signal ? AbortSignal.any([opts.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
   const via = currentProxy && shouldBypassProxy(url, currentBypass) ? direct : dispatcher;
   const sentAt = Date.now();
+  // 发出去的是签名字节(若有),落库记录的仍是可读明文 body。
+  // undici / fetch 运行时都收 Uint8Array;类型上 DOM 的 BodyInit 泛型对不齐,统一在出口处断言。
+  const sendBody = (bodyBytes ?? body) as string | undefined;
 
   // 记录的是这一刻真正要发出去的东西，不是事后重建的近似值
   const record: RequestRecord = { method, url, headers, body: body ?? '' };
@@ -335,7 +343,7 @@ export async function request(url: string, opts: FetchOptions = {}): Promise<Htt
       const init = {
         method,
         headers,
-        body,
+        body: sendBody,
         signal,
         dispatcher: via,
       } satisfies RequestInit & { dispatcher: Dispatcher };
@@ -364,7 +372,7 @@ export async function request(url: string, opts: FetchOptions = {}): Promise<Htt
       resp = await undiciRequest(url, {
           method: method as Dispatcher.HttpMethod,
           headers,
-          body,
+          body: sendBody,
           signal,
           dispatcher: via,
         });

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { AccountView, Window } from '../../shared/types.js';
+import type { GatewayAccountState } from '../../shared/gateway.js';
 import { amount, clock, countdown, day, daysUntil, percent, windowLabel } from '../format.js';
 import { QoderSwitchDialog } from './QoderSwitchDialog.js';
 
@@ -12,6 +13,21 @@ const SOURCE_LABEL: Record<string, string> = {
   'qoder-desktop': '导入自 Qoder Desktop',
   'qoder-ide': '导入自 Qoder IDE',
   oauth: '本程序登录',
+};
+
+/**
+ * 账户在 API 服务里的状态。
+ *
+ * 和上面那份保活状态各说各的：一个账户完全可能「保活已停止」却正在替 API 服务干活，
+ * 反过来也一样。两块状态在卡片上分处两处，就是为了不让人把它们当成同一件事。
+ */
+const GATEWAY_STATE: Record<GatewayAccountState, { label: string; hint: string }> = {
+  off: { label: '未参与', hint: '这个账户的额度不会被 API 服务用掉' },
+  ready: { label: '待命', hint: '随时可以接转发请求' },
+  busy: { label: '转发中', hint: '正在处理转发请求（仍然可以再接新的）' },
+  cooling: { label: '冷却中', hint: '连续失败太多，暂时不派活；可以点「立刻归队」提前结束' },
+  exhausted: { label: '额度用尽', hint: '已用额度过了设定的阈值，剩下的留给你自己的客户端' },
+  unusable: { label: '不可用', hint: '账户被禁用，或这家上游不支持转发' },
 };
 
 const STATE_LABEL: Record<AccountView['state'], string> = {
@@ -34,6 +50,7 @@ const ICON = {
   sync: 'M8 2.2v7.4M5.2 6.8 8 9.6l2.8-2.8M2.8 12v1.1a.9.9 0 0 0 .9.9h8.6a.9.9 0 0 0 .9-.9V12',
   remove: 'M2.8 4.3h10.4M6.1 4.3V3a1 1 0 0 1 1-1h1.8a1 1 0 0 1 1 1v1.3M4.4 4.3l.6 9.1a1 1 0 0 0 1 .9h4a1 1 0 0 0 1-.9l.6-9.1',
   swap: 'M2.5 5.5h11M10.8 2.8 13.5 5.5l-2.7 2.7M13.5 10.5h-11M5.2 7.8 2.5 10.5l2.7 2.7',
+  route: 'M3.4 12.6h2.2a3 3 0 0 0 3-3v-3.2a3 3 0 0 1 3-3h1.4M3.4 10.9a1.7 1.7 0 1 0 0 3.4 1.7 1.7 0 0 0 0-3.4ZM11.5 1.7 13.9 3.4l-2.4 1.7',
 } as const;
 
 function Icon({ name, size = 14 }: { name: keyof typeof ICON; size?: number }) {
@@ -99,6 +116,220 @@ function UsageRow({ window: w, now }: { window: Window; now: number }) {
   );
 }
 
+/**
+ * Qoder 账户的 PAT 那一行。
+ *
+ * PAT 和导入登录的令牌是两回事:它在 Qoder 账户页面单独申请,专供 API 转发。没有它,这个账户
+ * 在 API 服务里恒为「不可用」,所以这一行只在 Qoder 卡片上出现,且贴在 API 服务开关下面——
+ * 用户点开开关却发现不可用时,眼睛往下一挪就能看到该填什么。
+ *
+ * 输入框平时收起,只显示「已设置 / 未设置」;要改才点开。保存时服务端会真拿它去换一次令牌校验,
+ * 所以这里的 saving 可能要转个一两秒。
+ */
+function QoderPatRow({
+  id,
+  hasPat,
+  pending,
+  onSetPat,
+}: {
+  id: string;
+  hasPat: boolean;
+  pending: boolean;
+  onSetPat: (id: string, pat: string) => void;
+}) {
+  const [editing, setEditing] = useState(!hasPat);
+  const [value, setValue] = useState('');
+
+  const submit = () => {
+    const pat = value.trim();
+    if (pat === '') return;
+    onSetPat(id, pat);
+    setValue('');
+    setEditing(false);
+  };
+
+  return (
+    <div className="gateway-pat">
+      <div className="gateway-pat-head">
+        <span className={`gateway-pat-state ${hasPat ? 'set' : 'unset'}`} title="PAT 在 Qoder 账户页面单独申请，专供 API 转发用">
+          {hasPat ? '已设置 PAT' : '未设置 PAT'}
+        </span>
+        <div className="spacer" />
+        {hasPat && !editing && (
+          <button className="link" disabled={pending} onClick={() => setEditing(true)}>
+            更换
+          </button>
+        )}
+        {hasPat && (
+          <button
+            className="link danger"
+            disabled={pending}
+            title="清除后这个账户在 API 服务里会变回不可用"
+            onClick={() => {
+              setValue('');
+              setEditing(false);
+              onSetPat(id, '');
+            }}
+          >
+            清除
+          </button>
+        )}
+      </div>
+      {editing && (
+        <div className="gateway-pat-edit">
+          <input
+            type="password"
+            className="gateway-pat-input"
+            placeholder="pt-… 粘贴 Qoder 账户页面的 PAT"
+            value={value}
+            disabled={pending}
+            autoComplete="off"
+            spellCheck={false}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') submit();
+            }}
+          />
+          <button className="act key" disabled={pending || value.trim() === ''} onClick={submit}>
+            {pending ? '校验中…' : '保存并校验'}
+          </button>
+          {hasPat && (
+            <button className="link" disabled={pending} onClick={() => { setValue(''); setEditing(false); }}>
+              取消
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 卡片上的「API 服务」那一块：这个账户的额度给不给转发用。
+ *
+ * 放在额度条下面，是因为它说的正是同一件事的另一面——上面那几条讲这个账户还剩多少，
+ * 这里讲这些额度愿不愿意分给 API 服务。两块贴在一起，用户才不必在卡片和设置页之间来回对。
+ *
+ * 整块只在 supported 的 provider 上出现（见 a.gateway.supported）；不支持转发的上游摆一个
+ * 永远点不动的开关，比不摆更让人费解。Qoder 支持转发，但它靠账户页面单独申请的 PAT，
+ * 所以开关下面多一行 PAT 设置（见 QoderPatRow）。
+ */
+function GatewayBlock({
+  account: a,
+  now,
+  serviceOn,
+  pending,
+  onChange,
+  onReset,
+  patPending,
+  onSetPat,
+}: {
+  account: AccountView;
+  now: number;
+  /** API 服务的全局开关。关着时这里的设置照样能改，只是暂时不会有请求进来。 */
+  serviceOn: boolean;
+  pending: boolean;
+  onChange: (id: string, patch: { enabled?: boolean; priority?: number }) => void;
+  onReset: (id: string) => void;
+  /** 这张卡片的 PAT 正在提交校验。 */
+  patPending: boolean;
+  /** 设置或清空这个账户的 Qoder PAT；空串表示清除。 */
+  onSetPat: (id: string, pat: string) => void;
+}) {
+  const g = a.gateway;
+  const info = GATEWAY_STATE[g.state];
+  const tokens = g.inputTokens + g.outputTokens;
+
+  return (
+    <section className={`gateway ${g.enabled ? 'on' : 'off'}`}>
+      <div className="gateway-head">
+        <button
+          className={`gateway-toggle ${g.enabled ? 'on' : ''}`}
+          disabled={pending}
+          title={
+            g.enabled
+              ? '正在把这个账户的额度交给 API 服务。点一下停用：不影响已经在跑的请求，只是不再派新的给它'
+              : 'API 服务不会用这个账户的额度。点一下启用，它就进入账号池'
+          }
+          onClick={() => onChange(a.id, { enabled: !g.enabled })}
+          aria-pressed={g.enabled}
+        >
+          <Icon name="route" size={12} />
+          API 服务
+        </button>
+        <span className={`gateway-state ${g.state}`} title={info.hint}>
+          {/* 全局开关关着时，「待命」是句空话：没有请求会进来 */}
+          {g.enabled && !serviceOn ? '服务未开启' : info.label}
+          {g.state === 'busy' && g.inFlight > 0 && ` ${g.inFlight}`}
+        </span>
+        <div className="spacer" />
+        {/*
+          优先级只在参与转发时才有意义。数值越大越先被派活——默认的 fill-first 会把
+          最高优先级那个用到耗尽再换下一个，所以这里调的其实是「先烧谁的额度」。
+        */}
+        {g.enabled && (
+          <div
+            className="gateway-prio"
+            title="优先级：数值大的先被派活。fill-first 策略下，它决定额度按什么顺序一个个烧掉"
+          >
+            <button
+              disabled={pending || g.priority <= -99}
+              onClick={() => onChange(a.id, { priority: g.priority - 1 })}
+              aria-label="降低优先级"
+            >
+              −
+            </button>
+            <span>{g.priority}</span>
+            <button
+              disabled={pending || g.priority >= 99}
+              onClick={() => onChange(a.id, { priority: g.priority + 1 })}
+              aria-label="提高优先级"
+            >
+              +
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Qoder 转发靠账户页面单独申请的 PAT；没有它这个账户恒为「不可用」，所以入口就摆在开关下面 */}
+      {g.needsPat && (
+        <QoderPatRow id={a.id} hasPat={g.hasPat} pending={patPending} onSetPat={onSetPat} />
+      )}
+
+      {g.enabled && (
+        <div className="gateway-stats">
+          <span title="累计转发过的请求数，含失败的那些">
+            {g.requests} 次转发
+            {g.failures > 0 && <em className="warn"> · {g.failures} 次失败</em>}
+          </span>
+          {tokens > 0 && (
+            <span title={`输入 ${amount(g.inputTokens)} · 输出 ${amount(g.outputTokens)}`}>
+              {amount(tokens)} tokens
+            </span>
+          )}
+          {g.lastUsedAt > 0 && <span title="最近一次被派活的时刻">最近 {clock(g.lastUsedAt)}</span>}
+        </div>
+      )}
+
+      {g.cooldownUntil !== null && (
+        <p className="gateway-cool">
+          {countdown(g.cooldownUntil, now)} 后自动归队
+          <button className="link" disabled={pending} onClick={() => onReset(a.id)}>
+            立刻归队
+          </button>
+        </p>
+      )}
+
+      {/* 转发失败的原因单独说：它和保活失败不是一回事，混在 card-error 里会让人找错地方 */}
+      {g.lastError && (
+        <p className="gateway-error" title={g.lastError}>
+          {g.lastError}
+        </p>
+      )}
+    </section>
+  );
+}
+
 interface Props {
   account: AccountView;
   now: number;
@@ -125,6 +356,18 @@ interface Props {
   /** 这张卡片正在切换续期方式。 */
   switching: boolean;
   onQoderSwitched: () => void;
+  /** API 服务的全局开关；卡片上要据此说明「打开了也暂时不会有请求进来」。 */
+  gatewayEnabled: boolean;
+  /** 改这个账户的转发设置：卡片上的开关和优先级都走它。 */
+  onGatewayChange: (id: string, patch: { enabled?: boolean; priority?: number }) => void;
+  /** 让这个账户立刻结束冷却。 */
+  onGatewayReset: (id: string) => void;
+  /** 这张卡片的转发设置正在提交。 */
+  gatewayBusy: boolean;
+  /** 设置或清空这个账户的 Qoder PAT；空串表示清除。只有 Qoder 卡片会用到。 */
+  onSetPat: (id: string, pat: string) => void;
+  /** 这张卡片的 PAT 正在提交校验。 */
+  patBusy: boolean;
 }
 
 export function AccountCard({
@@ -145,6 +388,12 @@ export function AccountCard({
   syncing,
   switching,
   onQoderSwitched,
+  gatewayEnabled,
+  onGatewayChange,
+  onGatewayReset,
+  gatewayBusy,
+  onSetPat,
+  patBusy,
 }: Props) {
   const [qoderSwitchOpen, setQoderSwitchOpen] = useState(false);
   // 如果还没做过额度查询，就退回到单个已跟踪窗口的信息
@@ -265,6 +514,19 @@ export function AccountCard({
           windows.map((w) => <UsageRow key={w.name} window={w} now={now} />)
         )}
       </div>
+
+      {a.gateway.supported && (
+        <GatewayBlock
+          account={a}
+          now={now}
+          serviceOn={gatewayEnabled}
+          pending={gatewayBusy}
+          onChange={onGatewayChange}
+          onReset={onGatewayReset}
+          patPending={patBusy}
+          onSetPat={onSetPat}
+        />
+      )}
 
       {a.subscriptionEndsAt !== null && (
         <p className="subscription">

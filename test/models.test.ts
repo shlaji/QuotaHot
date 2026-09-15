@@ -5,11 +5,11 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   ACCOUNTS_DIR,
-  CLI_PROXY_API_DIR,
   DATA_DIR,
   DEFAULT_CONFIG,
   normalize,
 } from '../src/server/config.js';
+import { clientPath } from '../src/server/clientpaths.js';
 
 test('默认模型必须在可选清单里，否则界面下拉会渲染成空白', () => {
   assert.equal(isKnownModel('claude', DEFAULT_CONFIG.models.claude), true);
@@ -24,7 +24,7 @@ test('固定路径：账户目录在主目录下，导入来源指向 cli-proxy-
   }
   assert.ok(ACCOUNTS_DIR.startsWith(DATA_DIR));
   assert.notEqual(
-    CLI_PROXY_API_DIR,
+    clientPath('cli-proxy-api'),
     ACCOUNTS_DIR,
     '导入来源指向账户目录会把自己的凭证当成外部凭证再扫一遍',
   );

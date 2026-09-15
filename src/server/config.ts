@@ -2,8 +2,14 @@
 import { readFileSync } from 'node:fs';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { formatDailyTime, parseDailyTime } from '../shared/schedule.js';
+import { DEFAULT_GATEWAY_CONFIG, type GatewayConfig } from '../shared/gateway.js';
+import {
+  CLIENT_PATH_FIELDS,
+  CLIENT_PATH_KEYS,
+  type ClientPaths,
+} from '../shared/clientpaths.js';
 import type { AppConfig } from '../shared/types.js';
 
 /**
@@ -15,12 +21,6 @@ const CONFIG_PATH = join(DATA_DIR, 'config.json');
 export const DB_PATH = join(DATA_DIR, 'state.db');
 /** 程序自己的账户目录；凭证从别处导入后就只在这里读写。 */
 export const ACCOUNTS_DIR = join(DATA_DIR, 'accounts');
-/**
- * cli-proxy-api 的认证目录。
- * 和其余导入来源一样是各客户端的固定位置，不再作为配置项，见 server/import.ts。
- */
-export const CLI_PROXY_API_DIR = join(homedir(), '.cli-proxy-api');
-
 export const DEFAULT_CONFIG: AppConfig = {
   text: 'hi',
   dailyStart: '06:00',
@@ -46,9 +46,12 @@ export const DEFAULT_CONFIG: AppConfig = {
     '169.254.0.0/16',
     '100.64.0.0/10',
   ],
+  // 空表示每个客户端都用它在本机的默认位置，见 server/clientpaths.ts
+  clientPaths: {},
   // 全新安装时不自动跑：用户还没点过一次启动，就不该替他开始发送
   autoStart: false,
   autoStartIds: [],
+  gateway: { ...DEFAULT_GATEWAY_CONFIG },
 };
 
 function clampNumber(v: unknown, fallback: number, min: number, max: number): number {
@@ -104,8 +107,83 @@ export function normalize(raw: unknown): AppConfig {
     exclude: toStringArray(r.exclude),
     proxy: typeof r.proxy === 'string' ? r.proxy.trim() : d.proxy,
     noProxy: toStringArray(r.noProxy),
+    clientPaths: normalizeClientPaths(r.clientPaths),
     autoStart: Boolean(r.autoStart),
     autoStartIds: toStringArray(r.autoStartIds),
+    gateway: normalizeGateway(r.gateway),
+  };
+}
+
+/**
+ * 把 `~` 开头的路径展开成绝对路径。
+ * 界面上让人手敲完整的主目录很别扭，而这些路径本来就全在主目录下。
+ */
+function expandHome(path: string): string {
+  if (path === '~') return homedir();
+  if (path.startsWith('~/')) return join(homedir(), path.slice(2));
+  return path;
+}
+
+/**
+ * 收敛客户端路径覆盖。
+ *
+ * 只认识已知来源，只留绝对路径：相对路径会跟着进程的工作目录跑，而这个服务既可能从
+ * 终端启动也可能由 systemd 拉起，两处的工作目录不是一回事。不合格的项直接丢掉——
+ * 丢掉意味着回退到内置默认位置，也就是没配过时的行为，不会让服务起不来。
+ * 界面上那条「请填绝对路径」的提示由 validateClientPaths 在保存前给出。
+ */
+export function normalizeClientPaths(raw: unknown): ClientPaths {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const out: ClientPaths = {};
+  for (const key of CLIENT_PATH_KEYS) {
+    const value = r[key];
+    if (typeof value !== 'string') continue;
+    const path = expandHome(value.trim());
+    if (path && isAbsolute(path)) out[key] = path;
+  }
+  return out;
+}
+
+/**
+ * 在 *原始* 请求体上校验客户端路径，理由与 validateSchedule 相同：
+ * normalize() 会把填错的路径悄悄丢掉，用户看到的就成了「保存成功但没生效」。
+ * 合法时返回 null。
+ */
+export function validateClientPaths(raw: unknown): string | null {
+  const r = ((raw ?? {}) as { clientPaths?: unknown }).clientPaths;
+  if (r === undefined || r === null) return null;
+  if (typeof r !== 'object') return '客户端路径需要是一组「来源: 路径」';
+  const values = r as Record<string, unknown>;
+  for (const field of CLIENT_PATH_FIELDS) {
+    const value = values[field.key];
+    if (value === undefined || value === null || value === '') continue;
+    if (typeof value !== 'string') return `${field.label} 的路径需要是一段文本`;
+    const path = expandHome(value.trim());
+    if (!path) continue;
+    if (!isAbsolute(path)) return `${field.label} 需要填绝对路径，例如 /home/me/.codex/auth.json`;
+  }
+  return null;
+}
+
+/**
+ * 收敛 API 服务的设置。
+ *
+ * 老配置文件里没有这一段，因此每一项都要能从 undefined 里长出默认值——升级上来的用户
+ * 不该因为配置文件少了一段就启动失败，也不该因此稀里糊涂地把转发端点开起来。
+ */
+export function normalizeGateway(raw: unknown): GatewayConfig {
+  const r = (raw ?? {}) as Partial<GatewayConfig>;
+  const d = DEFAULT_GATEWAY_CONFIG;
+  return {
+    enabled: Boolean(r.enabled),
+    // key 里的空白全部去掉：用户多半是从别处粘进来的，末尾一个空格会让校验永远不过
+    apiKeys: toStringArray(r.apiKeys),
+    strategy: r.strategy === 'round-robin' ? 'round-robin' : d.strategy,
+    maxAttempts: clampNumber(r.maxAttempts, d.maxAttempts, 1, 10),
+    maxConsecutiveFailures: clampNumber(r.maxConsecutiveFailures, d.maxConsecutiveFailures, 1, 20),
+    cooldownSeconds: clampNumber(r.cooldownSeconds, d.cooldownSeconds, 0, 3600),
+    exhaustedPercent: clampNumber(r.exhaustedPercent, d.exhaustedPercent, 1, 100),
+    crossProvider: Boolean(r.crossProvider),
   };
 }
 
