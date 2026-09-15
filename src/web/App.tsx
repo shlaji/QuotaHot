@@ -295,6 +295,15 @@ export function App() {
     }).finally(() => setSendingId(null));
   };
 
+  const reloadAccounts = useCallback(async () => {
+    try {
+      const state = await api.state();
+      setAccounts(state.accounts);
+    } catch (err) {
+      notify(`账户刷新失败: ${String(err instanceof Error ? err.message : err)}`);
+    }
+  }, [notify]);
+
   if (!config || !status) {
     return <div className="loading">加载中…</div>;
   }
@@ -421,6 +430,7 @@ export function App() {
                       checking={checkingId === a.id}
                       selected={selected.has(a.id)}
                       onSelectChange={toggleSelected}
+                      onQoderSwitched={() => void reloadAccounts()}
                     />
                   ))}
                 </div>

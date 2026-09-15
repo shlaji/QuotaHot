@@ -19,6 +19,7 @@ import type {
   SyncToClientResult,
   UsageResult,
 } from '../shared/types.js';
+import type { QoderClient, QoderClientTarget, QoderSwitchResult } from '../shared/qoder.js';
 
 async function json<T>(input: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(input, {
@@ -52,6 +53,13 @@ export const api = {
     json<ImportResult>('/api/accounts/import', {
       method: 'POST',
       body: JSON.stringify({ sources }),
+    }),
+  qoderClients: (id: string) =>
+    json<QoderClientTarget[]>(`/api/accounts/${encodeURIComponent(id)}/qoder-clients`),
+  qoderSwitch: (id: string, client: QoderClient) =>
+    json<QoderSwitchResult>(`/api/accounts/${encodeURIComponent(id)}/qoder-switch`, {
+      method: 'POST',
+      body: JSON.stringify({ client, confirm: true }),
     }),
   /** 无条件换一份新 token；只对自动刷新的账户有效。 */
   forceRefresh: (id: string) =>

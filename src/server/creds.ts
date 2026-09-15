@@ -14,6 +14,7 @@ import { followSourceOf, readClientTokens, type ClientTokens } from './clientfil
 import { request, type Audit, type HttpResponse } from './http.js';
 import { claudeOAuthHeaders, diagnose } from './headers.js';
 import type { Provider } from '../shared/types.js';
+import { record, type QoderSession } from './qoder-session.js';
 
 // 两家上游公开的 OAuth client ID，与官方 CLI 保持一致
 export const CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
@@ -276,6 +277,7 @@ export interface AccountInput {
   autoRefresh?: boolean;
   /** 跟随模式下的同步来源文件；导入时记下，之后每次续期都回到它。 */
   syncPath?: string;
+  qoderSession?: QoderSession;
 }
 
 /**
@@ -283,9 +285,33 @@ export interface AccountInput {
  * 因此重复导入或重新登录都是覆盖，而不是不断堆出新文件。
  */
 export async function saveAccount(dir: string, input: AccountInput, signal?: AbortSignal): Promise<string> {
+  if (input.provider !== 'qoder') return saveAccountUnlocked(dir, input, signal);
+  await mkdir(dir, { recursive: true });
+  return withCredentialLock(join(dir, '.qoder-import'), async () => {
+    const existing = input.userId ? (await loadAccounts(dir)).find((account) => account.provider === 'qoder' && account.userId === input.userId) : undefined;
+    const normalized = { ...input, email: existing?.email ?? input.email.toLowerCase() };
+    const path = existing?.path ?? join(dir, `qoder-${slug(normalized.email)}.json`);
+    return withCredentialLock(path, () => saveAccountUnlocked(dir, normalized, signal, path));
+  });
+}
+
+async function saveAccountUnlocked(dir: string, input: AccountInput, signal?: AbortSignal, destination?: string): Promise<string> {
   signal?.throwIfAborted();
   await mkdir(dir, { recursive: true });
-  const path = join(dir, `${input.provider}-${slug(input.email)}.json`);
+  const path = destination ?? join(dir, `${input.provider}-${slug(input.email)}.json`);
+  let sessions: Record<string, unknown> = {};
+  if (input.provider === 'qoder') {
+    try {
+      const previous: unknown = JSON.parse(await readFile(path, 'utf8'));
+      if (record(previous)) {
+        if (previous.user_id && input.userId && previous.user_id !== input.userId) throw new Error('Qoder 同名账户身份不一致，拒绝覆盖');
+        if (record(previous.qoder_sessions)) sessions = previous.qoder_sessions;
+      }
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+    }
+    if (input.qoderSession) sessions = { ...sessions, [input.qoderSession.client]: input.qoderSession };
+  }
   const data = {
     type: input.provider,
     email: input.email,
@@ -301,6 +327,7 @@ export async function saveAccount(dir: string, input: AccountInput, signal?: Abo
     auto_refresh: input.autoRefresh !== false,
     sync_path: input.syncPath ?? '',
     sync_source: input.source,
+    ...(input.provider === 'qoder' ? { qoder_sessions: sessions } : {}),
   };
   const tmp = `${path}.${randomUUID()}.tmp`;
   try {
@@ -595,7 +622,7 @@ async function syncQoder(
     return true;
   }
 
-  const tokens = await readClientTokens('qoder-ide', acct.syncPath);
+  const tokens = await readClientTokens(acct.syncSource || acct.source || 'qoder-ide', acct.syncPath);
   if (!tokens) {
     // 读不出来时先用手里这份：真失效了，接口会以 401 说明白，比这里猜一个理由准确
     log('warn', `没能从 ${acct.syncPath} 读出 Qoder 令牌，仍沿用上次同步到的那份`);

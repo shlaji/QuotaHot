@@ -15,12 +15,15 @@ import {
   findClaim,
   decodeJwt,
   saveAccount,
+  loadAccounts,
   tokenExpiresAt,
   type AccountInput,
 } from './creds.js';
 import { readClaudeCodeEmail, readJsonFile as readJson } from './clientfile.js';
 import { CLI_PROXY_API_DIR } from './config.js';
 import { profileOf, qoderStateDbPath, readQoderSnapshot } from './qoder.js';
+import { captureQoderSession } from './qoder-native.js';
+import { qoderClientPath, QODER_LABELS } from './qoder-paths.js';
 import type { ImportCandidate, ImportResult, Provider } from '../shared/types.js';
 
 /** 一处可导入的来源。 */
@@ -143,12 +146,13 @@ async function readClaudeCli(path: string): Promise<AccountInput[]> {
 async function readQoderIde(path: string): Promise<AccountInput[]> {
   // 库不存在时抛 ENOENT，让 scanSources 显示“本机没有这个路径”，而不是一句解密失败
   await stat(path);
-  const profile = profileOf(readQoderSnapshot(path));
+  const captured = process.platform === 'linux' ? await captureQoderSession('qoder-ide', path) : null;
+  const profile = captured ?? profileOf(readQoderSnapshot(path));
   if (!profile.accessToken) return [];
   return [
     {
       provider: 'qoder',
-      email: profile.email || profile.displayName || profile.userId || 'qoder',
+      email: profile.email || profile.userId,
       accountId: profile.userId,
       userId: profile.userId,
       plan: profile.plan,
@@ -158,6 +162,7 @@ async function readQoderIde(path: string): Promise<AccountInput[]> {
       source: 'qoder-ide',
       syncPath: path,
       autoRefresh: false,
+      ...(captured ? { qoderSession: captured.session } : {}),
     },
   ];
 }
@@ -189,6 +194,16 @@ function knownSources(): Source[] {
       path: qoderStateDbPath(),
       read: readQoderIde,
     },
+    ...(['qoder-cli', 'qoder-desktop'] as const).map((client) => ({
+      id: client, label: QODER_LABELS[client], path: qoderClientPath(client),
+      read: async (path: string): Promise<AccountInput[]> => {
+        const profile = await captureQoderSession(client, path);
+        return [{ provider: 'qoder', email: profile.email || profile.userId, userId: profile.userId,
+          accountId: profile.userId, accessToken: profile.accessToken, refreshToken: profile.refreshToken,
+          expiresAt: profile.expiresAt, source: client, syncPath: path, autoRefresh: false,
+          qoderSession: profile.session }];
+      },
+    })),
   ];
 }
 
@@ -241,13 +256,14 @@ export async function importFrom(accountsDir: string, sourceIds: string[]): Prom
     let accounts: AccountInput[];
     try {
       accounts = await src.read(src.path);
-    } catch {
-      continue; // 来源不存在时静默跳过；scanSources 已经把原因告诉过用户
+    } catch (error) {
+      if (wanted.has(src.id)) result.skipped.push({ id: src.id, reason: error instanceof Error ? error.message : '读取来源失败' });
+      continue;
     }
 
     for (const acct of accounts) {
       const id = `${acct.provider}:${acct.email}`;
-      if (seen.has(id)) {
+      if (seen.has(id) && acct.provider !== 'qoder') {
         result.skipped.push({ id, reason: '已从其他来源导入' });
         continue;
       }
@@ -256,9 +272,10 @@ export async function importFrom(accountsDir: string, sourceIds: string[]): Prom
         result.skipped.push({ id, reason: '缺少 refresh_token，过期后无法续期' });
         continue;
       }
-      seen.add(id);
-      await saveAccount(accountsDir, acct);
-      result.imported.push(id);
+      const saved = await saveAccount(accountsDir, acct);
+      const savedId = acct.provider === 'qoder' ? (await loadAccounts(accountsDir)).find((account) => account.path === saved)?.id ?? id : id;
+      if (!seen.has(savedId)) result.imported.push(savedId);
+      seen.add(savedId);
     }
   }
   return result;

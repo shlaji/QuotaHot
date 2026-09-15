@@ -61,17 +61,21 @@ export function qoderStateDbPath(userDataDir = qoderUserDataDir()): string {
   return join(userDataDir, 'User', 'globalStorage', 'state.vscdb');
 }
 
-function qoderMachineTokenPath(userDataDir = qoderUserDataDir()): string {
+/** Qoder IDE 的机器令牌缓存，放在用户数据目录的 SharedClientCache 下。 */
+function qoderIdeMachineTokenPath(userDataDir = qoderUserDataDir()): string {
   return join(userDataDir, 'SharedClientCache', 'cache', 'machine_token.json');
 }
 
 /**
- * 读取 IDE 缓存的机器标识。
- * 整份缓存都是可选的：读不到就发一组只有 Authorization 的请求头，多数接口照常返回。
+ * Qoder 桌面版 / CLI 的机器令牌缓存。
+ * 桌面版不走平台数据目录，凭证和缓存都固定放在 home 下的 ~/.qoder，因此这里不按平台分叉。
  */
-export async function readQoderMachine(
-  path = qoderMachineTokenPath(),
-): Promise<QoderMachine | null> {
+function qoderCliMachineTokenPath(): string {
+  return join(homedir(), '.qoder', 'shared_client', 'cache', 'machine_token.json');
+}
+
+/** 从一个 machine_token.json 里读出机器标识；文件缺失或没有 token 时返回 null。 */
+async function readMachineTokenFile(path: string): Promise<QoderMachine | null> {
   let data: Record<string, unknown>;
   try {
     const parsed = JSON.parse(await readFile(path, 'utf8'));
@@ -91,6 +95,23 @@ export async function readQoderMachine(
     cosyVersion: str(data.version),
   };
   return machine.token ? machine : null;
+}
+
+/**
+ * 读取本机缓存的机器标识。
+ *
+ * 整份缓存都是可选的：读不到就发一组只有 Authorization 的请求头，多数接口照常返回。
+ * 来源有两个——IDE 的 SharedClientCache 和桌面版/CLI 的 ~/.qoder——它们的机器标识各自独立，
+ * 装了哪个就用哪个。默认按「IDE 优先、回退到桌面版」的顺序找第一个能读到 token 的；
+ * 显式传入 path 时只读这一个，便于测试和定向读取。
+ */
+export async function readQoderMachine(path?: string): Promise<QoderMachine | null> {
+  if (path !== undefined) return readMachineTokenFile(path);
+  for (const candidate of [qoderIdeMachineTokenPath(), qoderCliMachineTokenPath()]) {
+    const machine = await readMachineTokenFile(candidate);
+    if (machine) return machine;
+  }
+  return null;
 }
 
 /* ── Electron safeStorage 解密 ───────────────────────────────────────────── */
@@ -119,11 +140,11 @@ function commandOutput(cmd: string, args: string[]): string {
  * 空密码，因此拿不到也不算失败，让调用方再试一遍空密码派生的密钥。
  * v10 则是众所周知的固定密码 'peanuts'。
  */
-function linuxKeys(prefix: string): Buffer[] {
+function linuxKeys(prefix: string, application = 'Qoder'): Buffer[] {
   const empty = deriveKey('', 1);
   if (prefix === 'v10') return [deriveKey('peanuts', 1), empty];
   const keys: Buffer[] = [];
-  for (const app of ['Qoder', 'qoder']) {
+  for (const app of [application, application.toLowerCase()]) {
     const password = commandOutput('secret-tool', ['lookup', 'application', app]);
     if (password) {
       keys.push(deriveKey(password, 1));
@@ -168,7 +189,7 @@ function decryptCbc(payload: Buffer, key: Buffer): string {
  * Windows 用的是 DPAPI + AES-256-GCM，密钥只能通过 Win32 API 拿到，纯 Node 做不了——
  * 那里如实报错，而不是给出一段乱码让用户以为是别的问题。
  */
-function decryptSafeStorage(encrypted: Buffer): string {
+export function decryptSafeStorage(encrypted: Buffer, application = 'Qoder'): string {
   const prefix = encrypted.subarray(0, 3).toString('latin1');
   if (prefix !== 'v10' && prefix !== 'v11') {
     throw new Error(`无法识别的 safeStorage 密文前缀: ${JSON.stringify(prefix)}`);
@@ -178,7 +199,7 @@ function decryptSafeStorage(encrypted: Buffer): string {
   }
 
   const body = encrypted.subarray(3);
-  const keys = process.platform === 'darwin' ? macKeys() : linuxKeys(prefix);
+  const keys = process.platform === 'darwin' ? macKeys() : linuxKeys(prefix, application);
   if (keys.length === 0) {
     throw new Error('没能取到 Qoder 的 safeStorage 密钥，请确认系统钥匙串/密钥环可用');
   }
@@ -197,7 +218,7 @@ function decryptSafeStorage(encrypted: Buffer): string {
  * ItemTable 里的值：要么是明文 JSON，要么是 `{"data":[…字节…]}` 这样的密文包装。
  * 认不出来时原样返回，交给上层去解析——上游改格式时至少还能看到原文。
  */
-function decodeSecretValue(raw: string): string {
+export function decodeSecretValue(raw: string): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);

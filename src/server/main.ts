@@ -42,6 +42,7 @@ import type {
   StateResponse,
 } from '../shared/types.js';
 import { APP_VERSION } from '../version.js';
+import { qoderRoutes } from './qoder-routes.js';
 
 const PORT = Number(process.env.PORT ?? 8686);
 const HOST = process.env.QUOTAHOT_HOST || '127.0.0.1';
@@ -115,6 +116,10 @@ const firstRunImport = importIfEmpty(cfgMod.ACCOUNTS_DIR)
 const app = new Hono();
 app.use('*', accessGuard(webAuth));
 const api = new Hono();
+api.route('/', qoderRoutes({ accountsDir: cfgMod.ACCOUNTS_DIR, changed: async () => {
+  await checkClients(false);
+  await pushAccounts();
+} }));
 
 api.get('/state', async (c) => {
   const body: StateResponse = {

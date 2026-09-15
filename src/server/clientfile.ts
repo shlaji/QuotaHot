@@ -236,6 +236,8 @@ export const CLIENT_LABELS: Record<string, string> = {
   'codex-cli': 'Codex CLI',
   opencode: 'OpenCode',
   'qoder-ide': 'Qoder IDE',
+  'qoder-cli': 'Qoder CLI',
+  'qoder-desktop': 'Qoder 桌面端',
 };
 
 /** 按来源标识挑解析方式；来源不认识时返回 null。 */
@@ -248,6 +250,17 @@ export async function readClientTokens(
   if (source === 'opencode') return readOpencodeFile(path);
   if (source === 'cli-proxy-api') return readCliProxyApiFile(path);
   if (source === 'qoder-ide') return readQoderIdeFile(path);
+  if (source === 'qoder-cli' || source === 'qoder-desktop') {
+    try {
+      const { captureQoderSession } = await import('./qoder-native.js');
+      const captured = await captureQoderSession(source, path);
+      return { accessToken: captured.accessToken, refreshToken: captured.refreshToken, idToken: '',
+        accountId: captured.userId, email: captured.email, expiresAt: captured.expiresAt };
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      return null;
+    }
+  }
   return null;
 }
 

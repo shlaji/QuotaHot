@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { CLIENT_LABELS, fileExists, readClientTokens } from './clientfile.js';
 import { opencodeAuthPath } from './clientsync.js';
 import { qoderStateDbPath } from './qoder.js';
+import { qoderClientPath, QODER_LABELS } from './qoder-paths.js';
 import { identityOf, whoOf, type Account } from './creds.js';
 import type { ClientUse, Provider } from '../shared/types.js';
 
@@ -57,6 +58,9 @@ function defaultSlots(): ClientSlot[] {
       path: qoderStateDbPath(),
       provider: 'qoder',
     },
+    ...(['qoder-cli', 'qoder-desktop'] as const).map((source): ClientSlot => ({
+      source, label: QODER_LABELS[source], path: qoderClientPath(source), provider: 'qoder',
+    })),
   ];
 }
 

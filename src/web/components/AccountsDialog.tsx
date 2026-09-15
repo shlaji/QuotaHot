@@ -7,6 +7,8 @@ const SOURCE_LABEL: Record<string, string> = {
   'cli-proxy-api': 'cli-proxy-api 认证目录',
   'codex-cli': 'Codex CLI（~/.codex/auth.json）',
   'claude-cli': 'Claude Code（~/.claude/.credentials.json）',
+  'qoder-cli': 'Qoder CLI',
+  'qoder-desktop': 'Qoder Desktop',
   'qoder-ide': 'Qoder IDE（globalStorage/state.vscdb）',
 };
 

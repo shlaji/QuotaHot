@@ -1,11 +1,15 @@
+import { useState } from 'react';
 import type { AccountView, Window } from '../../shared/types.js';
 import { amount, clock, countdown, day, daysUntil, percent, windowLabel } from '../format.js';
+import { QoderSwitchDialog } from './QoderSwitchDialog.js';
 
 /** 来源标识到展示名的映射；未知来源原样展示。 */
 const SOURCE_LABEL: Record<string, string> = {
   'cli-proxy-api': '导入自 cli-proxy-api',
   'codex-cli': '导入自 Codex CLI',
   'claude-cli': '导入自 Claude Code',
+  'qoder-cli': '导入自 Qoder CLI',
+  'qoder-desktop': '导入自 Qoder Desktop',
   'qoder-ide': '导入自 Qoder IDE',
   oauth: '本程序登录',
 };
@@ -120,6 +124,7 @@ interface Props {
   syncing: boolean;
   /** 这张卡片正在切换续期方式。 */
   switching: boolean;
+  onQoderSwitched: () => void;
 }
 
 export function AccountCard({
@@ -139,7 +144,9 @@ export function AccountCard({
   refreshing,
   syncing,
   switching,
+  onQoderSwitched,
 }: Props) {
+  const [qoderSwitchOpen, setQoderSwitchOpen] = useState(false);
   // 如果还没做过额度查询，就退回到单个已跟踪窗口的信息
   const windows =
     a.windows.length > 0
@@ -317,6 +324,11 @@ export function AccountCard({
       <footer className="card-acts">
         <div className="act-rows">
           <div className="act-row">
+            {a.provider === 'qoder' && (
+              <button className="act key" onClick={() => setQoderSwitchOpen(true)}>
+                切换账户
+              </button>
+            )}
             {schedulable && (
               <button
                 className="act key"
@@ -390,6 +402,13 @@ export function AccountCard({
           </button>
         </div>
       </footer>
+      <QoderSwitchDialog
+        accountId={a.id}
+        email={a.email}
+        open={qoderSwitchOpen}
+        onClose={() => setQoderSwitchOpen(false)}
+        onSwitched={onQoderSwitched}
+      />
     </article>
   );
 }
