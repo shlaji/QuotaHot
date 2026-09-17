@@ -107,6 +107,15 @@ export async function getUid(pat: string): Promise<string> {
   return uid;
 }
 
+export function assertQoderIdentity(patUid: string, accountUserId: string): void {
+  if (!patUid || !accountUserId) {
+    throw new QoderAuthError(403, 'Qoder PAT 身份无法确认');
+  }
+  if (patUid !== accountUserId) {
+    throw new QoderAuthError(403, 'Qoder PAT 身份与账户不一致');
+  }
+}
+
 /** 用户重设 PAT 时清掉旧缓存,别让下一次转发拿着上一份 PAT 的 jt/uid。 */
 export function forgetQoderAuth(pat: string): void {
   jtCache.delete(pat);

@@ -13,7 +13,7 @@ import { parseSse } from './sse.js';
 import { toCodexRequest } from './codex.js';
 import { fromCodexStream } from './codex.js';
 import { fromQoderStream, qoderTierFor, toQoderBody } from './qoder.js';
-import { getJobToken, getUid, QoderAuthError } from './qoder-auth.js';
+import { assertQoderIdentity, getJobToken, getUid, QoderAuthError } from './qoder-auth.js';
 import { cosyVersion } from './qoder-version.js';
 import { signer } from './qoder-signer.js';
 import type { AnthropicRequest, EventStream } from './anthropic.js';
@@ -91,7 +91,7 @@ export interface ForwardOptions {
    * Qoder 转发的凭证:账户页面单独设的 PAT 与本账户固定的 machine_id。
    * 只在目标是 Qoder 账户时给,由 service 层从库里那一行读出来。
    */
-  qoder?: { pat: string; machineId: string };
+  qoder?: { pat: string; machineId: string; userId: string };
   signal?: AbortSignal;
 }
 
@@ -165,6 +165,7 @@ export async function forwardToQoder(
   try {
     jt = await getJobToken(creds.pat);
     uid = await getUid(creds.pat);
+    assertQoderIdentity(uid, creds.userId);
   } catch (err) {
     // 401/403 是 PAT 本身的问题,交给上层记到账户头上;其余当基础设施抖动(状态置 0 不追责)
     const status = err instanceof QoderAuthError ? err.status : 0;

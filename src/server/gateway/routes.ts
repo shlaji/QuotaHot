@@ -18,7 +18,7 @@ import { NoAccountError, runForward, type GatewayDeps } from './service.js';
 import { isForwardable } from './pool.js';
 import { betasFrom, UpstreamError } from './upstream.js';
 import { needsPat } from '../../shared/gateway.js';
-import { forgetQoderAuth, getUid, QoderAuthError } from './qoder-auth.js';
+import { assertQoderIdentity, forgetQoderAuth, getUid, QoderAuthError } from './qoder-auth.js';
 import type { EventStream } from './anthropic.js';
 import type { Context } from 'hono';
 import type { GatewayStatus } from '../../shared/gateway.js';
@@ -342,6 +342,7 @@ export function gatewayAdminRoutes(deps: GatewayDeps, baseUrl: () => string): Ho
     // 校验:换一次 job token 再取 uid,任一步失败都别落库
     try {
       const uid = await getUid(pat);
+      assertQoderIdentity(uid, account.userId);
       if (old && old !== pat) forgetQoderAuth(old);
       deps.store.setGatewayAccount(id, { pat });
       // PAT 一到位,账户就从「不可用」变成能接活;顺手清掉之前因缺 PAT 攒下的冷却
