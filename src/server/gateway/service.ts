@@ -113,7 +113,7 @@ export interface ForwardOutcome {
  * 客户端中途断开会让这个生成器被 `return()` 掉，finally 因此也要负责收尾：不然那个账户的
  * 在飞计数会永远停在 1，界面上看就是一个再也闲不下来的账户。
  */
-async function* accounted(
+export async function* accounted(
   deps: GatewayDeps,
   account: Account,
   events: EventStream,
@@ -121,6 +121,7 @@ async function* accounted(
 ): EventStream {
   let inputTokens = 0;
   let outputTokens = 0;
+  let streamError = '';
   let settled = false;
   const finish = (error: string): void => {
     if (settled) return;
@@ -141,9 +142,10 @@ async function* accounted(
       } catch {
         /* 记账读不出来不影响转发，继续把事件交给客户端 */
       }
+      if (evt.event === 'error') streamError = '上游返回错误事件';
       yield evt;
     }
-    finish('');
+    finish(streamError);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     deps.log('warn', `转发中断: ${message}`, account.id);
@@ -192,11 +194,11 @@ export async function runForward(
 
     try {
       // Qoder 转发不看导入登录那份令牌,而看账户页面单独设的 PAT;别的 provider 才需要 ensureFresh
-      let qoder: { pat: string; machineId: string } | undefined;
+      let qoder: { pat: string; machineId: string; userId: string } | undefined;
       if (needsPat(account.provider)) {
         const row = deps.store.gatewayAccount(account.id);
         if (!row || !row.pat) throw new UpstreamError(401, `${account.email} 未设置 Qoder PAT`);
-        qoder = { pat: row.pat, machineId: row.machineId };
+        qoder = { pat: row.pat, machineId: row.machineId, userId: account.userId };
       } else if (!(await ensureFresh(account, (level, message) => deps.log(level, message, account!.id)))) {
         throw new UpstreamError(401, `${account.email} 的令牌不可用`);
       }
