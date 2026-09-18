@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 
 const COMMAND = ${JSON.stringify(typeof command === 'string' ? [command] : command)};
 const classifyQuotaSignal = ${classifyQuotaSignal.toString()};
+const HOOK_STDERR_LIMIT = 8192;
 const SESSION_CACHE_LIMIT = 128;
 const TOMBSTONE_LIMIT = 1024;
 const TOMBSTONE_TTL_MS = 600000;
@@ -110,28 +111,35 @@ function callHook(payload) {
     const parts = COMMAND;
     let child;
     try {
-      child = spawn(parts[0], parts.slice(1), { stdio: ["pipe", "pipe", "ignore"] });
+      child = spawn(parts[0], parts.slice(1), { stdio: ["pipe", "pipe", "pipe"] });
     } catch {
-      resolve(null);
+      resolve({ value: null, diagnostic: "" });
       return;
     }
     let out = "";
+    let stderrBytes = 0;
+    let stderrTruncated = false;
     let settled = false;
     let inputError = false;
     let killTimer;
+    const stderrSummary = () => {
+      if (stderrBytes === 0) return "";
+      if (stderrTruncated) return "hook emitted at least " + HOOK_STDERR_LIMIT + " bytes on stderr";
+      return "hook emitted " + stderrBytes + " bytes on stderr";
+    };
     const finish = (value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       clearTimeout(killTimer);
-      resolve(value);
+      resolve({ value, diagnostic: stderrSummary() });
     };
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
       killTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
       settled = true;
       clearTimeout(timer);
-      resolve(null);
+      resolve({ value: null, diagnostic: stderrSummary() });
     }, 120000);
     child.stdout.on("data", (data) => {
       out += data.toString();
@@ -139,6 +147,11 @@ function callHook(payload) {
         child.kill("SIGTERM");
         finish(null);
       }
+    });
+    child.stderr.on("data", (data) => {
+      const total = stderrBytes + Buffer.byteLength(data);
+      stderrTruncated ||= total > HOOK_STDERR_LIMIT;
+      stderrBytes = Math.min(total, HOOK_STDERR_LIMIT);
     });
     child.on("error", () => finish(null));
     child.stdin.on("error", () => {
@@ -168,7 +181,9 @@ export const QuotaHot = async ({ client }) => {
 
   let lastOutcome = "";
   const run = async (payload) => {
-    const out = await callHook(payload);
+    const hook = await callHook(payload);
+    const out = hook?.value;
+    const diagnostic = hook?.diagnostic || "";
     const outcome = out?.switched ? "switched" : out?.outcome || "unknown";
     if (outcome !== lastOutcome) {
       lastOutcome = outcome;
@@ -181,7 +196,8 @@ export const QuotaHot = async ({ client }) => {
       if (messages[outcome]) {
         toast("QuotaHot: " + messages[outcome], "warning");
         try {
-          client?.app?.log?.({ body: { service: "quotahot", level: "info", message: outcome } })?.catch?.(() => {});
+          const message = diagnostic ? outcome + " (" + diagnostic + ")" : outcome;
+          client?.app?.log?.({ body: { service: "quotahot", level: "info", message } })?.catch?.(() => {});
         } catch {
           console.warn("[QuotaHot] " + outcome);
         }

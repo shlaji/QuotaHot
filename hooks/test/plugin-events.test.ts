@@ -58,7 +58,7 @@ async function fixture(t: TestContext, messages: readonly object[], delay = 0, m
   const counter = join(directory, 'spawns');
   const command = join(directory, 'quotahot-hook');
   const commandPath = mode === 'spawn-error' ? join(directory, 'missing') : command;
-  const commandBody = mode === 'epipe' ? `printf '%s' '{"switched":true,"message":"safe"}'; exec 0>&-; sleep .01` : mode === 'malformed' ? "printf '%s' nope" : mode === 'oversized' ? 'head -c 65537 /dev/zero' : mode === 'nonzero' ? 'exit 2' : mode === 'hung' ? 'sleep 1' : `printf x >> ${JSON.stringify(counter)}
+  const commandBody = mode === 'epipe' ? `printf '%s' '{"switched":true,"message":"safe"}'; exec 0>&-; sleep .01` : mode === 'malformed' ? "printf '%s' nope" : mode === 'oversized' ? 'head -c 65537 /dev/zero' : mode === 'nonzero' ? 'exit 2' : mode === 'hung' ? 'sleep 1' : mode === 'stderr' ? `printf '%s' 'Bearer secret-token account@example.com' >&2\nhead -c 131072 /dev/zero >&2\nprintf x >> ${JSON.stringify(counter)}\nprintf '%s' '${response}'` : `printf x >> ${JSON.stringify(counter)}
 printf '%s' '${response}'`;
   await writeFile(command, `#!/bin/sh
 ${mode === 'epipe' ? '' : 'cat >/dev/null'}
@@ -66,19 +66,17 @@ ${commandBody}
 `);
   await chmod(command, 0o700);
   const pluginPath = join(directory, 'plugin.mjs');
-  const generated = mode === 'hung'
-    ? opencodePlugin(command).replace('120000', '20').replace('1000', '5')
-    : mode === 'late-lookup'
-      ? opencodePlugin(command).replace('2000', '20')
-      : opencodePlugin(commandPath);
+  const generated = mode === 'hung' ? opencodePlugin(command).replace('120000', '20').replace('1000', '5') : mode === 'stderr' ? opencodePlugin(command).replace('120000', '100').replace('1000', '5') : mode === 'late-lookup' ? opencodePlugin(command).replace('2000', '20') : opencodePlugin(commandPath);
   await writeFile(pluginPath, generated);
   const { QuotaHot } = await import(pluginPath);
   let lookups = 0;
   const notifications: Array<{ message: string; variant: string }> = [];
+  const logs: Array<{ message: string; level: string }> = [];
   const plugin = await QuotaHot({
     client: {
       tui: { showToast: async ({ body }: { body: { message: string; variant: string } }) => { notifications.push(body); } },
-      app: { log: () => {
+      app: { log: ({ body }: { body: { message: string; level: string } }) => {
+        logs.push(body);
         if (mode === 'log-throw') throw new Error('synthetic logging failure');
         return Promise.resolve();
       } },
@@ -92,7 +90,7 @@ ${commandBody}
       },
     },
   });
-  return { plugin, counter, notifications, get lookups() { return lookups; } };
+  return { plugin, counter, notifications, logs, get lookups() { return lookups; } };
 }
 
 function retry(sessionID: string, message: string) {
@@ -210,6 +208,15 @@ test('spawn, stdio, protocol, exit, and timeout failures settle without success 
     await fixtureState.plugin.event(retry(mode, 'quota_exhausted'));
     await assert.rejects(readFile(fixtureState.counter, 'utf8'), { code: 'ENOENT' });
   }
+});
+
+test('large child stderr is drained without corrupting stdout or echoing diagnostics', async (t) => {
+  const state = await fixture(t, [], 0, 'stderr');
+  await state.plugin.event(assistant('stderr', 'message-stderr', 'openai', 1));
+  await state.plugin.event(retry('stderr', 'quota_exhausted'));
+  assert.equal(await readFile(state.counter, 'utf8'), 'x');
+  assert.match(JSON.stringify(state.logs), /switched \(hook emitted at least 8192 bytes on stderr\)/);
+  assert.doesNotMatch(JSON.stringify({ logs: state.logs, notifications: state.notifications }), /secret-token|account@example\.com/);
 });
 
 test('a provider lookup resolving after timeout cannot populate cache or dispatch', async (t) => {
