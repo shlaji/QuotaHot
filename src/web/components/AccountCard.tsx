@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { AccountView, Window } from '../../shared/types.js';
 import type { GatewayAccountState } from '../../shared/gateway.js';
 import { amount, clock, countdown, day, daysUntil, percent, windowLabel } from '../format.js';
+import { maskEmail } from '../account-email.js';
 import { QoderSwitchDialog } from './QoderSwitchDialog.js';
 
 /** 来源标识到展示名的映射；未知来源原样展示。 */
@@ -51,6 +52,8 @@ const ICON = {
   remove: 'M2.8 4.3h10.4M6.1 4.3V3a1 1 0 0 1 1-1h1.8a1 1 0 0 1 1 1v1.3M4.4 4.3l.6 9.1a1 1 0 0 0 1 .9h4a1 1 0 0 0 1-.9l.6-9.1',
   swap: 'M2.5 5.5h11M10.8 2.8 13.5 5.5l-2.7 2.7M13.5 10.5h-11M5.2 7.8 2.5 10.5l2.7 2.7',
   route: 'M3.4 12.6h2.2a3 3 0 0 0 3-3v-3.2a3 3 0 0 1 3-3h1.4M3.4 10.9a1.7 1.7 0 1 0 0 3.4 1.7 1.7 0 0 0 0-3.4ZM11.5 1.7 13.9 3.4l-2.4 1.7',
+  eye: 'M1.7 8s2.3-3.5 6.3-3.5S14.3 8 14.3 8s-2.3 3.5-6.3 3.5S1.7 8 1.7 8ZM8 9.6A1.6 1.6 0 1 0 8 6.4a1.6 1.6 0 0 0 0 3.2Z',
+  eyeOff: 'M2 2.2 14 13.8M6.1 5A7.4 7.4 0 0 1 8 4.5c4 0 6.3 3.5 6.3 3.5a12 12 0 0 1-2.1 2.4M4.1 4.9C2.6 6 1.7 8 1.7 8s2.3 3.5 6.3 3.5c.8 0 1.5-.1 2.1-.4',
 } as const;
 
 function Icon({ name, size = 14 }: { name: keyof typeof ICON; size?: number }) {
@@ -396,6 +399,8 @@ export function AccountCard({
   patBusy,
 }: Props) {
   const [qoderSwitchOpen, setQoderSwitchOpen] = useState(false);
+  const [emailVisible, setEmailVisible] = useState(false);
+  const displayedEmail = emailVisible ? a.email : maskEmail(a.email);
   // 如果还没做过额度查询，就退回到单个已跟踪窗口的信息
   const windows =
     a.windows.length > 0
@@ -442,7 +447,7 @@ export function AccountCard({
           className="card-check"
           checked={selected}
           onChange={(e) => onSelectChange(a.id, e.target.checked)}
-          aria-label={`选择 ${a.email}`}
+          aria-label={`选择 ${displayedEmail}`}
           title="勾选后可用顶部的批量按钮一起操作"
         />
         <div>
@@ -471,9 +476,24 @@ export function AccountCard({
               )}
             </div>
           )}
-          <h3 title={[a.email, a.userId && `用户 ID: ${a.userId}`].filter(Boolean).join('\n')}>
-            {a.email}
-          </h3>
+          <div className="card-email">
+            <h3
+              className={emailVisible ? 'email-visible' : undefined}
+              title={[displayedEmail, a.userId && `用户 ID: ${a.userId}`].filter(Boolean).join('\n')}
+            >
+              {displayedEmail}
+            </h3>
+            <button
+              className="email-visibility"
+              type="button"
+              aria-label={emailVisible ? '隐藏完整邮箱' : '查看完整邮箱'}
+              aria-pressed={emailVisible}
+              title={emailVisible ? '隐藏完整邮箱' : '查看完整邮箱'}
+              onClick={() => setEmailVisible((visible) => !visible)}
+            >
+              <Icon name={emailVisible ? 'eyeOff' : 'eye'} size={13} />
+            </button>
+          </div>
           {(a.loginMethod || a.source) && (
             <span className="card-sub">
               {[a.loginMethod && `使用 ${a.loginMethod} 登录`, SOURCE_LABEL[a.source] ?? a.source]
