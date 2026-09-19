@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { DragEvent, KeyboardEvent } from 'react';
 import type { AccountView, Window } from '../../shared/types.js';
 import type { GatewayAccountState } from '../../shared/gateway.js';
 import { amount, clock, countdown, day, daysUntil, percent, windowLabel } from '../format.js';
@@ -54,6 +55,7 @@ const ICON = {
   route: 'M3.4 12.6h2.2a3 3 0 0 0 3-3v-3.2a3 3 0 0 1 3-3h1.4M3.4 10.9a1.7 1.7 0 1 0 0 3.4 1.7 1.7 0 0 0 0-3.4ZM11.5 1.7 13.9 3.4l-2.4 1.7',
   eye: 'M1.7 8s2.3-3.5 6.3-3.5S14.3 8 14.3 8s-2.3 3.5-6.3 3.5S1.7 8 1.7 8ZM8 9.6A1.6 1.6 0 1 0 8 6.4a1.6 1.6 0 0 0 0 3.2Z',
   eyeOff: 'M2 2.2 14 13.8M6.1 5A7.4 7.4 0 0 1 8 4.5c4 0 6.3 3.5 6.3 3.5a12 12 0 0 1-2.1 2.4M4.1 4.9C2.6 6 1.7 8 1.7 8s2.3 3.5 6.3 3.5c.8 0 1.5-.1 2.1-.4',
+  grip: 'M5 4h.01M11 4h.01M5 8h.01M11 8h.01M5 12h.01M11 12h.01',
 } as const;
 
 function Icon({ name, size = 14 }: { name: keyof typeof ICON; size?: number }) {
@@ -371,6 +373,14 @@ interface Props {
   onSetPat: (id: string, pat: string) => void;
   /** 这张卡片的 PAT 正在提交校验。 */
   patBusy: boolean;
+  dragging: boolean;
+  dragOver: boolean;
+  onDragStart: (event: DragEvent<HTMLButtonElement>) => void;
+  onDragEnd: () => void;
+  onDragOver: (event: DragEvent<HTMLElement>) => void;
+  onDragLeave: (event: DragEvent<HTMLElement>) => void;
+  onDrop: (event: DragEvent<HTMLElement>) => void;
+  onMove: (key: 'ArrowUp' | 'ArrowDown' | 'Home' | 'End') => void;
 }
 
 export function AccountCard({
@@ -397,6 +407,14 @@ export function AccountCard({
   gatewayBusy,
   onSetPat,
   patBusy,
+  dragging,
+  dragOver,
+  onDragStart,
+  onDragEnd,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onMove,
 }: Props) {
   const [qoderSwitchOpen, setQoderSwitchOpen] = useState(false);
   const [emailVisible, setEmailVisible] = useState(false);
@@ -439,9 +457,34 @@ export function AccountCard({
     ? '当前由本程序刷新 token。点一下改为跟随客户端：先核对本机客户端登录的还是不是这个账户，一致才切，之后只同步不刷新'
     : `当前跟随 ${a.syncPath || '原客户端'} 续期。点一下改为由本程序刷新：会用 refresh_token 换新 token，可能把原客户端手里那份顶掉`;
 
+  const handleMoveKey = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const key = event.key;
+    if (key !== 'ArrowUp' && key !== 'ArrowDown' && key !== 'Home' && key !== 'End') return;
+    event.preventDefault();
+    onMove(key);
+  };
+
   return (
-    <article className={`card state-${a.state}${selected ? ' selected' : ''}`}>
+    <article
+      className={`card state-${a.state}${selected ? ' selected' : ''}${dragging ? ' dragging' : ''}${dragOver ? ' drag-over' : ''}`}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
       <header className="card-head">
+        <button
+          className="card-drag-handle"
+          type="button"
+          draggable
+          aria-label={`拖动排序 ${displayedEmail}`}
+          aria-keyshortcuts="ArrowUp ArrowDown Home End"
+          title="拖动排序；也可用方向键、Home 或 End 移动"
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          onKeyDown={handleMoveKey}
+        >
+          <Icon name="grip" size={14} />
+        </button>
         <input
           type="checkbox"
           className="card-check"

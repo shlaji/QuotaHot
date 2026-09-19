@@ -22,6 +22,7 @@ import type {
 } from '../shared/types.js';
 import type { QoderClient, QoderClientTarget, QoderSwitchResult } from '../shared/qoder.js';
 import type { GatewayStatus } from '../shared/gateway.js';
+import type { AccountOrder } from '../shared/account-order.js';
 
 async function json<T>(input: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(input, {
@@ -37,6 +38,11 @@ export const api = {
   state: () => json<StateResponse>('/api/state'),
   saveConfig: (cfg: AppConfig) =>
     json<AppConfig>('/api/config', { method: 'PUT', body: JSON.stringify(cfg) }),
+  setAccountOrder: (provider: string, ids: string[]) =>
+    json<{ accountOrder: AccountOrder }>('/api/account-order', {
+      method: 'PUT',
+      body: JSON.stringify({ provider, ids }),
+    }),
   /** 启动调度；ids 为空表示纳入全部可保活账户。 */
   start: (ids: string[] = []) =>
     json<SchedulerStatus>('/api/scheduler/start', { method: 'POST', body: JSON.stringify({ ids }) }),

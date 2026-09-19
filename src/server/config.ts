@@ -11,6 +11,7 @@ import {
   type ClientPaths,
 } from '../shared/clientpaths.js';
 import type { AppConfig } from '../shared/types.js';
+import type { AccountOrder } from '../shared/account-order.js';
 
 /**
  * 数据目录默认在用户主目录下，而不是当前工作目录：
@@ -22,6 +23,7 @@ export const DB_PATH = join(DATA_DIR, 'state.db');
 /** 程序自己的账户目录；凭证从别处导入后就只在这里读写。 */
 export const ACCOUNTS_DIR = join(DATA_DIR, 'accounts');
 export const DEFAULT_CONFIG: AppConfig = {
+  accountOrder: {},
   text: 'hi',
   dailyStart: '06:00',
   dailyEnd: '23:00',
@@ -65,6 +67,16 @@ function toStringArray(v: unknown): string[] {
   return v.map((x) => String(x).trim()).filter(Boolean);
 }
 
+function normalizeAccountOrder(v: unknown): AccountOrder {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+  const out: AccountOrder = {};
+  for (const [key, value] of Object.entries(v)) {
+    const ids = toStringArray(value);
+    if (ids.length > 0) out[key] = ids;
+  }
+  return out;
+}
+
 /** 把任意输入收敛成合法配置，避免界面脏数据直接把调度器弄坏。 */
 export function normalize(raw: unknown): AppConfig {
   const r = (raw ?? {}) as Partial<AppConfig>;
@@ -90,6 +102,7 @@ export function normalize(raw: unknown): AppConfig {
   const legacy = (raw ?? {}) as { startAt?: unknown; endAt?: unknown };
 
   return {
+    accountOrder: normalizeAccountOrder(r.accountOrder),
     text: typeof r.text === 'string' && r.text.length > 0 ? r.text.slice(0, 4000) : d.text,
     dailyStart: dailyTime(r.dailyStart, legacy.startAt, d.dailyStart),
     dailyEnd: dailyTime(r.dailyEnd, legacy.endAt, d.dailyEnd),
@@ -200,9 +213,30 @@ export function loadConfig(): AppConfig {
   }
 }
 
-export async function saveConfig(cfg: AppConfig): Promise<void> {
+let configWriteQueue = Promise.resolve();
+
+async function writeConfig(cfg: AppConfig): Promise<void> {
   await mkdir(dirname(CONFIG_PATH), { recursive: true });
   await writeFile(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf8');
+}
+
+export async function saveConfig(cfg: AppConfig): Promise<void> {
+  const write = configWriteQueue.then(() => {
+    const current = loadConfig();
+    return writeConfig({ ...cfg, accountOrder: current.accountOrder });
+  });
+  configWriteQueue = write.then(() => undefined, () => undefined);
+  await write;
+}
+
+export async function updateConfig(mutator: (cfg: AppConfig) => AppConfig): Promise<AppConfig> {
+  const update = configWriteQueue.then(async () => {
+    const next = mutator(loadConfig());
+    await writeConfig(next);
+    return next;
+  });
+  configWriteQueue = update.then(() => undefined, () => undefined);
+  return update;
 }
 
 /**

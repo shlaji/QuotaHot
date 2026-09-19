@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   AccountView,
   AppConfig,
@@ -8,6 +8,7 @@ import type {
   UsageResult,
 } from '../shared/types.js';
 import type { GatewayStatus } from '../shared/gateway.js';
+import { mergeAccountOrder, moveAccountId } from '../shared/account-order.js';
 import { api, subscribeEvents } from './api.js';
 import { useNow } from './useNow.js';
 import { AccountCard } from './components/AccountCard.js';
@@ -40,12 +41,24 @@ type Tab = 'accounts' | 'schedule' | 'config';
 const TAB_KEY = 'quotahot.tab';
 const TABS: Tab[] = ['accounts', 'schedule', 'config'];
 
+type ActiveDrag = {
+  id: string;
+  provider: string;
+};
+
+type MoveKey = 'ArrowUp' | 'ArrowDown' | 'Home' | 'End';
+
 export function App() {
   const now = useNow();
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [version, setVersion] = useState('');
   const [status, setStatus] = useState<SchedulerStatus | null>(null);
   const [accounts, setAccounts] = useState<AccountView[]>([]);
+  const accountsRef = useRef(accounts);
+  const configRef = useRef(config);
+  const orderSavesRef = useRef(
+    new Map<string, { chain: Promise<void>; generation: number; confirmedIds: string[] }>(),
+  );
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -74,6 +87,9 @@ export function App() {
     return TABS.find((t) => t === saved) ?? 'accounts';
   });
   const [configDirty, setConfigDirty] = useState(false);
+  const [activeDrag, setActiveDrag] = useState<ActiveDrag | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [orderAnnouncement, setOrderAnnouncement] = useState('');
 
   const openTab = useCallback((next: Tab) => {
     setTab(next);
@@ -84,6 +100,14 @@ export function App() {
     setToast(msg);
     setTimeout(() => setToast(''), 5000);
   }, []);
+
+  useEffect(() => {
+    accountsRef.current = accounts;
+  }, [accounts]);
+
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
 
   // 模型列表要向上游查，比首屏其他数据慢，因此单独拉，不拖住页面渲染
   const loadCatalog = useCallback(
@@ -184,13 +208,97 @@ export function App() {
     }
     const known = PROVIDER_GROUPS.filter((g) => byProvider.has(g.provider)).map((g) => ({
       ...g,
-      accounts: byProvider.get(g.provider)!,
+      accounts: mergeAccountOrder(
+        byProvider.get(g.provider) ?? [],
+        config?.accountOrder[g.provider] ?? [],
+      ),
     }));
     const rest = [...byProvider.keys()]
       .filter((p) => !PROVIDER_GROUPS.some((g) => g.provider === p))
-      .map((p) => ({ provider: p, label: p, note: undefined, accounts: byProvider.get(p)! }));
+      .map((p) => ({
+        provider: p,
+        label: p,
+        note: undefined,
+        accounts: mergeAccountOrder(byProvider.get(p) ?? [], config?.accountOrder[p] ?? []),
+      }));
     return [...known, ...rest];
-  }, [accounts]);
+  }, [accounts, config?.accountOrder]);
+
+  const persistGroupOrder = useCallback((provider: string, ids: string[]) => {
+      const currentConfig = configRef.current;
+      if (currentConfig === null) return;
+      const previousAccounts = accountsRef.current;
+      const previousConfig = currentConfig;
+      const orderedProvider = mergeAccountOrder(
+        previousAccounts.filter((account) => account.provider === provider),
+        ids,
+      );
+      let providerIndex = 0;
+      const nextAccounts = previousAccounts.map((account) =>
+          account.provider === provider ? (orderedProvider[providerIndex++] ?? account) : account,
+      );
+      const nextConfig = {
+        ...currentConfig,
+        accountOrder: { ...currentConfig.accountOrder, [provider]: ids },
+      };
+      accountsRef.current = nextAccounts;
+      configRef.current = nextConfig;
+      setAccounts(nextAccounts);
+      setConfig(nextConfig);
+
+      const save = orderSavesRef.current.get(provider) ?? {
+        chain: Promise.resolve(),
+        generation: 0,
+        confirmedIds: currentConfig.accountOrder[provider] ?? [],
+      };
+      const generation = save.generation + 1;
+      save.generation = generation;
+      save.chain = save.chain.catch(() => undefined).then(async () => {
+        try {
+          const saved = await api.setAccountOrder(provider, ids);
+          const savedIds = saved.accountOrder[provider] ?? ids;
+          save.confirmedIds = savedIds;
+          if (save.generation === generation) {
+            const latestConfig = configRef.current;
+            if (latestConfig !== null) {
+              const savedConfig = {
+                ...latestConfig,
+                accountOrder: { ...latestConfig.accountOrder, [provider]: savedIds },
+              };
+              configRef.current = savedConfig;
+              setConfig(savedConfig);
+            }
+          }
+        } catch (err) {
+          if (save.generation === generation) {
+            const currentAccounts = accountsRef.current;
+            const confirmedAccounts = mergeAccountOrder(
+              currentAccounts.filter((account) => account.provider === provider),
+              save.confirmedIds,
+            );
+            let confirmedIndex = 0;
+            const restoredAccounts = currentAccounts.map((account) =>
+              account.provider === provider
+                ? (confirmedAccounts[confirmedIndex++] ?? account)
+                : account,
+            );
+            const latestConfig = configRef.current ?? previousConfig;
+            const restoredConfig = {
+              ...latestConfig,
+              accountOrder: { ...latestConfig.accountOrder, [provider]: save.confirmedIds },
+            };
+            accountsRef.current = restoredAccounts;
+            configRef.current = restoredConfig;
+            setAccounts(restoredAccounts);
+            setConfig(restoredConfig);
+            notify(`账户顺序保存失败: ${String(err instanceof Error ? err.message : err)}`);
+          }
+        }
+      });
+      orderSavesRef.current.set(provider, save);
+    },
+    [notify],
+  );
 
   const handleTestSelected = () => {
     const count = targetIds.length === 0 ? accounts.length : targetIds.length;
@@ -485,6 +593,9 @@ export function App() {
         />
 
         <main className="accounts">
+          <p className="sr-only" aria-live="polite">
+            {orderAnnouncement}
+          </p>
           {accounts.length === 0 ? (
             <p className="empty big">
               <code>{accountsDir}</code> 下还没有账户。
@@ -528,6 +639,68 @@ export function App() {
                       gatewayBusy={gatewayBusyId === a.id}
                       onSetPat={handleSetPat}
                       patBusy={patBusyId === a.id}
+                      dragging={activeDrag?.id === a.id}
+                      dragOver={dragOverId === a.id}
+                      onDragStart={(event) => {
+                        event.dataTransfer.effectAllowed = 'move';
+                        event.dataTransfer.setData('text/plain', a.id);
+                        setActiveDrag({ id: a.id, provider: g.provider });
+                        setDragOverId(null);
+                      }}
+                      onDragEnd={() => {
+                        setActiveDrag(null);
+                        setDragOverId(null);
+                      }}
+                       onDragOver={(event) => {
+                         if (activeDrag?.provider !== g.provider || activeDrag.id === a.id) {
+                           setDragOverId(null);
+                           return;
+                         }
+                         event.preventDefault();
+                         event.dataTransfer.dropEffect = 'move';
+                         setDragOverId(a.id);
+                       }}
+                       onDragLeave={(event) => {
+                         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                           setDragOverId(null);
+                         }
+                       }}
+                       onDrop={(event) => {
+                        event.preventDefault();
+                        const dragged = activeDrag;
+                        setActiveDrag(null);
+                        setDragOverId(null);
+                        if (dragged === null || dragged.provider !== g.provider || dragged.id === a.id) {
+                          return;
+                        }
+                        const ids = g.accounts.map((account) => account.id);
+                        const targetIndex = ids.indexOf(a.id);
+                        const next = moveAccountId(ids, dragged.id, targetIndex);
+                        const moved = g.accounts.find((account) => account.id === dragged.id);
+                        setOrderAnnouncement(
+                          `${moved?.email ?? dragged.id} 已移至第 ${next.indexOf(dragged.id) + 1} 位，共 ${next.length} 位`,
+                        );
+                        void persistGroupOrder(g.provider, next);
+                      }}
+                      onMove={(key: MoveKey) => {
+                        const ids = g.accounts.map((account) => account.id);
+                        const currentIndex = ids.indexOf(a.id);
+                        const targetIndex =
+                          key === 'Home'
+                            ? 0
+                            : key === 'End'
+                              ? ids.length - 1
+                              : key === 'ArrowUp'
+                                ? currentIndex - 1
+                                : currentIndex + 1;
+                        const next = moveAccountId(ids, a.id, targetIndex);
+                        const nextIndex = next.indexOf(a.id);
+                        if (nextIndex === currentIndex) return;
+                        setOrderAnnouncement(
+                          `${a.email} 已移至第 ${nextIndex + 1} 位，共 ${next.length} 位`,
+                        );
+                        void persistGroupOrder(g.provider, next);
+                      }}
                     />
                   ))}
                 </div>

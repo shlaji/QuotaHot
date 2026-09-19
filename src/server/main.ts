@@ -199,12 +199,35 @@ api.put('/config', async (c) => {
   next.autoStartIds = cur.autoStartIds;
 
   // 运行中改配置只影响下一拍，不会中断当前这次等待
-  scheduler.setConfig(next);
   // 客户端路径不经调度器：导入、跟随、写回、核对四处都是纯函数，各自向 clientpaths 要位置
   setClientPaths(next.clientPaths);
   await cfgMod.saveConfig(next);
+  const applied = { ...next, accountOrder: cfgMod.loadConfig().accountOrder };
+  scheduler.setConfig(applied);
   bus.emit({ type: 'scheduler', status: scheduler.status() });
-  return c.json(next);
+  return c.json(applied);
+});
+
+api.put('/account-order', async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return c.json({ error: '请求体格式无效' }, 400);
+  }
+  const { provider, ids } = body as { provider?: unknown; ids?: unknown };
+  if (typeof provider !== 'string' || provider.trim() === '' || !Array.isArray(ids)) {
+    return c.json({ error: 'provider 和 ids 格式无效' }, 400);
+  }
+  if (ids.some((id) => typeof id !== 'string' || id.trim() === '')) {
+    return c.json({ error: 'ids 必须是非空字符串数组' }, 400);
+  }
+
+  const uniqueIds = [...new Set(ids)];
+  const next = await cfgMod.updateConfig((current) => ({
+    ...current,
+    accountOrder: { ...current.accountOrder, [provider.trim()]: uniqueIds },
+  }));
+  scheduler.setConfig(next);
+  return c.json({ accountOrder: next.accountOrder });
 });
 
 /**

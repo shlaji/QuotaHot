@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AppConfig, ModelCatalog, ProviderCatalog } from '../../shared/types.js';
 import type { GatewayStatus } from '../../shared/gateway.js';
 import { MODEL_OPTIONS } from '../../shared/models.js';
@@ -156,6 +156,7 @@ export function ControlPanel({
   onDirtyChange,
 }: Props) {
   const [draft, setDraft] = useState(config);
+  const previousConfigRef = useRef(config);
   // 和忽略代理同理：逐次按键都往数组里走一趟，会把刚敲下的分隔符吃掉
   const [keysText, setKeysText] = useState(config.gateway.apiKeys.join(', '));
   // 忽略代理列表按自由文本编辑；若每次按键都经过数组往返，会把刚输入的逗号吃掉
@@ -163,9 +164,18 @@ export function ControlPanel({
 
   // 当服务端配置变化时同步草稿，但不要覆盖用户正在进行中的本地编辑
   useEffect(() => {
-    setDraft(config);
-    setNoProxyText(config.noProxy.join(', '));
-    setKeysText(config.gateway.apiKeys.join(', '));
+    const previousConfig = previousConfigRef.current;
+    const orderOnlyChanged =
+      JSON.stringify({ ...previousConfig, accountOrder: undefined }) ===
+      JSON.stringify({ ...config, accountOrder: undefined });
+    setDraft((current) =>
+      orderOnlyChanged ? { ...current, accountOrder: config.accountOrder } : config,
+    );
+    if (!orderOnlyChanged) {
+      setNoProxyText(config.noProxy.join(', '));
+      setKeysText(config.gateway.apiKeys.join(', '));
+    }
+    previousConfigRef.current = config;
   }, [config]);
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(config);

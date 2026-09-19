@@ -293,6 +293,39 @@ test('用户自己按的停止会记下来，重启之后不再自动跑', async
   assert.doesNotMatch(output, /自动启动调度:/);
 });
 
+test('账户排序更新会持久化并保留其他配置字段', async (context) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'quotahot-account-order-'));
+  context.after(() => rm(dataDir, { recursive: true, force: true }));
+  const server = await serveOn(dataDir);
+
+  try {
+    const response = await fetch(`${server.base}/api/account-order`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'claude', ids: ['account-c', 'account-a', 'account-c'] }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).accountOrder, {
+      claude: ['account-c', 'account-a'],
+    });
+
+    const saved = await readConfig(dataDir);
+    assert.deepEqual(saved.accountOrder, { claude: ['account-c', 'account-a'] });
+    assert.equal(saved.text, 'hi');
+    assert.equal(saved.dailyStart, '06:00');
+    assert.equal(saved.gateway !== undefined, true);
+
+    const malformed = await fetch(`${server.base}/api/account-order`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: 'claude', ids: 'account-a' }),
+    });
+    assert.equal(malformed.status, 400);
+  } finally {
+    await server.kill();
+  }
+});
+
 /**
  * 导入弹窗里那一行路径是可以改的：装在非默认位置的人，在看见「本机没有这个路径」的地方
  * 就能把位置填对。这条用例盯的是三件事——填错当场退回、填对立刻按新位置扫、留空回到默认，

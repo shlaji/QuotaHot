@@ -1,6 +1,7 @@
 /** 服务端与前端共享的类型契约。 */
 import type { GatewayAccountView, GatewayConfig, GatewayStatus } from './gateway.js';
 import type { ClientPaths } from './clientpaths.js';
+import type { AccountOrder } from './account-order.js';
 
 /**
  * 会被调度的 provider：有滚动限额窗口，所以保活才有意义。
@@ -114,6 +115,7 @@ export interface SchedulerStatus {
 }
 
 export interface AppConfig {
+  accountOrder: AccountOrder;
   /** 每一轮发送的自定义文本。 */
   text: string;
   /**
