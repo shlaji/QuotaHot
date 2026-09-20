@@ -27,6 +27,7 @@ async function serve(handler: Handler): Promise<{ url: string; close: () => Prom
 interface Row {
   accountId: string;
   req: RequestRecord;
+  kind: string;
   status: number;
   error: string;
   response: string;
@@ -37,8 +38,8 @@ function collector(): { rows: Row[]; sink: AuditSink } {
   return {
     rows,
     sink: {
-      record: (accountId, _sentAt, req, status, _durationMs, error) =>
-        rows.push({ accountId, req, status, error, response: '' }),
+      record: (accountId, _sentAt, req, status, _durationMs, error, kind) =>
+        rows.push({ accountId, req, kind, status, error, response: '' }),
       update: (rowId, error) => {
         rows[rowId - 1].error = error;
       },
@@ -97,7 +98,21 @@ test('带 audit 的请求会落一条日志，令牌换成占位符', async () =
   assert.equal(rows.length, 1);
   assert.equal(rows[0].accountId, 'a@x.com');
   assert.equal(rows[0].status, 200);
+  assert.equal(rows[0].kind, 'persistent');
   assert.equal(rows[0].req.headers.authorization, 'Bearer $QUOTAHOT_TOKEN');
+});
+
+test('网关 audit 会标记为临时记录', async () => {
+  const { rows, sink } = collector();
+  setAuditSink(sink);
+  const s = await serve((_req, res) => res.end('{}'));
+  await request(s.url, {
+    audit: { accountId: 'a@x.com', kind: 'gateway', secrets: { accessToken: 'x' } },
+  });
+  await s.close();
+  setAuditSink(null);
+
+  assert.equal(rows[0].kind, 'gateway');
 });
 
 test('额度查询这类只读请求同样留痕，不是只有发送才记', async () => {
@@ -117,6 +132,23 @@ test('额度查询这类只读请求同样留痕，不是只有发送才记', as
   assert.equal(rows.length, 1);
   assert.equal(rows[0].status, 403);
   assert.equal(rows[0].error, 'HTTP 403: nope');
+});
+
+test('网关错误回填保留临时记录类型', async () => {
+  const { rows, sink } = collector();
+  setAuditSink(sink);
+  const s = await serve((_req, res) => {
+    res.statusCode = 502;
+    res.end('upstream down');
+  });
+  const audit = { accountId: 'a@x.com', kind: 'gateway' as const, secrets: { accessToken: 'x' } };
+  const resp = await request(s.url, { audit });
+  noteError(audit, `HTTP ${resp.status}: ${await resp.text()}`);
+  await s.close();
+  setAuditSink(null);
+
+  assert.equal(rows[0].kind, 'gateway');
+  assert.equal(rows[0].error, 'HTTP 502: upstream down');
 });
 
 test('连不上时也落一行，状态码 0', async () => {

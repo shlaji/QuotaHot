@@ -6,8 +6,12 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/server/store.js';
 
+function tempStorePath(): string {
+  return join(mkdtempSync(join(tmpdir(), 'quotahot-')), 'state.db');
+}
+
 function tempStore(): Store {
-  return new Store(join(mkdtempSync(join(tmpdir(), 'quotahot-')), 'state.db'));
+  return new Store(tempStorePath());
 }
 
 const REQ = {
@@ -45,6 +49,57 @@ test('响应体后补进同一行，不新开一条日志', () => {
   assert.equal(rows.length, 1, '补写不该多出一行');
   assert.equal(rows[0].response, '{"error":{"message":"rate limit"}}');
   store.close();
+});
+
+test('网关请求写入临时表并支持补写响应', () => {
+  const path = tempStorePath();
+  const store = new Store(path);
+  const rowId = store.recordGatewayRequest('a@x.com', 1000, REQ, 429, 120, 'rate limited');
+
+  const raw = new DatabaseSync(path);
+  assert.equal((raw.prepare('SELECT count(*) AS n FROM request_log').get() as { n: number }).n, 0);
+  assert.equal((raw.prepare('SELECT count(*) AS n FROM gateway_request_log').get() as { n: number }).n, 1);
+  store.updateGatewayRequestResponse(rowId, '{"error":"rate limit"}');
+  assert.equal(
+    (raw.prepare('SELECT response FROM gateway_request_log WHERE id = ?').get(rowId) as { response: string }).response,
+    '{"error":"rate limit"}',
+  );
+  raw.close();
+  store.close();
+});
+
+test('网关临时记录只保留 TTL 内的数据', () => {
+  const path = tempStorePath();
+  const store = new Store(path);
+  store.recordGatewayRequest('a@x.com', 1000, REQ, 200, 10, '');
+  store.recordGatewayRequest('a@x.com', 86_401_000, REQ, 200, 10, '');
+  store.cleanupGatewayRequests(86_401_000);
+
+  const raw = new DatabaseSync(path);
+  const rows = raw.prepare('SELECT sent_at FROM gateway_request_log ORDER BY id').all();
+  assert.equal(String((rows[0] as Record<string, unknown> | undefined)?.sent_at), '1970-01-02T00:00:01.000Z');
+  raw.close();
+  store.close();
+});
+
+test('启动时清理临时日志失败也不阻止 Store 启动', () => {
+  const path = tempStorePath();
+  const cleanup = Store.prototype.cleanupGatewayRequests;
+  let calls = 0;
+  Store.prototype.cleanupGatewayRequests = function (now) {
+    calls += 1;
+    if (calls === 1) throw new Error('temporary cleanup failure');
+    return cleanup.call(this, now);
+  };
+
+  try {
+    const store = new Store(path);
+    store.close();
+  } finally {
+    Store.prototype.cleanupGatewayRequests = cleanup;
+  }
+
+  assert.equal(calls, 1);
 });
 
 test('每账户只保留最近 200 条，不会无限长', () => {

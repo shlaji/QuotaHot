@@ -56,10 +56,16 @@ const HOST = process.env.QUOTAHOT_HOST || '127.0.0.1';
 const store = new Store(cfgMod.DB_PATH);
 // 出站层负责记账，这里把它接到库上；两者解耦后测试可以完全不碰数据库
 setAuditSink({
-  record: (accountId, sentAt, req, status, durationMs, error) =>
-    store.recordRequest(accountId, sentAt, req, status, durationMs, error),
-  update: (rowId, error) => store.updateRequestError(rowId, error),
-  updateResponse: (rowId, response) => store.updateRequestResponse(rowId, response),
+  record: (accountId, sentAt, req, status, durationMs, error, kind) =>
+    kind === 'gateway'
+      ? store.recordGatewayRequest(accountId, sentAt, req, status, durationMs, error)
+      : store.recordRequest(accountId, sentAt, req, status, durationMs, error),
+  update: (rowId, error, kind) =>
+    kind === 'gateway' ? store.updateGatewayRequestError(rowId, error) : store.updateRequestError(rowId, error),
+  updateResponse: (rowId, response, kind) =>
+    kind === 'gateway'
+      ? store.updateGatewayRequestResponse(rowId, response)
+      : store.updateRequestResponse(rowId, response),
 });
 const config: AppConfig = cfgMod.loadConfig();
 // 要赶在首次导入之前：那一轮已经会去读客户端凭证文件了，晚了就会读默认位置

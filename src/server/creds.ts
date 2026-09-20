@@ -519,9 +519,10 @@ export async function setAutoRefresh(
  * 凡是代表账户发给上游的请求都该带上它：日志才是完整的，而不是只有发送那一条。
  * 两个令牌都要交出去，因为落库前是按**值**把它们从请求里抹掉的。
  */
-export function auditOf(acct: Account): Audit {
+export function auditOf(acct: Account, kind: Audit['kind'] = 'persistent'): Audit {
   return {
     accountId: acct.id,
+    kind,
     secrets: { accessToken: acct.accessToken, refreshToken: acct.refreshToken },
   };
 }

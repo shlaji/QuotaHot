@@ -75,10 +75,10 @@ export function betasFrom(header: string | undefined): string[] {
     .filter(Boolean);
 }
 
-async function failure(account: Account, resp: HttpResponse): Promise<never> {
+async function failure(account: Account, resp: HttpResponse, audit: ReturnType<typeof auditOf>): Promise<never> {
   const body = await resp.text();
   const detail = `${body.slice(0, 500)}${diagnose(resp.headers, body)}`;
-  noteError(auditOf(account), detail);
+  noteError(audit, detail);
   throw new UpstreamError(resp.status, `${account.email} 上游返回 ${resp.status}: ${detail}`, body);
 }
 
@@ -108,15 +108,16 @@ export async function forwardToClaude(
   opts: ForwardOptions,
 ): Promise<EventStream> {
   const payload = { ...body, model: opts.model, stream: true, system: withClaudeIdentity(body.system) };
+  const audit = auditOf(account, 'gateway');
   const resp = await request(CLAUDE_URL, {
     method: 'POST',
     headers: claudeMessagesHeaders(account.accessToken, opts.betas ?? []),
     body: JSON.stringify(payload),
     timeoutMs: FORWARD_TIMEOUT_MS,
     signal: opts.signal,
-    audit: auditOf(account),
+    audit,
   });
-  if (!resp.ok) await failure(account, resp);
+  if (!resp.ok) await failure(account, resp, audit);
   // Claude 的流本来就是 Anthropic 事件，解析出来直接就是 IR
   return parseSse(resp.body);
 }
@@ -127,15 +128,16 @@ export async function forwardToCodex(
   body: AnthropicRequest,
   opts: ForwardOptions,
 ): Promise<EventStream> {
+  const audit = auditOf(account, 'gateway');
   const resp = await request(CODEX_URL, {
     method: 'POST',
     headers: codexResponsesHeaders(account.accessToken, account.accountId),
     body: JSON.stringify(toCodexRequest(body, opts.model)),
     timeoutMs: FORWARD_TIMEOUT_MS,
     signal: opts.signal,
-    audit: auditOf(account),
+    audit,
   });
-  if (!resp.ok) await failure(account, resp);
+  if (!resp.ok) await failure(account, resp, audit);
   return fromCodexStream(resp.body, opts.model);
 }
 
@@ -201,6 +203,7 @@ export async function forwardToQoder(
   headers['User-Agent'] ??= QODER_INFER_USER_AGENT;
   headers['traceparent'] ??= traceparent();
 
+  const audit = auditOf(account, 'gateway');
   const resp = await request(signed.url, {
     method: 'POST',
     headers,
@@ -209,9 +212,9 @@ export async function forwardToQoder(
     bodyBytes: signed.body,
     timeoutMs: FORWARD_TIMEOUT_MS,
     signal: opts.signal,
-    audit: auditOf(account),
+    audit,
   });
-  if (!resp.ok) await failure(account, resp);
+  if (!resp.ok) await failure(account, resp, audit);
   const sign = signer();
   return fromQoderStream(resp.body, (payload) => sign.decrypt(payload), opts.model);
 }

@@ -80,6 +80,7 @@ export function setProxy(proxy: string, bypass: readonly string[] = []): void {
  */
 export interface Audit {
   accountId: string;
+  kind?: 'persistent' | 'gateway';
   /** 落库前要从请求里抹掉的凭证原文。 */
   secrets: Secrets;
   /** request() 回填的日志行号，供调用方随后补写上游返回的错误详情。 */
@@ -95,10 +96,11 @@ export interface AuditSink {
     status: number,
     durationMs: number,
     error: string,
+    kind: 'persistent' | 'gateway',
   ): number;
-  update(rowId: number, error: string): void;
+  update(rowId: number, error: string, kind: 'persistent' | 'gateway'): void;
   /** 流结束后补写上游返回的正文。 */
-  updateResponse(rowId: number, response: string): void;
+  updateResponse(rowId: number, response: string, kind: 'persistent' | 'gateway'): void;
 }
 
 let sink: AuditSink | null = null;
@@ -116,7 +118,7 @@ export function setAuditSink(next: AuditSink | null): void {
  */
 export function noteError(audit: Audit | undefined, error: string): void {
   if (audit?.rowId === undefined || error === '') return;
-  sink?.update(audit.rowId, error);
+  sink?.update(audit.rowId, error, audit.kind ?? 'persistent');
 }
 
 /**
@@ -142,8 +144,9 @@ export function recordOutbound(
     status,
     durationMs,
     error,
+    audit.kind ?? 'persistent',
   );
-  if (output !== '') sink.updateResponse(rowId, redactCredentials(maskText(output, audit.secrets)));
+  if (output !== '') sink.updateResponse(rowId, redactCredentials(maskText(output, audit.secrets)), audit.kind ?? 'persistent');
 }
 
 /* ── 响应体留痕 ─────────────────────────────────────────────────────────── */
@@ -332,6 +335,7 @@ export async function request(url: string, opts: FetchOptions = {}): Promise<Htt
       status,
       Date.now() - sentAt,
       error,
+      audit.kind ?? 'persistent',
     );
   };
 
@@ -392,9 +396,10 @@ export async function request(url: string, opts: FetchOptions = {}): Promise<Htt
   if (audit && sink && rowId !== undefined) {
     const target = sink;
     const secrets = audit.secrets;
+    const kind = audit.kind ?? 'persistent';
     stream = tap(stream, (text) => {
       // 请求侧抹的是我们发出去的凭证，响应侧还得防住上游新签发的那一份
-      target.updateResponse(rowId, redactCredentials(maskText(text, secrets)));
+      target.updateResponse(rowId, redactCredentials(maskText(text, secrets)), kind);
     });
   }
 

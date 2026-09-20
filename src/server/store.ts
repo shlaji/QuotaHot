@@ -55,6 +55,21 @@ CREATE TABLE IF NOT EXISTS request_log (
   response TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_request_log_acct ON request_log(account_id, id DESC);
+CREATE TABLE IF NOT EXISTS gateway_request_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id TEXT NOT NULL,
+  sent_at TEXT,
+  expires_at TEXT NOT NULL,
+  method TEXT NOT NULL,
+  url TEXT NOT NULL,
+  headers_json TEXT NOT NULL DEFAULT '{}',
+  body TEXT NOT NULL DEFAULT '',
+  status INTEGER NOT NULL DEFAULT 0,
+  duration_ms REAL NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT '',
+  response TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_gateway_request_log_expiry ON gateway_request_log(expires_at);
 -- API 服务（转发路由）里每个账户的设置与累计战绩。
 -- 不写进账户文件：重新导入同一个账户会按固定字段集重写那个文件，写在那里的开关会被悄悄抹掉。
 CREATE TABLE IF NOT EXISTS gateway_account (
@@ -84,6 +99,8 @@ CREATE INDEX IF NOT EXISTS idx_app_log_ts ON app_log(ts DESC);
 
 /** 每个账户在 request_log 里保留的条数。 */
 const REQUEST_LOG_KEEP = 200;
+const GATEWAY_REQUEST_TTL_MS = 24 * 60 * 60 * 1000;
+const GATEWAY_REQUEST_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 /** app_log 里保留的总条数；界面一次最多取 1000 条，再往前的翻不到。 */
 const APP_LOG_KEEP = 2000;
@@ -130,6 +147,7 @@ export interface UsageSnapshot {
 
 export class Store {
   private db: DatabaseSync;
+  private readonly gatewayCleanupTimer: NodeJS.Timeout;
 
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true });
@@ -137,6 +155,21 @@ export class Store {
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec(SCHEMA);
     this.migrate();
+    try {
+      this.cleanupGatewayRequests();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`清理 API 转发临时日志失败: ${message}`);
+    }
+    this.gatewayCleanupTimer = setInterval(() => {
+      try {
+        this.cleanupGatewayRequests();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`清理 API 转发临时日志失败: ${message}`);
+      }
+    }, GATEWAY_REQUEST_CLEANUP_INTERVAL_MS);
+    this.gatewayCleanupTimer.unref();
   }
 
   /**
@@ -346,6 +379,49 @@ export class Store {
     this.db.prepare('UPDATE request_log SET response = ? WHERE id = ?').run(response, rowId);
   }
 
+  recordGatewayRequest(
+    accountId: string,
+    sentAt: number,
+    req: RequestRecord,
+    status: number,
+    durationMs: number,
+    error: string,
+  ): number {
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO gateway_request_log
+           (account_id, sent_at, expires_at, method, url, headers_json, body, status, duration_ms, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        accountId,
+        toDateText(sentAt),
+        toDateText(sentAt + GATEWAY_REQUEST_TTL_MS),
+        req.method,
+        req.url,
+        JSON.stringify(req.headers),
+        req.body,
+        status,
+        durationMs,
+        error.slice(0, 500),
+      );
+    return Number(inserted.lastInsertRowid);
+  }
+
+  updateGatewayRequestError(rowId: number, error: string): void {
+    this.db
+      .prepare('UPDATE gateway_request_log SET error = ? WHERE id = ?')
+      .run(error.slice(0, 500), rowId);
+  }
+
+  updateGatewayRequestResponse(rowId: number, response: string): void {
+    this.db.prepare('UPDATE gateway_request_log SET response = ? WHERE id = ?').run(response, rowId);
+  }
+
+  cleanupGatewayRequests(now = Date.now()): void {
+    this.db.prepare('DELETE FROM gateway_request_log WHERE expires_at <= ?').run(toDateText(now));
+  }
+
   accountRequests(accountId: string, limit = 50): RequestLogRow[] {
     const rows = this.db
       .prepare('SELECT * FROM request_log WHERE account_id = ? ORDER BY id DESC LIMIT ?')
@@ -500,6 +576,7 @@ export class Store {
   }
 
   close(): void {
+    clearInterval(this.gatewayCleanupTimer);
     this.db.close();
   }
 }

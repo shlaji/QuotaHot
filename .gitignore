@@ -45,3 +45,4 @@ build/
 release/
 .playwright-mcp
 diagrams
+docs
