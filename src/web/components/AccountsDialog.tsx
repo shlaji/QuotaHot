@@ -400,7 +400,26 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify, onConfigC
             这个开关在每张卡片上都能改。
           </p>
 
-          <h3>从本机导入</h3>
+          <h2>登录新账户</h2>
+          <LoginBlock
+              provider="codex"
+              onDone={(id) => onNotify(`已添加 ${id}`)}
+              onError={onNotify}
+          />
+          <LoginBlock
+            provider="claude"
+            onDone={(id) => onNotify(`已添加 ${id}`)}
+            onError={onNotify}
+          />
+          <LoginBlock
+            provider="qoder"
+            onDone={(id) => onNotify(`已添加 ${id}`)}
+            onError={onNotify}
+          />
+
+          <hr/>
+
+          <h2>从本机导入</h2>
           <p className="probe-meta">
             每一处的路径都能直接改：留空用默认位置，填绝对路径（<code>~</code> 会展开成主目录）。
             改完立刻按新位置重扫，跟随客户端、写回客户端、「本机在用」核对也一起跟着走。
@@ -462,22 +481,6 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify, onConfigC
             </button>
           )}
 
-          <h3>登录新账户</h3>
-          <LoginBlock
-            provider="claude"
-            onDone={(id) => onNotify(`已添加 ${id}`)}
-            onError={onNotify}
-          />
-          <LoginBlock
-            provider="codex"
-            onDone={(id) => onNotify(`已添加 ${id}`)}
-            onError={onNotify}
-          />
-          <LoginBlock
-            provider="qoder"
-            onDone={(id) => onNotify(`已添加 ${id}`)}
-            onError={onNotify}
-          />
         </div>
       </div>
     </div>
