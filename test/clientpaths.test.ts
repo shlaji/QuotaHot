@@ -42,6 +42,7 @@ test('没配过时，每个来源还是各客户端在本机的老位置', () =>
     'codex-cli': join(home, '.codex', 'auth.json'),
     'claude-cli': join(home, '.claude', '.credentials.json'),
     opencode: join(home, '.local', 'share', 'opencode', 'auth.json'),
+    'cockpit-tools': join(home, '.antigravity_cockpit'),
     'qoder-ide': join(home, '.config', 'Qoder', 'User', 'globalStorage', 'state.vscdb'),
     'qoder-cli': join(home, '.qoder', '.auth', 'user'),
     'qoder-desktop': join(home, '.config', 'com.qoder.app.stable', 'auth.v1.dat'),

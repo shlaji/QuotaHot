@@ -24,6 +24,7 @@ import { clientPath, defaultClientPath } from './clientpaths.js';
 import { profileOf, readQoderSnapshot } from './qoder.js';
 import { captureQoderSession } from './qoder-native.js';
 import { QODER_LABELS } from './qoder-paths.js';
+import { readCockpitTools } from './cockpit-tools.js';
 import type { ClientPathKey } from '../shared/clientpaths.js';
 import type { ImportCandidate, ImportResult, Provider } from '../shared/types.js';
 
@@ -341,6 +342,12 @@ function knownSources(): Source[] {
       label: 'Claude Code',
       path: clientPath('claude-cli'),
       read: readClaudeCli,
+    },
+    {
+      id: 'cockpit-tools',
+      label: 'cockpit-tools',
+      path: clientPath('cockpit-tools'),
+      read: readCockpitTools,
     },
     {
       id: 'qoder-ide',

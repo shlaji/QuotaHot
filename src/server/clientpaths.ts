@@ -52,6 +52,8 @@ export function defaultClientPath(key: ClientPathKey): string {
         'opencode',
         'auth.json',
       );
+    case 'cockpit-tools':
+      return join(homedir(), '.antigravity_cockpit');
     case 'qoder-ide':
       return qoderStateDbPath();
     case 'qoder-cli':
