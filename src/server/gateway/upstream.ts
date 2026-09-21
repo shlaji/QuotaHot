@@ -12,7 +12,7 @@ import { noteError, request, type HttpResponse } from '../http.js';
 import { parseSse } from './sse.js';
 import { toCodexRequest } from './codex.js';
 import { fromCodexStream } from './codex.js';
-import { fromQoderStream, qoderTierFor, toQoderBody } from './qoder.js';
+import { fromQoderStream, toQoderBody } from './qoder.js';
 import { assertQoderIdentity, getJobToken, getUid, QoderAuthError } from './qoder-auth.js';
 import { cosyVersion } from './qoder-version.js';
 import { signer } from './qoder-signer.js';
@@ -175,9 +175,8 @@ export async function forwardToQoder(
     throw new UpstreamError(blamed, err instanceof Error ? err.message : String(err));
   }
 
-  const tier = qoderTierFor(opts.model);
   const version = cosyVersion();
-  const bodyJson = toQoderBody(body, tier, { cosyVersion: version, maxTokens: body.max_tokens });
+  const bodyJson = toQoderBody(body, opts.model, { cosyVersion: version, maxTokens: body.max_tokens });
 
   let signed;
   try {
@@ -187,7 +186,7 @@ export async function forwardToQoder(
       machineId: creds.machineId,
       baseUrl: QODER_INFER_BASE,
       bodyJson,
-      modelKey: tier.key,
+      modelKey: opts.model,
       modelSource: 'system',
       cosyVersion: version,
     });

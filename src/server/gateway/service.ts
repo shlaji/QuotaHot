@@ -9,7 +9,6 @@
 import { ensureFresh, type Account } from '../creds.js';
 import { GatewayPool, blamesAccount, isForwardable } from './pool.js';
 import { UpstreamError, forward } from './upstream.js';
-import { qoderTierFor } from './qoder.js';
 import type { AnthropicRequest, EventStream } from './anthropic.js';
 import type { AppConfig, Provider } from '../../shared/types.js';
 import { needsPat } from '../../shared/gateway.js';
@@ -72,12 +71,10 @@ function bareModel(model: string): string {
  * 客户端点名的模型属于目标账户这一家时原样用；跨家转发时它那个名字在这边根本不存在，
  * 只能落到本程序配置里的默认模型——配置项本来就是用户自己挑的，比我们硬编一张映射表可靠。
  *
- * Qoder 是个例外:它没有「配置的默认模型」,而是把 Anthropic 档次(opus/sonnet/haiku)按能力映
- * 射到自己的档位(ultimate/performance/efficient)。所以直接把客户端的原名交给 qoderTierFor,
- * 回报给客户端时用映射后的档位 key。
+ * Qoder 始终透传客户端模型名，包括前缀、大小写和后缀。
  */
 export function resolveModel(model: string, target: Provider, cfg: AppConfig): string {
-  if (target === 'qoder') return qoderTierFor(model).key;
+  if (target === 'qoder') return model;
   const bare = bareModel(model);
   return providerFor(model) === target && bare !== '' ? bare : cfg.models[target];
 }

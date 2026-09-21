@@ -19,54 +19,7 @@ import type { Readable } from 'node:stream';
 
 type Json = Record<string, unknown>;
 
-/** Qoder 的一个模型档位的静态信息。 */
-interface QoderTier {
-  key: string;
-  name: string;
-  isReasoning: boolean;
-  isVision: boolean;
-  maxInputTokens: number;
-  /** 默认上下文窗口;取目录里最大的那个。 */
-  contextWindow: number;
-}
-
-/**
- * 本网关会用到的 Qoder 档位。
- *
- * 只列转发实际会落到的这几个:Anthropic 的 opus/sonnet/haiku 分别映射到 ultimate/performance/
- * efficient,外加 auto 兜底、lite 备用。字段取值对齐 qoder-route 的 MODEL_CATALOG。
- */
-const TIERS: Record<string, QoderTier> = {
-  auto: { key: 'auto', name: 'Auto', isReasoning: false, isVision: true, maxInputTokens: 180_000, contextWindow: 180_000 },
-  ultimate: { key: 'ultimate', name: 'Ultimate', isReasoning: true, isVision: true, maxInputTokens: 1_000_000, contextWindow: 1_000_000 },
-  performance: { key: 'performance', name: 'Performance', isReasoning: false, isVision: true, maxInputTokens: 1_000_000, contextWindow: 1_000_000 },
-  efficient: { key: 'efficient', name: 'Efficient', isReasoning: false, isVision: true, maxInputTokens: 180_000, contextWindow: 180_000 },
-  lite: { key: 'lite', name: 'Lite', isReasoning: false, isVision: false, maxInputTokens: 180_000, contextWindow: 180_000 },
-};
-
-const DEFAULT_TIER = TIERS.efficient;
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
-
-/**
- * Anthropic 模型名 → Qoder 档位。
- *
- * 客户端发的是 Anthropic 命名(claude-opus-… / claude-sonnet-… / claude-haiku-…),按能力档次
- * 对到 Qoder 的三档;也允许直接写 Qoder 档位名(auto/ultimate/performance/efficient/lite)或带
- * `qoder/` 前缀。认不出来就用默认档(efficient),它便宜、什么请求都能接。
- */
-export function qoderTierFor(model: string): QoderTier {
-  let name = model.trim().toLowerCase();
-  const slash = name.lastIndexOf('/');
-  if (slash !== -1) name = name.slice(slash + 1).trim();
-  // 去掉 Claude Code 会加的 [1m] / [200k] 之类窗口后缀
-  name = name.replace(/\[[^\]]*\]/g, '').trim();
-
-  if (TIERS[name]) return TIERS[name];
-  if (name.includes('opus')) return TIERS.ultimate;
-  if (name.includes('sonnet')) return TIERS.performance;
-  if (name.includes('haiku')) return TIERS.efficient;
-  return DEFAULT_TIER;
-}
 
 /** thinking 预算 → Qoder 的推理档位。上游认 none/low/medium/high/xhigh/max。 */
 function reasoningEffort(thinking: Json | undefined): string {
@@ -182,12 +135,12 @@ export interface QoderBodyOptions {
  * 结构对齐 qoder-route direct_client._build_body:三个 id 同值、chat_context 带最后一句用户话、
  * business 信封每次都带(Qwen 那条 provider 路由缺了它会直接失败)。
  */
-export function toQoderBody(request: AnthropicRequest, tier: QoderTier, opts: QoderBodyOptions): string {
+export function toQoderBody(request: AnthropicRequest, model: string, opts: QoderBodyOptions): string {
   const reqId = randomUUID();
   const sessionId = opts.sessionId || randomUUID();
   const effort = reasoningEffort(request.thinking as Json | undefined);
   const thinkingEnabled = effort !== 'none';
-  const isReasoning = tier.isReasoning && thinkingEnabled;
+  const isReasoning = false;
   const system = systemText(request.system);
   const last = lastUserText(request.messages);
 
@@ -195,14 +148,14 @@ export function toQoderBody(request: AnthropicRequest, tier: QoderTier, opts: Qo
   if (system) messages.unshift({ role: 'system', content: system });
 
   const modelConfig: Json = {
-    key: tier.key,
-    display_name: tier.name,
+    key: model,
+    display_name: model,
     model: '',
     format: 'openai',
-    is_vl: tier.isVision,
+    is_vl: true,
     api_key: '',
     url: '',
-    max_input_tokens: tier.maxInputTokens,
+    max_input_tokens: 180_000,
     source: 'system',
     is_reasoning: isReasoning,
   };
@@ -228,7 +181,7 @@ export function toQoderBody(request: AnthropicRequest, tier: QoderTier, opts: Qo
       features: [],
       extra: {
         context: [],
-        modelConfig: { key: tier.key, is_reasoning: isReasoning },
+        modelConfig: { key: model, is_reasoning: isReasoning },
         originalContent: last,
       },
       chatPrompt: '',
@@ -248,7 +201,7 @@ export function toQoderBody(request: AnthropicRequest, tier: QoderTier, opts: Qo
     tools,
     parameters: {
       max_tokens: opts.maxTokens && opts.maxTokens > 0 ? opts.maxTokens : DEFAULT_MAX_OUTPUT_TOKENS,
-      context_length: tier.contextWindow,
+      context_length: 180_000,
       reasoning_effort: effort,
       enable_thinking: thinkingEnabled,
     },
@@ -287,8 +240,7 @@ function tryJson(text: string): Json | null {
  *   - tool_calls[]       → tool_use 块(参数是流式拼出来的 JSON 片段)
  * 块下标由我们自己发号,Anthropic 那边 thinking / text / tool_use 是并列的块,不能沿用上游下标。
  */
-export async function* fromQoderStream(stream: Readable, decrypt: Decrypt, fallbackModel: string): EventStream {
-  let model = fallbackModel;
+export async function* fromQoderStream(stream: Readable, decrypt: Decrypt, model: string): EventStream {
   let stopReason = 'end_turn';
   let inputTokens = 0;
   let outputTokens = 0;
@@ -313,7 +265,7 @@ export async function* fromQoderStream(stream: Readable, decrypt: Decrypt, fallb
       },
     });
 
-  // 先把 message_start 攒着,等第一条真正有内容的分块到了再发——那时候 model/id 才确定
+  // 先把 message_start 攒着,等第一条真正有内容的分块到了再发——那时候 id 才确定
   let pendingStartId = '';
   let emittedStart = false;
   const flushStart = function* () {
@@ -361,7 +313,6 @@ export async function* fromQoderStream(stream: Readable, decrypt: Decrypt, fallb
       return;
     }
 
-    if (typeof data.model === 'string' && data.model) model = data.model;
     if (!emittedStart && (data.id || data.model)) pendingStartId = String(data.id ?? pendingStartId);
 
     const usage = data.usage as Json | undefined;
