@@ -8,6 +8,7 @@ import type {
 } from '../../shared/types.js';
 import { api } from '../api.js';
 import { day } from '../format.js';
+import { TokenFileImport } from './TokenFileImport.js';
 
 const SOURCE_LABEL: Record<string, string> = {
   'cli-proxy-api': 'cli-proxy-api 认证目录',
@@ -357,6 +358,19 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify, onConfigC
     }
   };
 
+  const runTokenFileImport = async (files: readonly File[]) => {
+    setBusy(true);
+    try {
+      const result = await api.importTokenFiles(files);
+      const skipped = result.skipped.length > 0 ? `，跳过 ${result.skipped.length} 个` : '';
+      onNotify(`已导入 ${result.imported.length} 个账户${skipped}`);
+    } catch (err) {
+      onNotify(String(err instanceof Error ? err.message : err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   /** 改某个来源的位置：存下来，用新位置重扫，顺手把配置同步给外层。 */
   const saveSourcePath = async (source: ImportCandidate, path: string): Promise<void> => {
     setBusy(true);
@@ -417,7 +431,12 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify, onConfigC
             onError={onNotify}
           />
 
-          <hr/>
+          <hr />
+
+          <h2>从文件导入</h2>
+          <TokenFileImport busy={busy} onFiles={runTokenFileImport} />
+
+          <hr />
 
           <h2>从本机导入</h2>
           <p className="probe-meta">

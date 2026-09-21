@@ -68,6 +68,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ sources }),
     }),
+  importTokenFiles: async (files: readonly File[]): Promise<ImportResult> => {
+    const form = new FormData();
+    for (const file of files) form.append('files', file);
+    const resp = await fetch('/api/accounts/import-files', { method: 'POST', body: form });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${resp.status}`);
+    return body as ImportResult;
+  },
   qoderClients: (id: string) =>
     json<QoderClientTarget[]>(`/api/accounts/${encodeURIComponent(id)}/qoder-clients`),
   qoderSwitch: (id: string, client: QoderClient) =>

@@ -39,14 +39,17 @@ Linux 安装使用 `quotahot.service`。
 
 程序有**自己的账户目录**，固定在 `~/.quotahot/accounts/`（随 `QUOTAHOT_DATA_DIR` 走）。它不直接读写别的客户端的凭证文件。
 
-有三种方式往这个目录里放账户，都在账户页**管理账户**弹窗里：
+有五种方式往这个目录里放账户，都在账户页**管理账户**弹窗里：
 
 | 方式 | 说明 |
 |---|---|
 | 导入 cli-proxy-api | 读 `~/.cli-proxy-api/*.json` |
 | 导入本机 CLI | `~/.codex/auth.json`（Codex CLI）与 `~/.claude/.credentials.json`（Claude Code） |
 | 导入 Qoder IDE | `<用户数据目录>/User/globalStorage/state.vscdb`（Linux `~/.config/Qoder`、macOS `~/Library/Application Support/Qoder`、Windows `%APPDATA%\Qoder`） |
+| 上传 Token JSON | 上传单个 JSON 对象或对象数组，只接受 Claude / Codex / Qoder 账户 |
 | 直接登录 | Claude / Codex 走 OAuth 授权码 + PKCE，浏览器里完成授权后把回调地址粘回来；Codex 另可改用设备码，只念一串验证码；Qoder 走设备码，点完就好 |
+
+Token 文件一次最多上传 20 个，每个不超过 1 MiB；不支持直接上传纯文本 token。内容会拷贝到 QuotaHot 自己的账户目录，原文件不会被修改，也不会被记作客户端同步来源，之后不会再从上传文件同步。缺少 `refresh_token` 仍可导入，但不会自动刷新；再次上传相同 provider 与邮箱的账户会替换已有账户。
 
 导入是**一次性拷贝**：原始凭证不会被改写，Codex CLI 和 Claude Code 照常可用。首次启动时如果账户目录是空的，会自动从 `~/.cli-proxy-api` 导入一次，老用户升级上来不必手动操作。
 
@@ -387,7 +390,7 @@ CLI 对认证失败、触限这类问题只给一个非零退出码和一段人�
 
 - **Qoder** → Qoder 的推理 SSE 接口 `/algo/api/v2/service/pro/sse/agent_chat_generation`。Qoder 不使用导入账户里的登录 OAuth token，而是使用账户卡片上单独设置的 **Qoder PAT**。每次请求会根据账户的 `machineId`、用户身份和客户端元数据，通过内置的 WASM signer 生成 Qoder 原生签名，再把请求转成 Qoder 自己的 `chat_context`、`business`、`model_config` 等格式；上游返回的加密 SSE 分片再由 signer 解密并转换回 Anthropic/OpenAI 响应。
 
-  当前支持的 Qoder 模型档位是：`qoder/auto`、`qoder/ultimate`、`qoder/performance`、`qoder/efficient`、`qoder/lite`，也可以省略 `qoder/` 前缀直接使用档位名。Claude 模型名会按能力映射到 Qoder 档位：`opus` → `ultimate`、`sonnet` → `performance`、`haiku` → `efficient`；无法识别的模型默认使用 `efficient`。例如：
+Qoder 转发会把客户端传入的 `model` 字符串原样传给 Qoder，包括前缀、大小写和后缀，不再按 `opus` / `sonnet` / `haiku` 识别或改写成内置档位。客户端应传入 Qoder 上游实际支持的模型标识，例如：
 
   ```json
   {"model":"qoder/efficient","messages":[{"role":"user","content":"hi"}],"stream":false}
@@ -401,7 +404,7 @@ CLI 对认证失败、触限这类问题只给一个非零退出码和一段人�
     http://127.0.0.1:8686/v1/models | jq
   ```
 
-  需要注意，`/v1/models` 的动态目录目前主要覆盖 Claude/Codex，Qoder 的转发档位以上述内置列表为准。只有请求已经明确指定 Qoder（如 `qoder/xxx`）或开启跨家转发时，无法识别的模型才会回退到 `efficient`；在默认关闭跨家转发时，裸写 `qwen3:8b` 不会自动进入 Qoder，应改用 `qoder/efficient` 等档位。
+需要注意，`/v1/models` 的动态目录目前主要覆盖 Claude/Codex；Qoder 请求的模型标识由客户端自行提供并透传，服务端不提供模型识别或默认档位回退。是否进入 Qoder 仍由 provider 路由规则和跨家转发设置决定。
 
 出站统一走 `server/http.ts`，因此**转发的每一条请求和保活、额度查询出现在同一份请求日志里**，排障时不必分两处看，令牌也照样按值抹成占位符。
 

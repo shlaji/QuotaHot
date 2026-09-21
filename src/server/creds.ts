@@ -312,6 +312,21 @@ async function saveAccountUnlocked(dir: string, input: AccountInput, signal?: Ab
     }
     if (input.qoderSession) sessions = { ...sessions, [input.qoderSession.client]: input.qoderSession };
   }
+  if (input.provider !== 'qoder') {
+    try {
+      const previous: unknown = JSON.parse(await readFile(path, 'utf8'));
+      if (record(previous)) {
+        const previousProvider = String(previous.type ?? '').toLowerCase();
+        const previousEmail = String(previous.email ?? '').toLowerCase();
+        if (previousProvider !== input.provider || previousEmail !== input.email.toLowerCase()) {
+          throw new Error('账户文件路径冲突，拒绝覆盖');
+        }
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === '账户文件路径冲突，拒绝覆盖') throw error;
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+    }
+  }
   const data = {
     type: input.provider,
     email: input.email,

@@ -10,6 +10,7 @@
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  accountIdOf,
   emailOf,
   findClaim,
   decodeJwt,
@@ -37,6 +38,97 @@ interface Source {
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
+}
+
+export type TokenFileInput = {
+  readonly name: string;
+  readonly text: string;
+};
+
+export type ParsedTokenFile = {
+  readonly accounts: AccountInput[];
+  readonly skipped: ImportResult['skipped'];
+};
+
+function tokenRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+export function parseTokenFile(name: string, text: string): ParsedTokenFile {
+  const result: ParsedTokenFile = { accounts: [], skipped: [] };
+  let root: unknown;
+  try {
+    root = JSON.parse(text);
+  } catch {
+    result.skipped.push({ id: name, reason: 'JSON 格式无效' });
+    return result;
+  }
+  if (!tokenRecord(root) && !Array.isArray(root)) {
+    result.skipped.push({ id: name, reason: 'JSON 必须是对象或对象数组' });
+    return result;
+  }
+  const entries: readonly unknown[] = Array.isArray(root) ? root : [root];
+  for (const [index, data] of entries.entries()) {
+    const suffix = Array.isArray(root) ? `[${index + 1}]` : '';
+    const id = `${name}${suffix}`;
+    if (!tokenRecord(data)) {
+      result.skipped.push({ id, reason: '账户必须是 JSON 对象' });
+      continue;
+    }
+    const provider = str(data.type).trim().toLowerCase();
+    if (provider !== 'claude' && provider !== 'codex' && provider !== 'qoder') {
+      result.skipped.push({ id, reason: '不支持的账户类型' });
+      continue;
+    }
+    const accessToken = str(data.access_token).trim();
+    if (!accessToken) {
+      result.skipped.push({ id, reason: '缺少 access_token' });
+      continue;
+    }
+    const idToken = str(data.id_token).trim();
+    const refreshToken = str(data.refresh_token).trim();
+    const expired = Date.parse(str(data.expired));
+    const expiresAt = Number.isNaN(expired) ? tokenExpiresAt(accessToken) || tokenExpiresAt(idToken) : expired;
+    result.accounts.push({
+      provider,
+      email: (str(data.email).trim() || emailOf(idToken) || emailOf(accessToken) || `${name.replace(/\.json$/i, '')}${suffix}`).toLowerCase(),
+      accountId: str(data.account_id).trim() || accountIdOf(idToken) || accountIdOf(accessToken),
+      accessToken, refreshToken, idToken,
+      expiresAt: Number.isNaN(new Date(expiresAt).getTime()) ? 0 : expiresAt,
+      source: 'token-file', autoRefresh: Boolean(refreshToken),
+      userId: str(data.user_id).trim(), plan: str(data.plan),
+    });
+  }
+  return result;
+}
+
+export async function importTokenFiles(accountsDir: string, files: readonly TokenFileInput[]): Promise<ImportResult> {
+  const result: ImportResult = { imported: [], skipped: [] };
+  const seen = new Set<string>();
+  for (const file of files) {
+    const parsed = parseTokenFile(file.name, file.text);
+    result.skipped.push(...parsed.skipped);
+    for (const account of parsed.accounts) {
+      let id = `${account.provider}:${account.email}`;
+      try {
+        if (account.provider === 'qoder') {
+          const existing = account.userId ? (await loadAccounts(accountsDir)).find((candidate) => candidate.provider === 'qoder' && candidate.userId === account.userId) : undefined;
+          id = existing?.id ?? `qoder:${account.email.toLowerCase()}`;
+        }
+        if (seen.has(id)) {
+          result.skipped.push({ id, reason: '本次请求已导入该账户' });
+          continue;
+        }
+        const saved = await saveAccount(accountsDir, account);
+        const savedId = account.provider === 'qoder' ? (await loadAccounts(accountsDir)).find((candidate) => candidate.path === saved)?.id ?? id : id;
+        if (!seen.has(savedId)) result.imported.push(savedId);
+        seen.add(savedId);
+      } catch {
+        result.skipped.push({ id, reason: '保存账户失败' });
+      }
+    }
+  }
+  return result;
 }
 
 /** cli-proxy-api：一个目录，每个账户一个 JSON，字段名与我们自己的存储完全一致。 */

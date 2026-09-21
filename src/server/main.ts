@@ -18,7 +18,7 @@ import {
 } from './creds.js';
 import { syncToClient } from './clientsync.js';
 import { catalogFor, clearCatalogCache } from './catalog.js';
-import { importFrom, importIfEmpty, scanSources } from './import.js';
+import { importFrom, importIfEmpty, importTokenFiles, scanSources, type TokenFileInput } from './import.js';
 import { cancelLogin, completeLogin, loginStatus, startLogin } from './oauth.js';
 import {
   nextRefreshDelay,
@@ -40,6 +40,7 @@ import type {
   AppConfig,
   AutoRefreshResult,
   ForceRefreshResult,
+  ImportResult,
   RequestLogPage,
   SourcePathResult,
   StateResponse,
@@ -380,6 +381,46 @@ api.put('/accounts/sources/:id/path', async (c) => {
   await checkClients(false);
   await pushAccounts();
   const result: SourcePathResult = { sources: await scanSources(), config: next };
+  return c.json(result);
+});
+
+api.post('/accounts/import-files', async (c) => {
+  if (c.req.header('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'multipart/form-data') {
+    return c.json({ error: '请使用 multipart/form-data 上传文件' }, 400);
+  }
+  const contentLength = Number(c.req.header('content-length') ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > 20 * 1024 * 1024 + 64 * 1024) {
+    return c.json({ error: '上传请求过大' }, 413);
+  }
+  let form: FormData;
+  try {
+    form = await c.req.formData();
+  } catch {
+    return c.json({ error: '无法解析上传文件' }, 400);
+  }
+  const files = form.getAll('files').filter((entry): entry is File => entry instanceof File);
+  if (files.length === 0) return c.json({ error: '请选择要导入的文件' }, 400);
+  const inputs: TokenFileInput[] = [];
+  const skipped: ImportResult['skipped'] = [];
+  for (const [index, file] of files.entries()) {
+    const name = file.name.replaceAll('\\', '/').split('/').pop() || 'upload.json';
+    const reason = index >= 20 ? '每次最多导入 20 个文件'
+      : !/\.json$/i.test(name) ? '仅支持 JSON 文件'
+      : file.size > 1024 * 1024 ? '文件超过 1 MiB' : '';
+    if (reason) {
+      skipped.push({ id: name, reason });
+      continue;
+    }
+    try {
+      inputs.push({ name, text: await file.text() });
+    } catch {
+      skipped.push({ id: name, reason: '读取文件失败' });
+    }
+  }
+  const result = await importTokenFiles(cfgMod.ACCOUNTS_DIR, inputs);
+  result.skipped.unshift(...skipped);
+  await checkClients();
+  await pushAccounts();
   return c.json(result);
 });
 
