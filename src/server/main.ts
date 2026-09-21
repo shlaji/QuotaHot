@@ -46,6 +46,7 @@ import type {
   StateResponse,
 } from '../shared/types.js';
 import { APP_VERSION } from '../version.js';
+import { TOKEN_PLACEHOLDER } from '../shared/curl.js';
 import { qoderRoutes } from './qoder-routes.js';
 import { GatewayPool } from './gateway/pool.js';
 import { gatewayAdminRoutes, gatewayRoutes, gatewayStatus } from './gateway/routes.js';
@@ -263,7 +264,8 @@ api.post('/scheduler/stop', async (c) => {
  *
  * 日志行原样返回，令牌仍是占位符——界面上要展示的就是这一份，屏幕和截图里
  * 都不会出现真令牌。真令牌单独放在 `secrets` 里，前端只在用户点“复制”时才拿它
- * 把占位符换回去。给之前先 ensureFresh 一次，所以复制出去的 curl 立刻就能重发。
+ * 把占位符换回去。账户令牌先 ensureFresh；Qoder 的目录 PAT 单独提供，
+ * 仅回填网关占位符，不会替换额度和套餐请求里的 OAuth 令牌。
  */
 api.get('/accounts/:id/requests', async (c) => {
   const id = decodeURIComponent(c.req.param('id'));
@@ -276,7 +278,18 @@ api.get('/accounts/:id/requests', async (c) => {
   // 账户文件读不动也好，都退回占位符继续把日志给出去。
   try {
     const account = await loadAccount(cfgMod.ACCOUNTS_DIR, id);
-    if (account && (await ensureFresh(account, () => {}))) {
+    if (account?.provider === 'qoder') {
+      const pat = store.gatewayAccount(account.id)?.pat ?? '';
+      const page: RequestLogPage = {
+        rows,
+        secrets: {
+          accessToken: await ensureFresh(account, () => {}) ? account.accessToken : '',
+          accessTokenPlaceholder: TOKEN_PLACEHOLDER,
+          gatewayToken: pat,
+        },
+      };
+      return c.json(page);
+    } else if (account && (await ensureFresh(account, () => {}))) {
       const page: RequestLogPage = {
         rows,
         secrets: { accessToken: account.accessToken, refreshToken: account.refreshToken },

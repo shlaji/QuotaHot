@@ -14,11 +14,14 @@
 import type { RequestRecord } from './types.js';
 
 export const TOKEN_PLACEHOLDER = '$QUOTAHOT_TOKEN';
+export const GATEWAY_TOKEN_PLACEHOLDER = '$QUOTAHOT_GATEWAY_TOKEN';
 export const REFRESH_PLACEHOLDER = '$QUOTAHOT_REFRESH_TOKEN';
 
 /** 这一次请求用到的凭证原文。 */
 export interface Secrets {
   accessToken: string;
+  readonly accessTokenPlaceholder?: typeof TOKEN_PLACEHOLDER | typeof GATEWAY_TOKEN_PLACEHOLDER;
+  readonly gatewayToken?: string;
   refreshToken?: string;
 }
 
@@ -59,7 +62,8 @@ function swapAll(req: RequestRecord, pairs: Pair[]): RequestRecord {
  */
 function live(s: Secrets): { secret: string; placeholder: string }[] {
   return [
-    { secret: s.accessToken, placeholder: TOKEN_PLACEHOLDER },
+    { secret: s.accessToken, placeholder: s.accessTokenPlaceholder ?? TOKEN_PLACEHOLDER },
+    { secret: s.gatewayToken ?? '', placeholder: GATEWAY_TOKEN_PLACEHOLDER },
     { secret: s.refreshToken ?? '', placeholder: REFRESH_PLACEHOLDER },
   ].filter((p) => p.secret.length >= MIN_SECRET_LEN);
 }

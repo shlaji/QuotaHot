@@ -1,19 +1,22 @@
 /**
  * 可选模型列表：向上游要这个账户真正能用的模型，而不是硬编码一份清单。
  *
- * 两家的目录接口都要求“调用方身份”与对话接口一致，因此复用 headers.ts 里的同一套头。
- * 拿不到时退回 shared/models.ts 里的内置清单——下拉框宁可给出旧选项，也不该变成空的。
+ * Claude/Codex 的目录接口各自复用 headers.ts 里的既有调用方身份，查不到时退回
+ * shared/models.ts 的内置清单。Qoder Cloud Mode 使用账户网关 PAT；查不到时返回空列表，
+ * 由调用方省略该 provider 的模型。
  *
  * 结果按 provider 缓存一段时间：模型目录一天也变不了几次，而配置面板每次打开都会问一遍。
  */
 import { request } from './http.js';
 import { CODEX_CLIENT_VERSION, claudeModelsHeaders, codexModelsHeaders, diagnose } from './headers.js';
 import { MODEL_OPTIONS } from '../shared/models.js';
+import { GATEWAY_TOKEN_PLACEHOLDER } from '../shared/curl.js';
 import { auditOf, type Account } from './creds.js';
-import type { ModelOption, SendProvider } from '../shared/types.js';
+import type { ModelOption, Provider } from '../shared/types.js';
 
 const CLAUDE_MODELS_URL = 'https://api.anthropic.com/v1/models?limit=100';
 const CODEX_MODELS_URL = 'https://chatgpt.com/backend-api/codex/models';
+const QODER_MODELS_URL = 'https://api.qoder.com/api/v1/cloud/models';
 const FETCH_TIMEOUT_MS = 15_000;
 const CACHE_TTL_MS = 30 * 60 * 1000;
 
@@ -54,6 +57,16 @@ export function parseClaudeModels(payload: unknown): ModelOption[] {
     .filter((m) => m.id !== '');
 }
 
+export function parseQoderModels(payload: unknown): ModelOption[] {
+  const root = (payload ?? {}) as Record<string, unknown>;
+  const list = Array.isArray(root.models) ? root.models : Array.isArray(root.data) ? root.data : [];
+  return list
+    .filter((x): x is Record<string, unknown> => x !== null && typeof x === 'object')
+    .filter((model) => model.is_enabled !== false)
+    .map((model) => ({ id: toText(model.id), label: toText(model.display_name) || toText(model.id) }))
+    .filter((model) => model.id !== '');
+}
+
 async function fetchCodex(acct: Account): Promise<ModelOption[]> {
   const url = `${CODEX_MODELS_URL}?client_version=${encodeURIComponent(CODEX_CLIENT_VERSION)}`;
   const resp = await request(url, {
@@ -81,41 +94,89 @@ async function fetchClaude(acct: Account): Promise<ModelOption[]> {
   return parseClaudeModels(JSON.parse(body));
 }
 
+async function fetchQoder(acct: Account, pat: string): Promise<ModelOption[]> {
+  const resp = await request(QODER_MODELS_URL, {
+    headers: { authorization: `Bearer ${pat}`, accept: 'application/json' },
+    timeoutMs: FETCH_TIMEOUT_MS,
+    audit: { accountId: acct.id, secrets: { accessToken: pat, accessTokenPlaceholder: GATEWAY_TOKEN_PLACEHOLDER } },
+  });
+  const body = await resp.text();
+  if (resp.status !== 200) {
+    throw new Error(`HTTP ${resp.status}${diagnose(resp.headers, body)}`);
+  }
+  return parseQoderModels(JSON.parse(body));
+}
+
 interface Entry {
   options: ModelOption[];
   fetchedAt: number;
 }
 
-const cache = new Map<SendProvider, Entry>();
+const cache = new Map<Provider, Entry>();
 
 export function clearCatalogCache(): void {
   cache.clear();
 }
 
+function fallbackOptions(provider: Provider): ModelOption[] {
+  switch (provider) {
+    case 'claude':
+      return MODEL_OPTIONS.claude;
+    case 'codex':
+      return MODEL_OPTIONS.codex;
+    case 'qoder':
+      return [];
+    default:
+      return unexpectedProvider(provider);
+  }
+}
+
+function unexpectedProvider(provider: never): never {
+  throw new Error(`未知 provider: ${provider}`);
+}
+
 /**
  * 取某个 provider 的模型列表。account 为 null 表示这类账户一个都没有，
- * 这时直接给内置清单，不必让界面为此显示一条错误。
+ * Claude/Codex 此时给内置清单；Qoder 则返回空列表，由调用方省略。
  */
 export async function catalogFor(
-  provider: SendProvider,
+  provider: Provider,
   account: Account | null,
+  qoderPat = '',
   now = Date.now(),
 ): Promise<{ options: ModelOption[]; fromUpstream: boolean; error: string }> {
   const cached = cache.get(provider);
   if (cached && now - cached.fetchedAt < CACHE_TTL_MS) {
     return { options: cached.options, fromUpstream: true, error: '' };
   }
-  if (!account) return { options: MODEL_OPTIONS[provider], fromUpstream: false, error: '' };
+  if (!account) return { options: fallbackOptions(provider), fromUpstream: false, error: '' };
+
+  if (provider === 'qoder' && qoderPat === '') {
+    return { options: [], fromUpstream: false, error: '未设置 Qoder PAT' };
+  }
 
   try {
-    const options = provider === 'claude' ? await fetchClaude(account) : await fetchCodex(account);
+    let options: ModelOption[];
+    switch (provider) {
+      case 'claude':
+        options = await fetchClaude(account);
+        break;
+      case 'codex':
+        options = await fetchCodex(account);
+        break;
+      case 'qoder':
+        options = await fetchQoder(account, qoderPat);
+        break;
+      default:
+        return unexpectedProvider(provider);
+    }
     if (options.length === 0) throw new Error('上游返回了空列表');
     cache.set(provider, { options, fetchedAt: now });
     return { options, fromUpstream: true, error: '' };
   } catch (err) {
-    // 查不到不是致命问题：配置项本来就接受任意字符串，内置清单足够继续用
+    // 查不到不是致命问题：Claude/Codex 可退回内置清单，Qoder 则省略。
     return {
-      options: MODEL_OPTIONS[provider],
+      options: fallbackOptions(provider),
       fromUpstream: false,
       error: String(err instanceof Error ? err.message : err),
     };

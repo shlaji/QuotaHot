@@ -406,7 +406,7 @@ Qoder 转发会把客户端传入的 `model` 字符串原样传给 Qoder，包�
     http://127.0.0.1:8686/v1/models | jq
   ```
 
-需要注意，`/v1/models` 的动态目录目前主要覆盖 Claude/Codex；Qoder 请求的模型标识由客户端自行提供并透传，服务端不提供模型识别或默认档位回退。是否进入 Qoder 仍由 provider 路由规则和跨家转发设置决定。
+`/v1/models` 会从已配置 Qoder PAT 的账户调用 Qoder Cloud Mode 模型目录接口，并返回当前启用的 Qoder 模型；如果 PAT 缺失或目录查询失败，则只省略 Qoder 模型，不影响 Claude/Codex 结果。Qoder 请求的模型标识仍会由客户端传入并原样透传，服务端不提供默认档位回退。Forward Mode 的模型目录暂未接入。是否进入 Qoder 仍由 provider 路由规则和跨家转发设置决定。
 
 出站统一走 `server/http.ts`，因此**转发的每一条请求和保活、额度查询出现在同一份请求日志里**，排障时不必分两处看，令牌也照样按值抹成占位符。
 

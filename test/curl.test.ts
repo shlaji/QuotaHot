@@ -7,12 +7,31 @@ import {
   fillSecrets,
   isCliRecord,
   maskSecrets,
+  maskText,
   REFRESH_PLACEHOLDER,
   TOKEN_PLACEHOLDER,
 } from '../src/shared/curl.js';
 
 const ACCESS = 'sk-ant-oat01-AAAAAAAAAAAAAAAAAAAAAAAA';
 const REFRESH = 'sk-ant-ort01-BBBBBBBBBBBBBBBBBBBBBBBB';
+
+test('gateway masking uses its own placeholder in every request field and response text', () => {
+  const secrets = { accessToken: ACCESS, accessTokenPlaceholder: '$QUOTAHOT_GATEWAY_TOKEN' as const };
+  const request = { method: 'POST', url: `https://example.test/${ACCESS}`, headers: { authorization: ACCESS }, body: ACCESS };
+  const masked = maskSecrets(request, secrets);
+  assert.deepEqual(masked, {
+    method: 'POST', url: 'https://example.test/$QUOTAHOT_GATEWAY_TOKEN',
+    headers: { authorization: '$QUOTAHOT_GATEWAY_TOKEN' }, body: '$QUOTAHOT_GATEWAY_TOKEN',
+  });
+  assert.equal(maskText(ACCESS, secrets), '$QUOTAHOT_GATEWAY_TOKEN');
+  assert.deepEqual(fillSecrets(masked, secrets), request);
+});
+
+test('missing gateway PAT leaves its placeholder untouched despite an available OAuth token', () => {
+  const request = { method: 'GET', url: 'https://example.test', headers: { authorization: '$QUOTAHOT_GATEWAY_TOKEN' }, body: '' };
+  const restored = fillSecrets(request, { accessToken: ACCESS });
+  assert.deepEqual(restored, request);
+});
 
 test('落库前令牌换成占位符，其余头原样保留', () => {
   const masked = maskSecrets(

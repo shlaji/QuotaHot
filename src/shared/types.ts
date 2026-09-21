@@ -1,6 +1,7 @@
 /** 服务端与前端共享的类型契约。 */
 import type { GatewayAccountView, GatewayConfig, GatewayStatus } from './gateway.js';
 import type { ClientPaths } from './clientpaths.js';
+import type { Secrets } from './curl.js';
 import type { AccountOrder } from './account-order.js';
 
 /**
@@ -227,7 +228,7 @@ export interface RequestLogRow extends RequestRecord {
  */
 export interface RequestLogPage {
   rows: RequestLogRow[];
-  secrets: { accessToken: string; refreshToken?: string };
+  secrets: Secrets;
 }
 
 /** 从上游解析出的单个限额窗口。 */

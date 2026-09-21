@@ -22,7 +22,6 @@ import { assertQoderIdentity, forgetQoderAuth, getUid, QoderAuthError } from './
 import type { EventStream } from './anthropic.js';
 import type { Context } from 'hono';
 import type { GatewayStatus } from '../../shared/gateway.js';
-import type { SendProvider } from '../../shared/types.js';
 
 /** 一个字符一个字符比，避免 key 的校验时间泄露它的前缀。 */
 function sameKey(a: string, b: string): boolean {
@@ -194,11 +193,17 @@ export function gatewayRoutes(deps: GatewayDeps): Hono {
    */
   routes.get('/v1/models', async (c) => {
     const accounts = (await deps.accounts()).filter((a) => isForwardable(a.provider) && !a.disabled);
-    const providers = [...new Set(accounts.map((a) => a.provider))] as SendProvider[];
+    const providers = [...new Set(accounts.map((a) => a.provider))];
     const data: Record<string, unknown>[] = [];
     for (const provider of providers) {
-      const account = accounts.find((a) => a.provider === provider) ?? null;
-      const catalog = await catalogFor(provider, account);
+      const account = accounts.find((a) => {
+        if (a.provider !== provider) return false;
+        if (provider !== 'qoder') return true;
+        return Boolean(deps.store.gatewayAccount(a.id)?.pat);
+      }) ?? null;
+      if (account === null) continue;
+      const qoderPat = provider === 'qoder' ? deps.store.gatewayAccount(account.id)?.pat : undefined;
+      const catalog = await catalogFor(provider, account, qoderPat);
       for (const option of catalog.options) {
         data.push({
           id: option.id,

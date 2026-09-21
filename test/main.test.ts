@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { Store } from '../src/server/store.js';
+import { buildCurl, fillSecrets, maskSecrets } from '../src/shared/curl.js';
+import type { RequestLogPage } from '../src/shared/types.js';
 
 const entry = new URL('../src/main.ts', import.meta.url).pathname;
 
@@ -323,6 +325,75 @@ test('账户排序更新会持久化并保留其他配置字段', async (context
     assert.equal(malformed.status, 400);
   } finally {
     await server.kill();
+  }
+});
+
+test('Qoder 混合请求日志分别用 PAT 和 OAuth 回放', async (context) => {
+  // Given: a Qoder catalog request masked with its gateway PAT and an account OAuth token.
+  const dataDir = await mkdtemp(join(tmpdir(), 'quotahot-qoder-request-log-'));
+  context.after(() => rm(dataDir, { recursive: true, force: true }));
+  const accountId = 'qoder:catalog@example.test';
+  const gatewayPat = 'synthetic-current-qoder-gateway-pat';
+  const oauthToken = 'synthetic-qoder-account-oauth-token';
+  await mkdir(join(dataDir, 'accounts'), { recursive: true });
+  await writeFile(
+    join(dataDir, 'accounts', 'qoder-catalog.json'),
+    JSON.stringify({
+      type: 'qoder',
+      email: 'catalog@example.test',
+      account_id: 'qoder-user',
+      user_id: 'qoder-user',
+      access_token: oauthToken,
+      refresh_token: '',
+      expired: new Date(Date.now() + 86_400_000).toISOString(),
+    }),
+    'utf8',
+  );
+  const store = new Store(join(dataDir, 'state.db'));
+  store.setGatewayAccount(accountId, { pat: gatewayPat });
+  store.recordRequest(
+    accountId,
+    Date.now(),
+    maskSecrets(
+      {
+        method: 'GET',
+        url: 'https://api.qoder.com/api/v1/cloud/models',
+        headers: { authorization: `Bearer ${gatewayPat}` },
+        body: '',
+      },
+      { accessToken: gatewayPat, accessTokenPlaceholder: '$QUOTAHOT_GATEWAY_TOKEN' },
+    ),
+    200,
+    1,
+    '',
+  );
+  for (const path of ['/api/v2/quota/usage', '/api/v2/user/plan']) {
+    store.recordRequest(accountId, Date.now(), maskSecrets({
+      method: 'GET', url: `https://openapi.qoder.sh${path}`,
+      headers: { authorization: `Bearer ${oauthToken}` }, body: '',
+    }, { accessToken: oauthToken }), 200, 1, '');
+  }
+  store.close();
+  const server = await serveOn(dataDir);
+  context.after(server.kill);
+
+  // When: the user requests the log page and copies its first curl.
+  const response = await fetch(`${server.base}/api/accounts/${encodeURIComponent(accountId)}/requests`);
+  const page = (await response.json()) as RequestLogPage;
+  const row = page.rows.find((entry) => entry.url.includes('/cloud/models'));
+  assert.ok(row, '前提：目录请求应留在请求日志中');
+  const copiedCurl = buildCurl(fillSecrets(row, page.secrets));
+
+  // Then: the copied request restores the gateway PAT, never the account OAuth token.
+  assert.equal(response.status, 200);
+  assert.ok(copiedCurl.includes(gatewayPat));
+  assert.ok(!copiedCurl.includes(oauthToken));
+  const oauthRows = page.rows.filter((entry) => entry.url.startsWith('https://openapi.qoder.sh/'));
+  assert.equal(oauthRows.length, 2);
+  for (const oauthRow of oauthRows) {
+    const oauthCurl = buildCurl(fillSecrets(oauthRow, page.secrets));
+    assert.ok(oauthCurl.includes(oauthToken));
+    assert.ok(!oauthCurl.includes(gatewayPat));
   }
 });
 
