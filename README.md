@@ -46,10 +46,12 @@ Linux 安装使用 `quotahot.service`。
 | 导入 cli-proxy-api | 读 `~/.cli-proxy-api/*.json` |
 | 导入本机 CLI | `~/.codex/auth.json`（Codex CLI）与 `~/.claude/.credentials.json`（Claude Code） |
 | 导入 Qoder IDE | `<用户数据目录>/User/globalStorage/state.vscdb`（Linux `~/.config/Qoder`、macOS `~/Library/Application Support/Qoder`、Windows `%APPDATA%\Qoder`） |
-| 上传 Token JSON | 上传单个 JSON 对象或对象数组，只接受 Claude / Codex / Qoder 账户 |
+| 上传 Token JSON | 上传单个 JSON 对象或对象数组，支持 Claude / Codex 账户及 cockpit-tools 的 Claude/Codex 导出 |
 | 直接登录 | Claude / Codex 走 OAuth 授权码 + PKCE，浏览器里完成授权后把回调地址粘回来；Codex 另可改用设备码，只念一串验证码；Qoder 走设备码，点完就好 |
 
 Token 文件一次最多上传 20 个，每个不超过 1 MiB；不支持直接上传纯文本 token。内容会拷贝到 QuotaHot 自己的账户目录，原文件不会被修改，也不会被记作客户端同步来源，之后不会再从上传文件同步。缺少 `refresh_token` 仍可导入，但不会自动刷新；再次上传相同 provider 与邮箱的账户会替换已有账户。
+
+从 cockpit-tools 导出时可直接上传 Claude 或 Codex 的 JSON 文件：Codex 使用导出对象里的 `tokens`，Claude 使用 `claude_credentials_raw.claudeAiOauth`。Qoder 的 cockpit-tools 导出只包含账户和额度快照，不包含可迁移的登录令牌，因此不能通过 Token JSON 导入；请使用「导入 Qoder IDE」或在 QuotaHot 中重新登录 Qoder。
 
 导入是**一次性拷贝**：原始凭证不会被改写，Codex CLI 和 Claude Code 照常可用。首次启动时如果账户目录是空的，会自动从 `~/.cli-proxy-api` 导入一次，老用户升级上来不必手动操作。
 

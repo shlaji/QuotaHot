@@ -94,6 +94,55 @@ test('keeps anonymous array entries distinct when falling back to filename', () 
   assert.deepEqual(result.accounts.map(({ email }) => email), ['bundle[1]', 'bundle[2]']);
 });
 
+test('parses cockpit-tools Codex export with nested tokens', () => {
+  const result = parseTokenFile('codex-export.json', JSON.stringify({
+    id: 'codex-account',
+    email: 'codex@example.com',
+    account_id: 'chatgpt-account',
+    tokens: {
+      access_token: 'codex-access',
+      refresh_token: 'codex-refresh',
+      id_token: jwt({ email: 'codex@example.com', account_id: 'chatgpt-account', exp: 2_100_000_000 }),
+    },
+  }));
+  assert.deepEqual(result.skipped, []);
+  assert.equal(result.accounts[0]?.provider, 'codex');
+  assert.equal(result.accounts[0]?.accessToken, 'codex-access');
+  assert.equal(result.accounts[0]?.refreshToken, 'codex-refresh');
+  assert.equal(result.accounts[0]?.accountId, 'chatgpt-account');
+  assert.equal(result.accounts[0]?.expiresAt, 2_100_000_000_000);
+});
+
+test('parses cockpit-tools Claude export with nested OAuth credentials', () => {
+  const result = parseTokenFile('claude-export.json', JSON.stringify({
+    id: 'claude-account',
+    email: 'claude@example.com',
+    claude_credentials_raw: {
+      claudeAiOauth: {
+        accessToken: 'claude-access',
+        refreshToken: 'claude-refresh',
+        expiresAt: 2_100_000_000_000,
+      },
+    },
+  }));
+  assert.deepEqual(result.skipped, []);
+  assert.equal(result.accounts[0]?.provider, 'claude');
+  assert.equal(result.accounts[0]?.accessToken, 'claude-access');
+  assert.equal(result.accounts[0]?.refreshToken, 'claude-refresh');
+  assert.equal(result.accounts[0]?.expiresAt, 2_100_000_000_000);
+});
+
+test('does not import cockpit-tools Qoder metadata without a token', () => {
+  const result = parseTokenFile('qoder-export.json', JSON.stringify({
+    id: 'qoder-account',
+    email: 'qoder@example.com',
+    user_id: 'qoder-user',
+    auth_user_info_raw: { email: 'qoder@example.com' },
+  }));
+  assert.equal(result.accounts.length, 0);
+  assert.deepEqual(result.skipped, [{ id: 'qoder-export.json', reason: '缺少 access_token' }]);
+});
+
 test('imports only first identity per request and returns no credentials', async (context) => {
   const dir = await mkdtemp(join(tmpdir(), 'quotahot-import-'));
   context.after(() => rm(dir, { recursive: true, force: true }));

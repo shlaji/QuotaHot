@@ -54,6 +54,61 @@ function tokenRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function firstString(record: Record<string, unknown>, keys: readonly string[]): string {
+  for (const key of keys) {
+    const value = str(record[key]).trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function cockpitCredentials(data: Record<string, unknown>): {
+  provider: Provider;
+  accessToken: string;
+  refreshToken: string;
+  idToken: string;
+  expiresAt: number;
+  accountId: string;
+} | undefined {
+  const tokens = tokenRecord(data.tokens) ? data.tokens : undefined;
+  if (tokens) {
+    const accessToken = firstString(tokens, ['access_token', 'accessToken']);
+    const idToken = firstString(tokens, ['id_token', 'idToken']);
+    if (accessToken && idToken) {
+      return {
+        provider: 'codex',
+        accessToken,
+        refreshToken: firstString(tokens, ['refresh_token', 'refreshToken', 'session_token', 'sessionToken']),
+        idToken,
+        expiresAt: 0,
+        accountId: firstString(tokens, ['account_id', 'accountId']) || firstString(data, ['account_id', 'accountId']),
+      };
+    }
+  }
+
+  const raw = tokenRecord(data.claude_credentials_raw)
+    ? data.claude_credentials_raw
+    : tokenRecord(data.claudeCredentialsRaw)
+      ? data.claudeCredentialsRaw
+      : undefined;
+  const oauth = raw && tokenRecord(raw.claudeAiOauth) ? raw.claudeAiOauth : undefined;
+  if (oauth) {
+    const accessToken = firstString(oauth, ['accessToken', 'access_token']);
+    if (accessToken) {
+      const expiresAt = Number(oauth.expiresAt ?? oauth.expires_at ?? 0);
+      return {
+        provider: 'claude',
+        accessToken,
+        refreshToken: firstString(oauth, ['refreshToken', 'refresh_token']),
+        idToken: firstString(oauth, ['idToken', 'id_token']),
+        expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0,
+        accountId: firstString(data, ['account_uuid', 'accountUuid']),
+      };
+    }
+  }
+  return undefined;
+}
+
 export function parseTokenFile(name: string, text: string): ParsedTokenFile {
   const result: ParsedTokenFile = { accounts: [], skipped: [] };
   let root: unknown;
@@ -75,24 +130,28 @@ export function parseTokenFile(name: string, text: string): ParsedTokenFile {
       result.skipped.push({ id, reason: '账户必须是 JSON 对象' });
       continue;
     }
-    const provider = str(data.type).trim().toLowerCase();
+    const cockpit = cockpitCredentials(data);
+    const qoderSnapshot = tokenRecord(data.auth_user_info_raw)
+      || tokenRecord(data.authUserInfo)
+      || typeof data.user_id === 'string';
+    const provider = (str(data.type).trim().toLowerCase() || cockpit?.provider || (qoderSnapshot ? 'qoder' : '')) as Provider | '';
     if (provider !== 'claude' && provider !== 'codex' && provider !== 'qoder') {
       result.skipped.push({ id, reason: '不支持的账户类型' });
       continue;
     }
-    const accessToken = str(data.access_token).trim();
+    const accessToken = str(data.access_token).trim() || cockpit?.accessToken || '';
     if (!accessToken) {
       result.skipped.push({ id, reason: '缺少 access_token' });
       continue;
     }
-    const idToken = str(data.id_token).trim();
-    const refreshToken = str(data.refresh_token).trim();
+    const idToken = str(data.id_token).trim() || cockpit?.idToken || '';
+    const refreshToken = str(data.refresh_token).trim() || cockpit?.refreshToken || '';
     const expired = Date.parse(str(data.expired));
-    const expiresAt = Number.isNaN(expired) ? tokenExpiresAt(accessToken) || tokenExpiresAt(idToken) : expired;
+    const expiresAt = Number.isNaN(expired) ? cockpit?.expiresAt || tokenExpiresAt(accessToken) || tokenExpiresAt(idToken) : expired;
     result.accounts.push({
       provider,
       email: (str(data.email).trim() || emailOf(idToken) || emailOf(accessToken) || `${name.replace(/\.json$/i, '')}${suffix}`).toLowerCase(),
-      accountId: str(data.account_id).trim() || accountIdOf(idToken) || accountIdOf(accessToken),
+      accountId: str(data.account_id).trim() || cockpit?.accountId || accountIdOf(idToken) || accountIdOf(accessToken),
       accessToken, refreshToken, idToken,
       expiresAt: Number.isNaN(new Date(expiresAt).getTime()) ? 0 : expiresAt,
       source: 'token-file', autoRefresh: Boolean(refreshToken),
