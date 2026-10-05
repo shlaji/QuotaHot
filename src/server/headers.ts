@@ -206,7 +206,7 @@ export function codexSubscriptionHeaders(
  * 同时用在三处，必须是同一个值：UA、`version` 头、以及模型目录的 `client_version`
  * 查询串。上游按版本裁剪返回内容，三处对不上本身就是异常流量。
  */
-export const CODEX_CLIENT_VERSION = '0.146.0';
+export const CODEX_CLIENT_VERSION = '0.160.0';
 
 /**
  * 当前的 Codex CLI 身份。

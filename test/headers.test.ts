@@ -69,6 +69,7 @@ test('会话 ID 一次运行内不变，请求 ID 每条都换', () => {
 });
 
 test('Codex CLI 身份三处版本号一致：UA、version 头、目录查询串', () => {
+  assert.equal(CODEX_CLIENT_VERSION, '0.160.0');
   const h = codexResponsesHeaders('tok', 'acct-1');
   assert.equal(h.version, CODEX_CLIENT_VERSION);
   assert.ok(h['user-agent'].includes(CODEX_CLIENT_VERSION));
