@@ -40,6 +40,7 @@ const WRITABLE: Record<string, string> = {
   'claude-cli': 'Claude Code',
   'codex-cli': 'Codex CLI',
   opencode: 'OpenCode',
+  'omo-agent': 'Oh-My-OpenCode agent',
   'cli-proxy-api': 'cli-proxy-api',
 };
 
@@ -75,7 +76,9 @@ export function opencodeAuthPath(): string {
  * 交给 CLI 用”的意思。OpenCode 只认 Codex 这一路：Claude 账户不写给它。
  */
 export async function syncTargetsOf(acct: Account): Promise<SyncTarget[]> {
-  return targetsOf(acct, acct.provider === 'codex' ? await fileExists(opencodeAuthPath()) : false);
+  const opencodePresent = acct.provider === 'codex' ? await fileExists(opencodeAuthPath()) : false;
+  const omoAgentPresent = acct.provider === 'codex' ? await fileExists(clientPath('omo-agent')) : false;
+  return targetsOf(acct, opencodePresent, omoAgentPresent);
 }
 
 /**
@@ -90,16 +93,22 @@ export async function syncTargetsOfMany(
   const opencodePresent = accounts.some((a) => a.provider === 'codex')
     ? await fileExists(opencodeAuthPath())
     : false;
-  return new Map(accounts.map((a) => [a.id, targetsOf(a, opencodePresent)]));
+  const omoAgentPresent = accounts.some((a) => a.provider === 'codex')
+    ? await fileExists(clientPath('omo-agent'))
+    : false;
+  return new Map(accounts.map((a) => [a.id, targetsOf(a, opencodePresent, omoAgentPresent)]));
 }
 
-function targetsOf(acct: Account, opencodePresent: boolean): SyncTarget[] {
+function targetsOf(acct: Account, opencodePresent: boolean, omoAgentPresent: boolean): SyncTarget[] {
   const source = acct.syncSource || acct.source;
   if (acct.provider === 'codex') {
     const cliPath = source === 'codex-cli' && acct.syncPath ? acct.syncPath : clientPath('codex-cli');
     const targets = [{ source: 'codex-cli', label: WRITABLE['codex-cli'], path: cliPath }];
     if (opencodePresent) {
       targets.push({ source: 'opencode', label: WRITABLE.opencode, path: opencodeAuthPath() });
+    }
+    if (omoAgentPresent) {
+      targets.push({ source: 'omo-agent', label: WRITABLE['omo-agent'], path: clientPath('omo-agent') });
     }
     return targets;
   }
@@ -192,6 +201,15 @@ function tokenPatches(source: string, acct: Account): Patch[] {
       { field: 'openai.accountId', value: acct.accountId },
     ];
   }
+  if (source === 'omo-agent') {
+    return [
+      { field: 'chatgpt-subscription.type', value: 'oauth' },
+      { field: 'chatgpt-subscription.access', value: acct.accessToken, kind: 'secret' },
+      { field: 'chatgpt-subscription.refresh', value: acct.refreshToken, kind: 'secret' },
+      { field: 'chatgpt-subscription.expires', value: acct.expiresAt, kind: 'time' },
+      { field: 'chatgpt-subscription.accountId', value: acct.accountId },
+    ];
+  }
   // cli-proxy-api：字段名与本程序自己的存储完全一致
   return [
     { field: 'type', value: acct.provider },
@@ -210,7 +228,7 @@ function tokenPatches(source: string, acct: Account): Patch[] {
  */
 function stampPatches(source: string): Patch[] {
   // Claude Code 和 OpenCode 的文件里本来就没有这一项，别给人家凭空添一个
-  if (source === 'claude-cli' || source === 'opencode') return [];
+  if (source === 'claude-cli' || source === 'opencode' || source === 'omo-agent') return [];
   return [{ field: 'last_refresh', value: new Date().toISOString(), kind: 'time' }];
 }
 
@@ -219,6 +237,7 @@ function scopeKeyOf(source: string): string {
   if (source === 'claude-cli') return 'claudeAiOauth';
   if (source === 'codex-cli') return 'tokens';
   if (source === 'opencode') return 'openai';
+  if (source === 'omo-agent') return 'chatgpt-subscription';
   return '';
 }
 

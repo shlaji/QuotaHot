@@ -134,6 +134,28 @@ function readOpencodeData(data: Record<string, unknown>): ClientTokens | null {
   };
 }
 
+function readOmoAgentData(data: Record<string, unknown>): ClientTokens | null {
+  const subscription = data['chatgpt-subscription'];
+  if (!subscription || typeof subscription !== 'object' || Array.isArray(subscription)) return null;
+  const o = subscription as Record<string, unknown>;
+  const accessToken = str(o.access);
+  if (!accessToken) return null;
+  const expires = Number(o.expires ?? 0);
+  return {
+    accessToken,
+    refreshToken: str(o.refresh),
+    idToken: '',
+    accountId: str(o.accountId),
+    email: '',
+    expiresAt: Number.isFinite(expires) && expires > 0 ? expires : 0,
+  };
+}
+
+async function readOmoAgentFile(path: string): Promise<ClientTokens | null> {
+  const data = await readJsonFile(path);
+  return data ? readOmoAgentData(data) : null;
+}
+
 async function readOpencodeFile(path: string): Promise<ClientTokens | null> {
   const data = await readJsonFile(path);
   return data ? readOpencodeData(data) : null;
@@ -240,6 +262,7 @@ export async function readClientTokens(
   if (source === 'claude-cli') return readClaudeCodeFile(path);
   if (source === 'codex-cli') return readCodexCliFile(path);
   if (source === 'opencode') return readOpencodeFile(path);
+  if (source === 'omo-agent') return readOmoAgentFile(path);
   if (source === 'cli-proxy-api') return readCliProxyApiFile(path);
   if (source === 'qoder-ide') return readQoderIdeFile(path);
   if (source === 'qoder-cli' || source === 'qoder-desktop') {
@@ -263,6 +286,7 @@ export async function tokensOfClientData(
   if (source === 'claude-cli') return readClaudeCodeData(data);
   if (source === 'codex-cli') return readCodexCliData(data);
   if (source === 'opencode') return readOpencodeData(data);
+  if (source === 'omo-agent') return readOmoAgentData(data);
   if (source === 'cli-proxy-api') return readCliProxyApiData(data);
   return null;
 }

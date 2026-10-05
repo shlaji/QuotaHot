@@ -27,6 +27,7 @@ process.env.HOME = home;
 process.env.XDG_DATA_HOME = join(home, '.local', 'share');
 const codexCliPath = join(home, '.codex', 'auth.json');
 const opencodePath = join(home, '.local', 'share', 'opencode', 'auth.json');
+const omoAgentPath = join(home, '.omo', 'agent', 'auth.json');
 
 /** 摆好（或撤掉）OpenCode 的凭证库：它在不在，直接决定 Codex 有几个写回目标。 */
 async function setOpencode(content: unknown | null): Promise<void> {
@@ -431,6 +432,39 @@ test('写回 OpenCode：令牌挂在 openai 下，用它自己的短字段名，
   assert.deepEqual(saved['opencode-go'], { type: 'api', key: 'sk-user-own-key' }, '别的 provider 不许动');
   assert.equal(oc.label, 'OpenCode');
   assert.equal(oc.error, '');
+});
+
+test('写回 Oh-My-OpenCode agent：只更新 ChatGPT 订阅项并保留其他 provider', async () => {
+  await mkdir(dirname(omoAgentPath), { recursive: true });
+  await writeFile(omoAgentPath, JSON.stringify({
+    'opencode-go': { type: 'api', key: 'sk-user-own-key' },
+    agnes: { type: 'api', key: 'agnes-key' },
+    qoder: { type: 'api', key: 'qoder-key' },
+    'chatgpt-subscription': {
+      type: 'oauth', access: 'old-access', refresh: 'old-refresh', expires: 1, accountId: 'old-id',
+    },
+  }), 'utf8');
+  const { dir } = await fixture({ ...codexAccount, source: 'codex-cli', sync_source: 'codex-cli' });
+
+  const [acct] = await loadAccounts(dir);
+  const results = await syncToClient(acct);
+  const target = results.find((result) => result.source === 'omo-agent');
+  assert.ok(target);
+  assert.equal(target.error, '');
+
+  const saved = JSON.parse(await readFile(omoAgentPath, 'utf8'));
+  assert.deepEqual(saved['chatgpt-subscription'], {
+    type: 'oauth',
+    access: 'codex-access',
+    refresh: 'codex-refresh',
+    expires: 1_800_000_000_000,
+    accountId: 'acct-123',
+  });
+  assert.deepEqual(saved['opencode-go'], { type: 'api', key: 'sk-user-own-key' });
+  assert.deepEqual(saved.agnes, { type: 'api', key: 'agnes-key' });
+  assert.deepEqual(saved.qoder, { type: 'api', key: 'qoder-key' });
+  assert.equal('last_refresh' in saved, false);
+  await rm(omoAgentPath, { force: true });
 });
 
 test('Codex 两个目标各写各的：cli-proxy-api 导入的账户也照样写这两个文件', async () => {

@@ -33,6 +33,10 @@ export function opencodeAuthPath(): string {
   return join(dataHome, 'opencode', 'auth.json');
 }
 
+export function omoAgentAuthPath(): string {
+  return join(homedir(), '.omo', 'agent', 'auth.json');
+}
+
 export async function readClientTokens(source: string, path: string): Promise<ClientTokens | null> {
   const data = await readJson(path);
   if (!data) return null;
@@ -47,6 +51,14 @@ export async function readClientTokens(source: string, path: string): Promise<Cl
     const openai = data.openai;
     if (openai === null || typeof openai !== 'object' || Array.isArray(openai)) return null;
     const record = openai as Record<string, unknown>;
+    const accessToken = text(record.access);
+    const expiresAt = Number(record.expires ?? 0);
+    return accessToken ? { accessToken, refreshToken: text(record.refresh), idToken: '', accountId: text(record.accountId), email: '', expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0 } : null;
+  }
+  if (source === 'omo-agent') {
+    const subscription = data['chatgpt-subscription'];
+    if (subscription === null || typeof subscription !== 'object' || Array.isArray(subscription)) return null;
+    const record = subscription as Record<string, unknown>;
     const accessToken = text(record.access);
     const expiresAt = Number(record.expires ?? 0);
     return accessToken ? { accessToken, refreshToken: text(record.refresh), idToken: '', accountId: text(record.accountId), email: '', expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0 } : null;
@@ -108,6 +120,7 @@ function setPath(root: Record<string, unknown>, field: string, value: string | n
 function patches(source: string, account: Account): readonly (readonly [string, string | number])[] {
   if (source === 'codex-cli') return [['tokens.access_token', account.accessToken], ['tokens.refresh_token', account.refreshToken], ['tokens.id_token', account.idToken], ['tokens.account_id', account.accountId]];
   if (source === 'opencode') return [['openai.type', 'oauth'], ['openai.access', account.accessToken], ['openai.refresh', account.refreshToken], ['openai.expires', account.expiresAt], ['openai.accountId', account.accountId]];
+  if (source === 'omo-agent') return [['chatgpt-subscription.type', 'oauth'], ['chatgpt-subscription.access', account.accessToken], ['chatgpt-subscription.refresh', account.refreshToken], ['chatgpt-subscription.expires', account.expiresAt], ['chatgpt-subscription.accountId', account.accountId]];
   return [['claudeAiOauth.accessToken', account.accessToken], ['claudeAiOauth.refreshToken', account.refreshToken], ['claudeAiOauth.expiresAt', account.expiresAt]];
 }
 
@@ -143,6 +156,7 @@ export async function syncToClients(account: Account, only: readonly string[]): 
   if (account.provider === 'codex') {
     targets.push(['codex-cli', account.syncSource === 'codex-cli' && account.syncPath ? account.syncPath : clientPath('codex-cli'), 'Codex CLI']);
     if (await exists(opencodeAuthPath())) targets.push(['opencode', opencodeAuthPath(), 'OpenCode']);
+    if (await exists(omoAgentAuthPath())) targets.push(['omo-agent', omoAgentAuthPath(), 'Oh-My-OpenCode agent']);
   } else if (account.provider === 'claude') {
     const source = account.syncSource || account.source;
     const path = source === 'claude-cli' && account.syncPath
