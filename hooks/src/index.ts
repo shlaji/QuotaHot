@@ -15,12 +15,16 @@ import {
   CODEX_HOOKS_PATH,
   installCodex,
   installOpencode,
+  installPi,
   opencodePlugin,
   opencodePluginPath,
+  piExtensionPath,
+  piExtensionSource,
   selfCommand,
   selfInvocation,
   uninstallCodex,
   uninstallOpencode,
+  uninstallPi,
   type InstallReport,
 } from './install.js';
 import type { Provider } from './types.js';
@@ -31,9 +35,9 @@ const HELP = `QuotaHot Hook - standalone account switching hooks
 Usage:
   quotahot-hook status [options]
   quotahot-hook switch [options]
-  quotahot-hook run <codex|opencode> [options]
-  quotahot-hook install [codex|opencode|all] [--print]
-  quotahot-hook uninstall [codex|opencode|all]
+  quotahot-hook run <codex|opencode|pi> [options]
+  quotahot-hook install [codex|opencode|pi|all] [--print]
+  quotahot-hook uninstall [codex|opencode|pi|all]
   quotahot-hook help
   quotahot-hook version
   quotahot-hook --version
@@ -53,7 +57,7 @@ Options:
 
 Options:
   --provider <codex|claude>
-  --client <codex-cli|opencode|claude-cli>
+  --client <codex-cli|opencode|claude-cli|pi-claude|pi-codex>
   --threshold <percent>
   --cache-seconds <seconds>
   --min-interval-seconds <seconds>
@@ -63,11 +67,11 @@ Options:
   --dry-run
   --json
 `,
-  run: `Usage: quotahot-hook run <codex|opencode> [options]
+  run: `Usage: quotahot-hook run <codex|opencode|pi> [options]
 
 Options:
   --provider <codex|claude>
-  --client <codex-cli|opencode|claude-cli>
+  --client <codex-cli|opencode|claude-cli|pi-claude|pi-codex>
   --threshold <percent>
   --cache-seconds <seconds>
   --min-interval-seconds <seconds>
@@ -76,12 +80,12 @@ Options:
   --dry-run
   --json
 `,
-  install: `Usage: quotahot-hook install [codex|opencode|all] [--print]
+  install: `Usage: quotahot-hook install [codex|opencode|pi|all] [--print]
 
 Options:
   --print
 `,
-  uninstall: 'Usage: quotahot-hook uninstall [codex|opencode|all]\n',
+  uninstall: 'Usage: quotahot-hook uninstall [codex|opencode|pi|all]\n',
 };
 
 class UsageError extends Error {}
@@ -164,20 +168,20 @@ async function readStdin(): Promise<string> {
 }
 
 async function runEvent(client: string | undefined, flags: Flags): Promise<number> {
-  if (client !== 'codex' && client !== 'opencode') return 2;
+  if (client !== 'codex' && client !== 'opencode' && client !== 'pi') return 2;
   try {
     const output = await runHook(client, await readStdin(), switchOptions(flags));
     console.log(output.stdout);
     if (flags.bools.has('json')) console.error(JSON.stringify({ outcome: output.outcome }));
   } catch {
     console.error('quotahot-hook outcome: unknown');
-    console.log(client === 'codex' ? '{"outcome":"unknown"}' : '{"switched":false,"outcome":"unknown"}');
+    console.log(client === 'codex' ? '{"outcome":"unknown"}' : client === 'pi' ? '{}' : '{"switched":false,"outcome":"unknown"}');
   }
   return 0;
 }
 
-function validTarget(target: string): target is 'all' | 'codex' | 'opencode' {
-  return target === 'all' || target === 'codex' || target === 'opencode';
+function validTarget(target: string): target is 'all' | 'codex' | 'opencode' | 'pi' {
+  return target === 'all' || target === 'codex' || target === 'opencode' || target === 'pi';
 }
 
 async function install(flags: Flags, remove: boolean): Promise<number> {
@@ -193,12 +197,16 @@ async function install(flags: Flags, remove: boolean): Promise<number> {
     if (target === 'all' || target === 'opencode') {
       parts.push(`# ${await opencodePluginPath()}\n${opencodePlugin([...selfInvocation(), 'run', 'opencode'])}`);
     }
+    if (target === 'all' || target === 'pi') {
+      parts.push(`# ${piExtensionPath()}\n${piExtensionSource([...selfInvocation(), 'run', 'pi'])}`);
+    }
     console.log(parts.join('\n\n'));
     return 0;
   }
   const reports: InstallReport[] = [];
   if (target === 'all' || target === 'codex') reports.push(remove ? await uninstallCodex() : await installCodex(`${command} run codex`));
   if (target === 'all' || target === 'opencode') reports.push(remove ? await uninstallOpencode() : await installOpencode([...selfInvocation(), 'run', 'opencode']));
+  if (target === 'all' || target === 'pi') reports.push(remove ? await uninstallPi() : await installPi([...selfInvocation(), 'run', 'pi']));
   for (const report of reports) for (const change of report.changes) console.log(change);
   return 0;
 }
@@ -241,8 +249,8 @@ export async function run(argv: readonly string[]): Promise<number> {
         return 0;
       }
       case 'run': return runEvent(flags.positional[0], flags);
-      case 'install': return install(flags, false);
-      case 'uninstall': return install(flags, true);
+      case 'install': return await install(flags, false);
+      case 'uninstall': return await install(flags, true);
       case 'help':
       case '--help':
       case '-h':

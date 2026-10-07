@@ -10,15 +10,20 @@
  * - OpenCode 读插件目录里的 js/ts 文件，所以这边是**生成一个文件**，整份都是我们的。
  *   文件里写死了本可执行文件的绝对路径：钩子被拉起时的 PATH 未必包含它。
  */
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { isSea } from 'node:sea';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import lockfile from 'proper-lockfile';
 import { opencodePlugin } from './opencode-plugin.js';
+import { piAuthPath } from './client-auth.js';
+import { PI_EXTENSION_MARKER, piExtensionSource } from './pi-extension.js';
 
 export { opencodePlugin } from './opencode-plugin.js';
+export { piExtensionSource } from './pi-extension.js';
 
 function shellArg(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
@@ -183,4 +188,67 @@ export async function uninstallOpencode(): Promise<InstallReport> {
   }
   await rm(path, { force: true });
   return { changes: [`已删除 ${path}`], paths: [path] };
+}
+
+export function piExtensionPath(): string {
+  return join(dirname(piAuthPath()), 'extensions', 'quotahot-hook.ts');
+}
+
+async function withPiExtensionLock<T>(path: string, action: () => Promise<T>): Promise<T> {
+  const release = await lockfile.lock(path, {
+    realpath: false, stale: 30_000,
+    retries: { retries: 10, factor: 1, minTimeout: 100, maxTimeout: 100 },
+  });
+  try {
+    return await action();
+  } finally {
+    await release();
+  }
+}
+
+async function readPiExtension(path: string): Promise<string | null> {
+  const details = await lstat(path).catch((error: unknown) => {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (details === null) return null;
+  if (!details.isFile()) return '';
+  return readFile(path, 'utf8');
+}
+
+export async function installPi(command: readonly string[]): Promise<InstallReport> {
+  const path = piExtensionPath();
+  const source = piExtensionSource(command);
+  await mkdir(dirname(path), { recursive: true });
+  return withPiExtensionLock(path, async () => {
+    const previous = await readPiExtension(path);
+    if (previous !== null && !previous.startsWith(`${PI_EXTENSION_MARKER}\n`)) {
+      return { changes: [`${path} 不是本程序生成的，没有动它`], paths: [] };
+    }
+    if (previous === source) return { changes: [`Pi 扩展已是最新 ${path}`], paths: [] };
+    const temporary = `${path}.${randomUUID()}.quotahot-tmp`;
+    try {
+      await writeFile(temporary, source, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await rename(temporary, path);
+    } finally {
+      await rm(temporary, { force: true });
+    }
+    return { changes: [`${previous === null ? '新增' : '更新'} Pi 扩展 ${path}`], paths: [path] };
+  });
+}
+
+export async function uninstallPi(): Promise<InstallReport> {
+  const path = piExtensionPath();
+  const directory = await lstat(dirname(path)).catch((error: unknown) => {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (directory === null) return { changes: ['Pi 那边没有装过'], paths: [] };
+  return withPiExtensionLock(path, async () => {
+    const previous = await readPiExtension(path);
+    if (previous === null) return { changes: ['Pi 那边没有装过'], paths: [] };
+    if (!previous.startsWith(`${PI_EXTENSION_MARKER}\n`)) return { changes: [`${path} 不是本程序生成的，没有动它`], paths: [] };
+    await rm(path);
+    return { changes: [`已删除 ${path}`], paths: [path] };
+  });
 }

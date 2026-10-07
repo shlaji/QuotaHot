@@ -15,18 +15,18 @@
 ```bash
 tar -xzf quotahot-hook-1.0.0.tar.gz
 cd quotahot-hook-1.0.0
-sh install.sh                       # 安装命令，并注册 Codex 和 OpenCode
+sh install.sh                       # 安装命令，并注册 Codex、OpenCode 和 Pi
 export PATH="$HOME/.local/bin:$PATH"
 quotahot-hook help
 ```
 
-只注册一个客户端就用 `sh install.sh codex` 或 `sh install.sh opencode`。安装脚本不需要
+只注册一个客户端就用 `sh install.sh codex`、`sh install.sh opencode` 或 `sh install.sh pi`。安装脚本不需要
 `sudo`：它把 bundle 直接拷到 `~/.local/bin/quotahot-hook`，再跑一遍钩子注册命令。
 已装过的命令和客户端里的注册项都是直接覆盖，不留 `.quotahot-bak` 备份。
 上面那行 PATH 导出建议写进 shell 启动文件，换个终端也还在。
 解压出来的目录装完就能删。
 
-装完请重启 OpenCode 或开一个新的 Codex 会话。注册钩子并不会凭空生出账户，得先按下文
+装完请重启 OpenCode、Pi 或开一个新的 Codex 会话。注册钩子并不会凭空生出账户，得先按下文
 准备好账户文件。想摘掉客户端集成（账户文件不动）：
 
 ```bash
@@ -60,23 +60,27 @@ quotahot-hook help
 
 ```bash
 quotahot-hook version
-quotahot-hook install                    # Codex 和 OpenCode
+quotahot-hook install                    # Codex、OpenCode 和 Pi
 quotahot-hook install codex              # 只装 Codex
+quotahot-hook install pi                 # 只装 Pi
 quotahot-hook install opencode --print   # 只预览，不写文件
-quotahot-hook uninstall                  # 两边的集成都摘掉
+quotahot-hook uninstall                  # 三边的集成都摘掉
 quotahot-hook status --provider codex
 quotahot-hook switch --dry-run
 quotahot-hook switch --no-check
 quotahot-hook run codex                   # 事件 JSON 从 stdin 进
 quotahot-hook run opencode                # 事件 JSON 从 stdin 进
+quotahot-hook run pi                      # Pi assistant 错误消息 JSON 从 stdin 进
 quotahot-hook install --help              # 只打印该命令的用法，绝不动手安装
 ```
 
 `--provider` 只认 `codex` 和 `claude`，给别的值直接报错，不会悄悄退回到另一个 provider。
 
-安装时写进去的是 `quotahot-hook` 的绝对路径调用。Codex 那几条进 `~/.codex/hooks.json`；OpenCode 插件落在 `$XDG_CONFIG_HOME/opencode/plugin` 或 `plugins` 下。已有文件直接覆盖、不留备份，与本程序无关的 Codex 钩子逐条保留，卸载也只摘掉认得出是本程序的条目或本程序生成的插件。
+安装时写进去的是 `quotahot-hook` 的绝对路径调用。Codex 那几条进 `~/.codex/hooks.json`；OpenCode 插件落在 `$XDG_CONFIG_HOME/opencode/plugin` 或 `plugins` 下。Codex 与本程序无关的钩子逐条保留；OpenCode 插件升级时直接覆盖旧文件、不留备份。
 
-安装和卸载只识别 `quotahot-hook run codex`。升级后执行 `quotahot-hook install` 并重启 OpenCode；Codex 换账户后要开新会话才生效。主程序 `quotahot` 不转发 hook 子命令。
+Pi 扩展落在 `${PI_CODING_AGENT_DIR:-~/.pi/agent}/extensions/quotahot-hook.ts`。安装与卸载只修改带 QuotaHot 标记的这一个文件；同名但没有标记的文件会被保留。扩展仅在 `message_end` 的 assistant 错误明确提示额度耗尽时调用 hook；成功切换后只提示下一次使用可能生效，不会自动重试本次失败请求，也不保证 Pi 会在当前进程里立即重读认证文件。
+
+卸载时按客户端分别识别自己的集成：Codex 只移除带 `quotahot-hook run codex` 的钩子条目；OpenCode 只删除带 `quotahot:start` 标记的插件文件；Pi 只删除带 `quotahot:pi-extension` 标记的扩展文件。Pi 安装和卸载会在扩展文件路径上加锁，锁内重新检查归属；等待期间若同路径被替换为非自有文件，不会覆盖或删除它。升级后执行 `quotahot-hook install` 并重启 OpenCode 或 Pi；Codex 换账户后要开新会话才生效。主程序 `quotahot` 不转发 hook 子命令。
 
 为避免重复加载，OpenCode 插件文件名为 `quotahot.js`，生成标记 `quotahot:start/end`，并只导出 `QuotaHot` 与默认描述符；重新安装会更新原文件，而不是生成第二份插件。
 

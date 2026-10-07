@@ -264,6 +264,75 @@ test('OpenCode 输出不回显子进程或切换结果中的敏感文本', async
   assert.doesNotMatch(out.stdout, /secret@example|sentinel|secret-body/);
 });
 
+for (const [provider, accountProvider, client] of [
+  ['anthropic', 'claude', 'pi-claude'],
+  ['openai-codex', 'codex', 'pi-codex'],
+] as const) {
+  test(`Pi ${provider} finalized quota error switches only ${client}`, async () => {
+    // Given: a finalized assistant quota failure with a sensitive error body.
+    calls = [];
+    reply = { ...reply, switched: true, message: 'private@example.invalid token=secret-token', from: 'private@example.invalid', to: 'other@example.invalid', checked: [], written: [] };
+    // When: Pi supplies the raw assistant message.
+    const out = await runHook('pi', JSON.stringify({ role: 'assistant', provider, stopReason: 'error', errorMessage: 'usage limit reached secret-error' }));
+    // Then: the shared switcher receives only the corresponding Pi target and output is safe.
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].provider, accountProvider);
+    assert.deepEqual(calls[0].clients, [client]);
+    assert.equal(calls[0].triggerClient, client);
+    assert.equal(calls[0].exhausted, true);
+    assert.equal(calls[0].cacheMs, 0);
+    assert.equal(calls[0].threshold, 100);
+    assert.equal(typeof calls[0].usageQuery, 'function');
+    assert.equal(out.outcome, 'switched');
+    assert.match(out.stdout, /不会自动重试/);
+    assert.match(out.stdout, /重新加载|重新解析/);
+    assert.doesNotMatch(out.stdout, /secret-error|secret-token|private@example|other@example/);
+  });
+}
+
+test('Pi ignores non-quota, unfinished, unknown-provider and malformed assistant messages', async () => {
+  // Given: none of these messages proves a finalized supported-provider quota failure.
+  const messages: readonly unknown[] = [
+    { role: 'user', provider: 'anthropic', stopReason: 'error', errorMessage: 'usage limit reached' },
+    { role: 'assistant', provider: 'anthropic', stopReason: 'stop', errorMessage: 'usage limit reached' },
+    { role: 'assistant', provider: 'other', stopReason: 'error', errorMessage: 'usage limit reached' },
+    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: 'context length limit exceeded' },
+    { role: 'assistant', provider: 'openai-codex', stopReason: 'error', errorMessage: 'server overloaded' },
+    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: '401 unauthorized' },
+    { role: 'assistant', provider: 'openai-codex', stopReason: 'error', errorMessage: '403 forbidden' },
+    { role: 'assistant', provider: 'openai-codex', stopReason: 'error', errorMessage: 'upstream failed' },
+    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: 'HTTP 429' },
+    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: 'resets at 10pm' },
+    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: "you've hit your network connection" },
+    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: 429 },
+    { role: 'assistant', provider: 'anthropic', stopReason: 'error', status: 429 },
+    { role: 'assistant', provider: 'anthropic', stopReason: 'error', message: 'usage limit reached' },
+    [], null,
+  ];
+  calls = [];
+  // When: Pi sends each message, including malformed JSON.
+  for (const input of [...messages.map((message) => JSON.stringify(message)), '{broken']) {
+    const out = await runHook('pi', input);
+    // Then: no switcher call or sensitive output is produced.
+    assert.equal(out.result, null);
+    assert.equal(out.outcome, 'skipped_no_signal');
+    assert.doesNotMatch(out.stdout, /usage limit reached|HTTP 429|upstream failed/);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('Pi reports failed candidate checks and writes without leaking account details', async () => {
+  // Given: a valid quota signal, but a failed candidate check and write.
+  calls = [];
+  reply = { ...reply, switched: false, message: 'private@example.invalid secret-token', checked: [{ id: 'secret-id', email: 'private@example.invalid', usable: false, usedPercent: null, resetAt: 0, source: 'error', error: 'secret-error' }], written: [{ path: '/private/auth.json', source: 'pi-codex', label: 'Pi Codex', created: false, backupPath: '', changes: [], warning: '', error: 'secret-write' }] };
+  // When: the error triggers a Pi switch attempt.
+  const out = await runHook('pi', JSON.stringify({ role: 'assistant', provider: 'openai-codex', stopReason: 'error', errorMessage: 'quota exceeded secret-body' }));
+  // Then: only a stable outcome and safe diagnostic reach stdout.
+  assert.equal(out.outcome, 'check_failed');
+  assert.doesNotMatch(out.stdout, /private|secret|quota exceeded/);
+  reply = { ...reply, checked: [], written: [] };
+});
+
 test('Codex 输出不回显切换结果中的邮箱或账户文本', async () => {
   reply = { ...reply, switched: true, message: 'secret@example.invalid account-secret', to: 'secret@example.invalid' };
   const path = rollout([turn(100, 3600)]);

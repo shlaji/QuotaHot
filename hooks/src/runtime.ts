@@ -153,7 +153,7 @@ function parse(input: string): Record<string, unknown> {
  * 那套判断，免得两处阈值各说各话。
  */
 export async function runHook(
-  client: 'codex' | 'opencode',
+  client: 'codex' | 'opencode' | 'pi',
   input: string,
   opts: Partial<SwitchOptions> = {},
 ): Promise<HookOutput> {
@@ -174,6 +174,44 @@ export async function runHook(
       reason: signal.hit ? signal.reason : `codex ${event} 例行检查`,
     });
     return { stdout: codexStdout(result, signal), result, skipped: '', outcome: result.switched ? 'switched' : signal.hit ? 'no_candidate' : 'skipped_no_signal' };
+  }
+
+  if (client === 'pi') {
+    const target = payload.provider === 'anthropic'
+      ? { provider: 'claude', client: 'pi-claude' } as const
+      : payload.provider === 'openai-codex'
+        ? { provider: 'codex', client: 'pi-codex' } as const
+        : null;
+    if (payload.role !== 'assistant' || payload.stopReason !== 'error' || !target
+      || typeof payload.errorMessage !== 'string'
+      || !/(?:quota|limit)(?:\b|_)|\btoo many requests\b/i.test(payload.errorMessage)
+      || classifyQuotaSignal({ message: payload.errorMessage }) !== 'quota_phrase') {
+      return { stdout: '{}', result: null, skipped: 'Pi 消息不是明确的额度错误', outcome: 'skipped_no_signal' };
+    }
+    const result = await switchAccount({
+      ...opts,
+      provider: target.provider,
+      clients: [target.client],
+      triggerClient: target.client,
+      exhausted: true,
+      cacheMs: 0,
+      threshold: 100,
+      reason: 'Pi 报告明确的额度用尽信息',
+      usageQuery: queryHookUsage,
+    });
+    const outcome: HookOutcome = result.switched ? 'switched' :
+      result.checked.some((account) => account.source === 'error') || result.written.some((write) => write.error)
+        ? 'check_failed'
+        : 'no_candidate';
+    return {
+      stdout: JSON.stringify({
+        switched: result.switched, outcome,
+        message: result.switched
+          ? 'QuotaHot: 已切换 Pi 账户。本次失败请求不会自动重试；新凭证将在后续使用时生效，Pi 可能需要重新解析认证或重新加载进程。'
+          : '',
+      }),
+      result, skipped: '', outcome,
+    };
   }
 
   const signal = opencodeSignal(payload);

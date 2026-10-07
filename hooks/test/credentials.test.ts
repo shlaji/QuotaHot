@@ -23,6 +23,7 @@ mock.module('undici', {
 
   const { loadAccounts } = await import('../src/account-files.js');
   const { ensureFresh } = await import('../src/credentials.js');
+const { readClientTokens } = await import('../src/client-auth.js');
 const network = { proxy: '', noProxy: [] } as const;
 
 function jwt(claims: Readonly<Record<string, unknown>>): string {
@@ -148,4 +149,46 @@ test('Claude OAuth renewal omits Authorization and preserves matching renewal be
   assert.equal(renewed, true);
   assert.equal(new Headers(refreshHeaders).has('authorization'), false);
   assert.equal(JSON.parse(await readFile(fixture.path, 'utf8')).access_token, 'fresh-claude-token');
+});
+
+test('Pi refuses unsupported or incomplete OAuth credentials when reading', async (context) => {
+  // Given: a temporary Pi auth file with a non-OAuth or incomplete provider entry.
+  const directory = await mkdtemp(join(tmpdir(), 'quotahot-pi-read-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'auth.json');
+  await writeFile(path, JSON.stringify({ anthropic: { type: 'api_key', key: 'secret' }, 'openai-codex': { type: 'oauth', access: 'access', expires: 100 } }));
+  // When: the adapter reads each provider.
+  const claude = await readClientTokens('pi-claude', path);
+  const codex = await readClientTokens('pi-codex', path);
+  // Then: neither entry is treated as a usable login.
+  assert.equal(claude, null);
+  assert.equal(codex, null);
+});
+
+test('Pi Codex refuses a token whose account identity conflicts with its accountId', async (context) => {
+  // Given: the OAuth record names A, but its access token is signed for B.
+  const directory = await mkdtemp(join(tmpdir(), 'quotahot-pi-identity-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'auth.json');
+  await writeFile(path, JSON.stringify({ 'openai-codex': {
+    type: 'oauth', refresh: 'refresh', access: jwt({ chatgpt_account_id: 'B' }), expires: 123, accountId: 'A',
+  } }));
+  // When: Pi Codex credentials are read.
+  const tokens = await readClientTokens('pi-codex', path);
+  // Then: conflicting account identities are never offered for switching.
+  assert.equal(tokens, null);
+});
+
+test('Pi Codex refuses OAuth credentials without an accountId', async (context) => {
+  // Given: Pi has a complete OAuth token pair but no Codex account identity.
+  const directory = await mkdtemp(join(tmpdir(), 'quotahot-pi-missing-id-'));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'auth.json');
+  await writeFile(path, JSON.stringify({ 'openai-codex': {
+    type: 'oauth', refresh: 'refresh', access: 'opaque-access', expires: 123,
+  } }));
+  // When: the Pi Codex provider is read.
+  const tokens = await readClientTokens('pi-codex', path);
+  // Then: it is not treated as a usable Codex login.
+  assert.equal(tokens, null);
 });

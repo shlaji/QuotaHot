@@ -14,6 +14,7 @@ export const DEFAULT_MIN_INTERVAL_MS = 60_000;
 const FALLBACK_COOLDOWN_MS = 30 * 60_000;
 export const CLIENTS: Readonly<Record<string, string>> = {
   'codex-cli': 'Codex CLI', opencode: 'OpenCode', 'claude-cli': 'Claude Code',
+  'pi-claude': 'Pi Claude', 'pi-codex': 'Pi Codex',
 };
 
 export type AccountStatus = {

@@ -2,16 +2,16 @@
 set -eu
 
 usage() {
-  printf '%s\n' 'Usage: sh install.sh [all|codex|opencode]' \
+  printf '%s\n' 'Usage: sh install.sh [all|codex|opencode|pi]' \
     'Installs quotahot-hook into ~/.local/bin.' \
-    'Requires Node.js >=24. Registers Codex and OpenCode by default; no sudo needed.'
+    'Requires Node.js >=24. Registers Codex, OpenCode and Pi by default; no sudo needed.'
 }
 
 if [ "$#" -gt 1 ]; then usage >&2; exit 2; fi
 target=${1:-all}
 case "$target" in
   -h|--help) usage; exit 0 ;;
-  all|codex|opencode) ;;
+  all|codex|opencode|pi) ;;
   *) usage >&2; exit 2 ;;
 esac
 
@@ -48,4 +48,4 @@ node "$target_binary" install "$target"
 printf '\n%s\n' 'Installed. Add the command directory to your shell PATH:' \
   '  export PATH="$HOME/.local/bin:$PATH"' \
   'Then run: quotahot-hook help' \
-  'Restart OpenCode / start a new Codex session for the integration to take effect.'
+  'Restart OpenCode or Pi / start a new Codex session for the integration to take effect.'

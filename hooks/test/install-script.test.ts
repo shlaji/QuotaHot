@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { access, copyFile, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -54,4 +54,18 @@ test('installer finds the bundle from the source tree, where it sits one level u
   const command = join(home, '.local', 'bin', 'quotahot-hook');
   await access(command, constants.X_OK);
   assert.match(await readFile(command, 'utf8'), /process\.exit\(0\)/);
+});
+
+test('shell installer accepts Pi and forwards only that target', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'quotahot-hook-script-pi-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const packageDir = join(root, 'package');
+  const home = join(root, 'home');
+  await mkdir(packageDir, { recursive: true });
+  await copyFile(resolve('scripts/install.sh'), join(packageDir, 'install.sh'));
+  await writeFile(join(packageDir, 'quotahot-hook'), `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(process.env.HOME + '/target', process.argv.slice(2).join(' '));\n`, { mode: 0o755 });
+  await writeFile(join(packageDir, 'package.json'), '{"type":"commonjs"}\n');
+  const stdout = execFileSync('sh', [join(packageDir, 'install.sh'), 'pi'], { cwd: packageDir, env: { ...process.env, HOME: home }, encoding: 'utf8' });
+  assert.match(stdout, /Installed/);
+  assert.equal(await readFile(join(home, 'target'), 'utf8'), 'install pi');
 });

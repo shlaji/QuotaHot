@@ -13,7 +13,11 @@ async function cli(args: readonly string[], home?: string): Promise<CliResult> {
   return new Promise((resolveResult) => {
     execFile(process.execPath, ['--import', import.meta.resolve('tsx'), entry, ...args], {
       cwd: process.cwd(),
-    env: home === undefined ? process.env : { ...process.env, HOME: home, QUOTAHOT_DATA_DIR: join(home, '.quotahot') },
+    env: home === undefined ? process.env : {
+      ...process.env, HOME: home, QUOTAHOT_DATA_DIR: join(home, '.quotahot'),
+      XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local', 'share'),
+      PI_CODING_AGENT_DIR: join(home, '.pi', 'agent'),
+    },
       timeout: 30_000,
     }, (error, stdout, stderr) => {
       resolveResult({ code: error?.code === undefined ? 0 : Number(error.code), stdout, stderr });
@@ -65,7 +69,7 @@ test('subcommand help shows only the selected command options', async () => {
   assert.match(installHelp.stdout, /quotahot-hook install/);
   assert.match(installHelp.stdout, /--print/);
   assert.doesNotMatch(installHelp.stdout, /--threshold/);
-  assert.match(runHelp.stdout, /quotahot-hook run <codex\|opencode>/);
+  assert.match(runHelp.stdout, /quotahot-hook run <codex\|opencode\|pi>/);
   assert.match(runHelp.stdout, /--threshold/);
   assert.doesNotMatch(runHelp.stdout, /--exhausted|--print/);
   assert.match(uninstallHelp.stdout, /quotahot-hook uninstall/);
@@ -92,4 +96,27 @@ test('invalid provider is rejected instead of silently selecting Codex', async (
   assert.equal(result.code, 2);
   assert.match(result.stderr, /Invalid --provider: other/);
   assert.equal(result.stdout, '');
+});
+
+test('Pi CLI target previews and installs without affecting other targets', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-hook-pi-cli-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const preview = await cli(['install', 'pi', '--print'], home);
+  assert.equal(preview.code, 0);
+  assert.match(preview.stdout, /extensions\/quotahot-hook\.ts/);
+  assert.match(preview.stdout, /run.*pi/);
+  assert.doesNotMatch(preview.stdout, /hooks\.json|quotahot\.js/);
+  const installed = await cli(['install', 'pi'], home);
+  assert.equal(installed.code, 0);
+  await access(join(home, '.pi', 'agent', 'extensions', 'quotahot-hook.ts'));
+  await assert.rejects(access(join(home, '.codex', 'hooks.json')));
+  const uninstalled = await cli(['uninstall', 'pi'], home);
+  assert.equal(uninstalled.code, 0);
+  await assert.rejects(access(join(home, '.pi', 'agent', 'extensions', 'quotahot-hook.ts')));
+  const all = await cli(['install'], home);
+  assert.equal(all.code, 0);
+  await access(join(home, '.pi', 'agent', 'extensions', 'quotahot-hook.ts'));
+  const help = await cli(['help'], home);
+  assert.match(help.stdout, /codex\|opencode\|pi\|all/);
+  assert.equal((await cli(['install', 'wrong'], home)).code, 2);
 });

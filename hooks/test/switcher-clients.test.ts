@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import {
   accountsDir,
@@ -9,6 +9,7 @@ import {
   nested,
   observations,
   opencodeAuthPath,
+  home,
   reset,
   setClients,
   switchWithUsage,
@@ -16,6 +17,9 @@ import {
   usageWindow,
   writeAccount,
 } from './switcher-fixture.js';
+import { clientPath, readClientTokens } from '../src/client-auth.js';
+import { CLIENTS } from '../src/switcher.js';
+import { join } from 'node:path';
 
 test('client filter writes only the selected client', async () => {
   // Given: both clients use the exhausted current account.
@@ -28,6 +32,14 @@ test('client filter writes only the selected client', async () => {
   assert.equal(result.switched, true);
   assert.equal(nested(codexAuthPath, 'tokens', 'access_token'), 'token-b@x.com');
   assert.equal(nested(opencodeAuthPath, 'openai', 'access'), 'token-a@x.com');
+});
+
+test('Pi targets are recognized client labels without changing provider defaults', () => {
+  // Given: both Pi credential adapters are available.
+  // When: the shared client registry is consulted.
+  // Then: both Pi targets have safe descriptions for explicit CLI selection.
+  assert.equal(CLIENTS['pi-claude'], 'Pi Claude');
+  assert.equal(CLIENTS['pi-codex'], 'Pi Codex');
 });
 
 test('OpenCode trigger uses the OpenCode current account', async () => {
@@ -84,4 +96,121 @@ test('current-account detection identifies both clients and rejects strangers', 
   writeFileSync(codexAuthPath, JSON.stringify({ tokens: { access_token: 'stranger' } }));
   // Then: no arbitrary account is selected.
   assert.equal(await currentAccount('codex-cli', accounts), null);
+});
+
+test('Pi resolves its configured auth directory and identifies both provider accounts', async () => {
+  // Given: a private Pi auth file with both OAuth providers.
+  reset();
+  const piDir = join(home, 'pi-agent');
+  mkdirSync(piDir, { recursive: true });
+  const original = process.env.PI_CODING_AGENT_DIR;
+  const previous = join(home, 'existing-pi-agent');
+  process.env.PI_CODING_AGENT_DIR = previous;
+  process.env.PI_CODING_AGENT_DIR = piDir;
+  try {
+    writeFileSync(join(piDir, 'auth.json'), JSON.stringify({
+      anthropic: { type: 'oauth', access: 'token-b@x.com', refresh: 'refresh-b', expires: 123 },
+      'openai-codex': { type: 'oauth', access: 'different-token', refresh: 'refresh-b', expires: 456, accountId: 'acct-b@x.com' },
+    }));
+    const accounts = await loadAccounts(accountsDir);
+    // When: Pi's provider-specific sources are resolved and read.
+    assert.equal(clientPath('pi-claude'), join(piDir, 'auth.json'));
+    assert.equal(clientPath('pi-codex'), join(piDir, 'auth.json'));
+    assert.equal((await readClientTokens('pi-claude', clientPath('pi-claude')))?.accessToken, 'token-b@x.com');
+    assert.equal((await readClientTokens('pi-codex', clientPath('pi-codex')))?.accountId, 'acct-b@x.com');
+    // Then: the shared identity lookup recognizes a token or an account ID.
+    assert.equal((await currentAccount('pi-claude', accounts))?.email, 'b@x.com');
+    assert.equal((await currentAccount('pi-codex', accounts))?.email, 'b@x.com');
+  } finally {
+    process.env.PI_CODING_AGENT_DIR = previous;
+    try {
+      assert.equal(process.env.PI_CODING_AGENT_DIR, previous);
+    } finally {
+      if (original === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = original;
+    }
+  }
+});
+
+test('Pi defaults to the agent auth path and an unknown source has no path', () => {
+  // Given: Pi has no directory override.
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  delete process.env.PI_CODING_AGENT_DIR;
+  try {
+    // When: its path and an unknown source are resolved.
+    const piPath = clientPath('pi-codex');
+    const unknownPath = clientPath('unrecognized-client');
+    // Then: Pi uses the normal agent location without routing an unknown source.
+    assert.equal(piPath, join(home, '.pi', 'agent', 'auth.json'));
+    assert.equal(unknownPath, '');
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  }
+});
+
+test('Pi Codex switch writes only its selected client target', async () => {
+  // Given: two accounts and a Pi auth file on account A.
+  reset();
+  const piDir = join(home, 'pi-switch');
+  mkdirSync(piDir, { recursive: true });
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = piDir;
+  const piPath = join(piDir, 'auth.json');
+  try {
+    writeFileSync(piPath, JSON.stringify({
+      'openai-codex': { type: 'oauth', access: 'token-a@x.com', refresh: 'refresh-a', expires: 123, accountId: 'acct-a@x.com' },
+      anthropic: { type: 'oauth', access: 'claude', refresh: 'claude-refresh', expires: 123 },
+    }));
+    usageByEmail.set('b@x.com', [usageWindow('primary', 2, 3_600_000)]);
+    // When: Pi Codex triggers a switch and is the sole selected target.
+    const result = await switchWithUsage({ minIntervalMs: 0, exhausted: true, triggerClient: 'pi-codex', clients: ['pi-codex'] });
+    // Then: the switch succeeds without touching Codex CLI or the Pi Claude provider.
+    assert.equal(result.switched, true);
+    assert.equal(nested(piPath, 'openai-codex', 'access'), 'token-b@x.com');
+    assert.equal(nested(piPath, 'anthropic', 'access'), 'claude');
+    assert.equal(nested(codexAuthPath, 'tokens', 'access_token'), 'token-a@x.com');
+    assert.equal(nested(opencodeAuthPath, 'openai', 'access'), 'token-a@x.com');
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  }
+});
+
+test('Pi Claude switch writes only its provider entry and leaves Claude Code untouched', async () => {
+  // Given: two Claude accounts and Pi using the exhausted one.
+  reset();
+  for (const email of ['a@x.com', 'b@x.com']) {
+    writeFileSync(join(accountsDir, `claude-${email}.json`), JSON.stringify({
+      type: 'claude', email, access_token: `claude-token-${email}`,
+      refresh_token: `claude-refresh-${email}`,
+      expired: new Date(Date.now() + 86_400_000).toISOString(),
+      auto_refresh: true,
+    }));
+  }
+  const piDir = join(home, 'pi-claude-switch');
+  mkdirSync(piDir, { recursive: true });
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = piDir;
+  const piPath = join(piDir, 'auth.json');
+  const claudePath = clientPath('claude-cli');
+  try {
+    writeFileSync(piPath, JSON.stringify({
+      anthropic: { type: 'oauth', access: 'claude-token-a@x.com', refresh: 'claude-refresh-a', expires: 123 },
+      'openai-codex': { type: 'oauth', access: 'codex-unchanged', refresh: 'codex-refresh', expires: 123, accountId: 'codex-id' },
+    }));
+    usageByEmail.set('b@x.com', [usageWindow('5h', 2, 3_600_000)]);
+    // When: the shared switcher receives an explicit Pi Claude target.
+    const result = await switchWithUsage({ provider: 'claude', minIntervalMs: 0, exhausted: true, triggerClient: 'pi-claude', clients: ['pi-claude'] });
+    // Then: only Pi Anthropic changes; no other client's auth file is created or changed.
+    assert.equal(result.switched, true);
+    assert.equal(nested(piPath, 'anthropic', 'access'), 'claude-token-b@x.com');
+    assert.equal(nested(piPath, 'openai-codex', 'access'), 'codex-unchanged');
+    assert.equal(nested(codexAuthPath, 'tokens', 'access_token'), 'token-a@x.com');
+    assert.equal(nested(opencodeAuthPath, 'openai', 'access'), 'token-a@x.com');
+    assert.equal(existsSync(claudePath), false);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  }
 });
