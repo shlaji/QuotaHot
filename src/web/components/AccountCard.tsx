@@ -11,6 +11,8 @@ const SOURCE_LABEL: Record<string, string> = {
   'cli-proxy-api': '导入自 cli-proxy-api',
   'codex-cli': '导入自 Codex CLI',
   'claude-cli': '导入自 Claude Code',
+  'pi-claude': '导入自 Pi',
+  'pi-codex': '导入自 Pi',
   'qoder-cli': '导入自 Qoder CLI',
   'qoder-desktop': '导入自 Qoder Desktop',
   'qoder-ide': '导入自 Qoder IDE',

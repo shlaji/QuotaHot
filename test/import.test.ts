@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { importTokenFiles, parseTokenFile } from '../src/server/import.js';
-import { loadAccounts, saveAccount } from '../src/server/creds.js';
+import { createHash } from 'node:crypto';
+import { importFrom, importTokenFiles, parseTokenFile, scanSources } from '../src/server/import.js';
+import { identityOf, loadAccounts, saveAccount } from '../src/server/creds.js';
+import { defaultClientPath, setClientPaths } from '../src/server/clientpaths.js';
 
 function jwt(claims: Record<string, unknown>): string {
   return `header.${Buffer.from(JSON.stringify(claims)).toString('base64url')}.signature`;
@@ -12,6 +14,185 @@ function jwt(claims: Record<string, unknown>): string {
 
 const token = { type: 'codex', email: 'alice@example.com', access_token: 'private-access', refresh_token: 'private-refresh' };
 const file = (data: unknown) => ({ name: 'accounts.json', text: JSON.stringify(data) });
+const piAuth = {
+  anthropic: { type: 'oauth', access: 'pi-claude-private', refresh: 'pi-claude-refresh', expires: 2_100_000_000_000 },
+  'openai-codex': { type: 'oauth', access: jwt({ email: 'codex@pi.test', chatgpt_account_id: 'pi-acct' }), refresh: 'pi-codex-refresh', expires: 2_100_000_000_000, accountId: 'pi-acct' },
+};
+const piClaudeKey = `pi-claude-${createHash('sha256').update(piAuth.anthropic.access).digest('hex').slice(0, 24)}`;
+
+test('parses Pi providers as two detached token-file accounts', () => {
+  const result = parseTokenFile('auth.json', JSON.stringify(piAuth));
+  assert.deepEqual(result.skipped, []);
+  assert.deepEqual(result.accounts.map(({ provider, source, syncPath, autoRefresh, email, accountId }) =>
+    ({ provider, source, syncPath, autoRefresh, email, accountId })), [
+    { provider: 'claude', source: 'token-file', syncPath: undefined, autoRefresh: true, email: piClaudeKey, accountId: '' },
+    { provider: 'codex', source: 'token-file', syncPath: undefined, autoRefresh: true, email: 'codex@pi.test', accountId: 'pi-acct' },
+  ]);
+  assert.equal(result.accounts[0]?.accessToken, piAuth.anthropic.access);
+  assert.equal(result.accounts[1]?.refreshToken, piAuth['openai-codex'].refresh);
+});
+
+test('keeps different anonymous Pi Anthropic tokens as separate accounts when uploaded under the same filename', async (context) => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-anonymous-'));
+  context.after(() => rm(dir, { recursive: true, force: true }));
+  const first = piAuth.anthropic;
+  const second = { ...first, access: 'another-private-access' };
+
+  const result = await importTokenFiles(dir, [
+    { name: 'auth.json', text: JSON.stringify({ anthropic: first }) },
+    { name: 'auth.json', text: JSON.stringify({ anthropic: second }) },
+  ]);
+
+  assert.equal(result.imported.length, 2);
+  assert.deepEqual(result.skipped, []);
+  assert.deepEqual(new Set((await loadAccounts(dir)).map(({ accessToken }) => accessToken)), new Set([first.access, second.access]));
+});
+
+test('uses the same non-secret Pi Anthropic key for local scan and detached upload regardless of filename', async (context) => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-key-'));
+  const path = join(dir, 'auth.json');
+  setClientPaths({ pi: path });
+  context.after(async () => { setClientPaths({}); await rm(dir, { recursive: true, force: true }); });
+  await writeFile(path, JSON.stringify({ anthropic: piAuth.anthropic }));
+
+  const scanned = (await scanSources()).find(({ source }) => source === 'pi');
+  const uploaded = parseTokenFile('different-name.json', JSON.stringify({ anthropic: piAuth.anthropic })).accounts[0];
+  const repeated = parseTokenFile('again.json', JSON.stringify({ anthropic: piAuth.anthropic })).accounts[0];
+  const key = uploaded?.email ?? '';
+
+  assert.match(key, /^pi-claude-[a-f0-9]{24}$/);
+  assert.ok(key.length <= 40);
+  assert.equal(key, piClaudeKey);
+  assert.equal(scanned?.accounts[0]?.id, `claude:${key}`);
+  assert.equal(repeated?.email, key);
+  assert.equal(key.includes(piAuth.anthropic.access), false);
+  assert.equal(key.includes('@'), false);
+  assert.equal(JSON.stringify(scanned).includes(piAuth.anthropic.access), false);
+});
+
+test('keeps distinct anonymous Pi Codex accountIds separate while retaining verified IDs', async (context) => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-codex-'));
+  context.after(() => rm(dir, { recursive: true, force: true }));
+  const first = { ...piAuth['openai-codex'], access: jwt({ chatgpt_account_id: 'acct-one' }), accountId: 'acct-one' };
+  const second = { ...first, access: jwt({ chatgpt_account_id: 'acct-two' }), accountId: 'acct-two' };
+
+  const result = await importTokenFiles(dir, [
+    { name: 'auth.json', text: JSON.stringify({ 'openai-codex': first }) },
+    { name: 'auth.json', text: JSON.stringify({ 'openai-codex': second }) },
+  ]);
+
+  assert.equal(result.imported.length, 2);
+  assert.deepEqual(result.skipped, []);
+  const accounts = await loadAccounts(dir);
+  assert.deepEqual(new Set(accounts.map(({ accountId }) => accountId)), new Set(['acct-one', 'acct-two']));
+  for (const account of accounts) assert.match(account.email, /^pi-codex-[a-f0-9]{24}$/);
+  const repeated = parseTokenFile('another.json', JSON.stringify({ 'openai-codex': first })).accounts[0];
+  assert.equal(repeated?.email, accounts.find(({ accountId }) => accountId === 'acct-one')?.email);
+});
+
+test('does not treat an anonymous Pi key as follow-client proof after an unverifiable token rotation', async (context) => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-follow-'));
+  context.after(() => rm(dir, { recursive: true, force: true }));
+  await importTokenFiles(dir, [{ name: 'auth.json', text: JSON.stringify({ anthropic: piAuth.anthropic }) }]);
+  const [account] = await loadAccounts(dir);
+  assert.ok(account);
+
+  const verdict = identityOf({ accessToken: 'rotated-opaque-token', refreshToken: '', idToken: '',
+    email: '', accountId: '', expiresAt: piAuth.anthropic.expires }, account);
+
+  assert.equal(verdict.kind, 'unknown');
+});
+
+test('ignores unknown-only Pi keys and rejects a conflicting Codex claim even when generic account_id matches', () => {
+  const unknown = parseTokenFile('auth.json', JSON.stringify({ other: { type: 'oauth', access: 'private-unknown', refresh: 'private-refresh', expires: 2_100_000_000_000 } }));
+  assert.deepEqual(unknown.accounts, []);
+  assert.equal(JSON.stringify(unknown.skipped).includes('private'), false);
+  const conflicting = parseTokenFile('auth.json', JSON.stringify({ 'openai-codex': {
+    ...piAuth['openai-codex'], access: jwt({ account_id: 'pi-acct', chatgpt_account_id: 'different' }),
+  } }));
+  assert.deepEqual(conflicting.accounts, []);
+  assert.equal(conflicting.skipped.length, 1);
+});
+
+for (const key of ['anthropic', 'openai-codex'] as const) {
+  test(`parses Pi ${key} on its own`, () => {
+    const result = parseTokenFile('auth.json', JSON.stringify({ [key]: piAuth[key] }));
+    assert.equal(result.accounts.length, 1);
+    assert.equal(result.accounts[0]?.provider, key === 'anthropic' ? 'claude' : 'codex');
+    assert.deepEqual(result.skipped, []);
+  });
+  for (const [reason, entry] of [
+    ['API key instead of OAuth', { ...piAuth[key], type: 'api_key', key: 'private-api-key' }],
+    ['unsupported credential type', { ...piAuth[key], type: 'other' }],
+    ['empty access token', { ...piAuth[key], access: '' }],
+    ['empty refresh token', { ...piAuth[key], refresh: '' }],
+    ['string expiry', { ...piAuth[key], expires: 'tomorrow' }],
+    ['zero expiry', { ...piAuth[key], expires: 0 }],
+    ['missing expiry', { ...piAuth[key], expires: undefined }],
+    ...(key === 'openai-codex' ? [
+      ['empty accountId', { ...piAuth[key], accountId: '' }],
+      ['conflicting accountId claim', { ...piAuth[key], access: jwt({ chatgpt_account_id: 'other-acct' }) }],
+    ] as const : []),
+  ]) {
+    test(`skips invalid Pi ${key} entry with ${reason} without revealing credentials`, () => {
+      const result = parseTokenFile('auth.json', JSON.stringify({ [key]: entry, unknown: { type: 'oauth', access: 'private-unknown' } }));
+      assert.deepEqual(result.accounts, []);
+      assert.equal(result.skipped.length, 1);
+      assert.equal(JSON.stringify(result.skipped).includes('private'), false);
+    });
+  }
+}
+
+test('Pi source scans configured auth path without disclosing credentials and imports independently', async (context) => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-import-'));
+  const path = join(dir, 'auth.json');
+  const accountsDir = join(dir, 'accounts');
+  setClientPaths({ pi: path });
+  context.after(async () => { setClientPaths({}); await rm(dir, { recursive: true, force: true }); });
+  await writeFile(path, JSON.stringify(piAuth));
+  const scanned = (await scanSources()).find(({ source }) => source === 'pi');
+  assert.deepEqual(scanned, { source: 'pi', path, defaultPath: defaultClientPath('pi'), available: true,
+    accounts: [
+      { id: `claude:${piClaudeKey}`, provider: 'claude', email: piClaudeKey, expiresAt: piAuth.anthropic.expires, followClient: true },
+      { id: 'codex:codex@pi.test', provider: 'codex', email: 'codex@pi.test', expiresAt: piAuth['openai-codex'].expires, followClient: true },
+    ], error: '' });
+  assert.equal(JSON.stringify(scanned).includes('private'), false);
+  const result = await importFrom(accountsDir, ['pi']);
+  assert.deepEqual(result, { imported: [`claude:${piClaudeKey}`, 'codex:codex@pi.test'], skipped: [] });
+  const accounts = await loadAccounts(accountsDir);
+  assert.deepEqual(accounts.map(({ provider, source, syncSource, syncPath, autoRefresh }) =>
+    ({ provider, source, syncSource, syncPath, autoRefresh })), [
+    { provider: 'claude', source: 'pi-claude', syncSource: 'pi-claude', syncPath: path, autoRefresh: false },
+    { provider: 'codex', source: 'pi-codex', syncSource: 'pi-codex', syncPath: path, autoRefresh: false },
+  ]);
+});
+
+test('Pi source reads the default PI_CODING_AGENT_DIR auth path', async (context) => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-default-'));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  setClientPaths({});
+  context.after(async () => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(dir, { recursive: true, force: true });
+  });
+  await writeFile(join(dir, 'auth.json'), JSON.stringify({ anthropic: piAuth.anthropic }));
+  const scanned = (await scanSources()).find(({ source }) => source === 'pi');
+  assert.equal(scanned?.path, join(dir, 'auth.json'));
+  assert.equal(scanned?.accounts.length, 1);
+});
+
+test('Pi source reports malformed JSON without disclosing file contents', async (context) => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-malformed-'));
+  const path = join(dir, 'auth.json');
+  setClientPaths({ pi: path });
+  context.after(async () => { setClientPaths({}); await rm(dir, { recursive: true, force: true }); });
+  await writeFile(path, '{"anthropic":"private-invalid-json"');
+  const scanned = (await scanSources()).find(({ source }) => source === 'pi');
+  assert.equal(scanned?.available, false);
+  assert.equal(JSON.stringify(scanned).includes('private-invalid-json'), false);
+});
 
 test('parses one object into a detached account when client settings are supplied', () => {
   const input = { ...token, id_token: 'private-id', account_id: 'acct-1', expired: '2030-01-01T00:00:00Z', sync_path: '/client/auth', source: 'codex-cli', auto_refresh: false };

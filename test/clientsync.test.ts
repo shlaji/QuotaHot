@@ -1,9 +1,10 @@
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { loadAccounts } from '../src/server/creds.js';
+import { setClientPaths } from '../src/server/clientpaths.js';
 import {
   readClientCredentialSnapshot,
   writeVerifiedClientSnapshot,
@@ -28,6 +29,8 @@ process.env.XDG_DATA_HOME = join(home, '.local', 'share');
 const codexCliPath = join(home, '.codex', 'auth.json');
 const opencodePath = join(home, '.local', 'share', 'opencode', 'auth.json');
 const omoAgentPath = join(home, '.omo', 'agent', 'auth.json');
+const piPath = join(home, '.pi', 'agent', 'auth.json');
+afterEach(async () => rm(dirname(piPath), { recursive: true, force: true }));
 
 /** 摆好（或撤掉）OpenCode 的凭证库：它在不在，直接决定 Codex 有几个写回目标。 */
 async function setOpencode(content: unknown | null): Promise<void> {
@@ -480,7 +483,7 @@ test('Codex 两个目标各写各的：cli-proxy-api 导入的账户也照样写
 
   assert.deepEqual(
     results.map((r) => r.path),
-    [codexCliPath, opencodePath],
+    [codexCliPath, opencodePath, piPath],
     'Codex 的令牌要写给这两个客户端，而不是写回 cli-proxy-api 的认证目录',
   );
   assert.equal(
@@ -515,7 +518,7 @@ test('没有 OpenCode 的凭证库就不写它：没装的机器上不该凭空�
 
   assert.deepEqual(
     results.map((r) => r.path),
-    [codexCliPath],
+    [codexCliPath, piPath],
     '只剩 Codex CLI 一个目标',
   );
   assert.equal(
@@ -537,7 +540,7 @@ test('Claude 不写给 OpenCode：哪怕 OpenCode 的凭证库就在那儿', asy
 
   assert.deepEqual(
     results.map((r) => r.path),
-    [clientPath],
+    [clientPath, piPath],
   );
   const saved = JSON.parse(await readFile(opencodePath, 'utf8'));
   assert.deepEqual(saved, opencodeFile, 'OpenCode 的文件一个字都不该被动');
@@ -593,5 +596,135 @@ test('本程序登录进来的账户落到该客户端的默认路径', async ()
   const [target, ...rest] = await syncTargetsOf(acct);
   assert.equal(target?.source, 'claude-cli');
   assert.match(target?.path ?? '', /\.claude\/\.credentials\.json$/);
-  assert.deepEqual(rest, [], 'Claude 只有一个目标文件');
+  assert.deepEqual(rest, [{ source: 'pi-claude', label: 'Pi (Claude)', path: piPath }]);
+});
+
+test('Pi 来源只同步原路径的对应 provider，普通账户额外提供配置的 Pi 路径', async (context) => {
+  const configured = join(home, 'configured-pi', 'auth.json');
+  setClientPaths({ pi: configured });
+  context.after(() => setClientPaths({}));
+  const { dir, clientPath } = await fixture({ ...codexAccount, source: 'pi', sync_source: 'pi-codex' });
+  const [pi] = await loadAccounts(dir);
+  assert.deepEqual(await syncTargetsOf(pi), [{ source: 'pi-codex', label: 'Pi (Codex)', path: clientPath }]);
+  const { dir: ordinaryDir } = await fixture({ ...codexAccount, source: 'oauth' });
+  const [ordinary] = await loadAccounts(ordinaryDir);
+  assert.equal((await syncTargetsOf(ordinary)).find((target) => target.source === 'pi-codex')?.path, configured);
+});
+
+test('Pi 来源的 provider 与账户不匹配时不回退到默认客户端目标', async () => {
+  const { dir } = await fixture({ ...codexAccount, source: 'pi', sync_source: 'pi-claude' });
+  const [acct] = await loadAccounts(dir);
+  assert.deepEqual(await syncTargetsOf(acct), []);
+});
+
+test('Pi 来源缺失 provider 标识或原始路径时不退回默认 CLI 或 Pi 路径', async () => {
+  const { dir } = await fixture({ ...codexAccount, source: 'pi', sync_source: '', sync_path: '' });
+  const [acct] = await loadAccounts(dir);
+  assert.deepEqual(await syncTargetsOf(acct), []);
+  const withSource = { ...acct, syncSource: 'pi-codex' };
+  assert.deepEqual(await syncTargetsOf(withSource), []);
+});
+
+test('手动同步 Pi Claude 只更新 anthropic，保留 sibling、额外字段并报告遮盖的改动', async () => {
+  const original = { anthropic: { type: 'oauth', access: 'old-access-token-value', refresh: 'old-refresh', expires: 1, custom: 'keep' },
+    'openai-codex': { type: 'oauth', access: 'other', accountId: 'B' }, extra: { keep: true } };
+  const { dir, clientPath } = await fixture({ ...claudeAccount, source: 'pi', sync_source: 'pi-claude' },
+    { name: 'auth.json', content: original });
+  const [acct] = await loadAccounts(dir);
+  const [result] = await syncToClient(acct);
+  const saved = JSON.parse(await readFile(clientPath, 'utf8'));
+  assert.deepEqual(saved.anthropic, { type: 'oauth', access: claudeAccount.access_token,
+    refresh: claudeAccount.refresh_token, expires: 1_800_000_000_000, custom: 'keep' });
+  assert.deepEqual(saved['openai-codex'], original['openai-codex']);
+  assert.deepEqual(saved.extra, original.extra);
+  assert.deepEqual(JSON.parse(await readFile(result.backupPath, 'utf8')), original);
+  assert.deepEqual(result.changes.map((change) => change.field), ['anthropic.access', 'anthropic.refresh', 'anthropic.expires']);
+  assert.equal(result.changes[0]?.after.includes(claudeAccount.access_token), false);
+  assert.equal('idToken' in saved.anthropic, false);
+});
+
+test('手动同步 Pi Codex 映射 accountId 且只更新 openai-codex', async () => {
+  const original = { anthropic: { type: 'api_key', key: 'untouched' },
+    'openai-codex': { type: 'oauth', access: 'old', refresh: 'old-r', expires: 1, accountId: 'B', custom: true } };
+  const { dir, clientPath } = await fixture({ ...codexAccount, source: 'pi', sync_source: 'pi-codex' },
+    { name: 'auth.json', content: original });
+  const [acct] = await loadAccounts(dir);
+  const [result] = await syncToClient(acct);
+  const saved = JSON.parse(await readFile(clientPath, 'utf8'));
+  assert.deepEqual(saved['openai-codex'], { type: 'oauth', access: codexAccount.access_token,
+    refresh: codexAccount.refresh_token, expires: 1_800_000_000_000, accountId: 'acct-123', custom: true });
+  assert.deepEqual(saved.anthropic, original.anthropic);
+  assert.equal(result.error, '');
+  assert.equal('idToken' in saved['openai-codex'], false);
+});
+
+test('手动 Pi 同步明确创建缺失文件及父目录，自动同步不创建', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-create-'));
+  const path = join(dir, 'new', 'auth.json');
+  await writeFile(join(dir, 'acct.json'), JSON.stringify({ ...claudeAccount, source: 'pi', sync_source: 'pi-claude', sync_path: path }));
+  const [acct] = await loadAccounts(dir);
+  assert.deepEqual(await syncRefreshedTokenToClients(acct), []);
+  await assert.rejects(() => readFile(path, 'utf8'));
+  const [result] = await syncToClient(acct);
+  assert.equal(result.created, true);
+  assert.equal(result.backupPath, '');
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).anthropic.access, claudeAccount.access_token);
+});
+
+for (const content of ['{broken', '[]', JSON.stringify({ anthropic: { type: 'api_key', key: 'secret' } }),
+  JSON.stringify({ anthropic: { type: 'oauth', access: 'old' } })]) {
+  test(`手动 Pi 同步拒绝已有的无效凭证 ${content}`, async () => {
+    const { dir, clientPath } = await fixture({ ...claudeAccount, source: 'pi', sync_source: 'pi-claude' });
+    await writeFile(clientPath, content);
+    const [acct] = await loadAccounts(dir);
+    const [result] = await syncToClient(acct);
+    assert.ok(result.error);
+    assert.equal(await readFile(clientPath, 'utf8'), content);
+    await assert.rejects(() => readFile(`${clientPath}.quotahot-bak`, 'utf8'));
+  });
+}
+
+test('自动 Pi 同步对已有同身份 provider 安全写回并保留 sibling', async () => {
+  const original = { 'openai-codex': { type: 'oauth', access: 'old', refresh: 'old-r', expires: 1, accountId: 'acct-123' },
+    anthropic: { type: 'oauth', access: 'unrelated', refresh: 'other', expires: 1 } };
+  const { dir, clientPath } = await fixture({ ...codexAccount, source: 'pi', sync_source: 'pi-codex', auto_refresh: true },
+    { name: 'auth.json', content: original });
+  const [acct] = await loadAccounts(dir);
+  const [result] = await syncRefreshedTokenToClients(acct);
+  const saved = JSON.parse(await readFile(clientPath, 'utf8'));
+  assert.equal(result.error, '');
+  assert.equal(saved['openai-codex'].access, codexAccount.access_token);
+  assert.deepEqual(saved.anthropic, original.anthropic);
+  assert.deepEqual(JSON.parse(await readFile(result.backupPath, 'utf8')), original);
+});
+
+test('普通 Codex 自动刷新仅写回已存在且身份匹配的共享 Pi 凭证', async (context) => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-auto-'));
+  const path = join(dir, 'auth.json');
+  setClientPaths({ pi: path });
+  context.after(() => setClientPaths({}));
+  await writeFile(path, JSON.stringify({ 'openai-codex': {
+    type: 'oauth', access: 'old', refresh: 'old-r', expires: 1, accountId: 'acct-123', custom: true,
+  }, anthropic: { type: 'api_key', key: 'keep' } }));
+  const { dir: accountDir } = await fixture({ ...codexAccount, source: 'oauth' });
+  const [acct] = await loadAccounts(accountDir);
+  const results = await syncRefreshedTokenToClients(acct);
+  const pi = results.find((result) => result.source === 'pi-codex');
+  assert.equal(pi?.error, '');
+  assert.ok(pi?.changes.some((change) => change.field === 'openai-codex.access'));
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(saved['openai-codex'].access, codexAccount.access_token);
+  assert.equal(saved['openai-codex'].custom, true);
+  assert.deepEqual(saved.anthropic, { type: 'api_key', key: 'keep' });
+});
+
+test('手动 Pi Codex 同步拒绝不完整的本账户凭证，且不创建目标文件', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-incomplete-'));
+  const path = join(dir, 'auth.json');
+  await writeFile(join(dir, 'account.json'), JSON.stringify({ ...codexAccount, source: 'pi',
+    sync_source: 'pi-codex', sync_path: path, refresh_token: '' }));
+  const [acct] = await loadAccounts(dir);
+  const [result] = await syncToClient(acct);
+  assert.match(result.error, /OAuth/);
+  await assert.rejects(() => readFile(path, 'utf8'));
 });

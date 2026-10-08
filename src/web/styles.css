@@ -26,6 +26,7 @@
     --text: #1a1d24;
     --muted: #6b7280;
     --accent-strong: #2454be;
+    --ok: #087451;
     /* 同一套 provider 色压暗一档：浅色底上组头标题和徽章文字才读得清 */
     --p-claude: #c2643a;
     --p-codex: #0f8168;
@@ -685,6 +686,7 @@ button.act.danger:hover:not(:disabled) {
 .probe-block h4 { margin: 14px 0 6px; font-size: 12px; color: var(--muted); font-weight: 500; }
 .probe-block .ok { color: var(--ok); font-size: 12px; }
 .probe-block .bad { color: var(--danger); font-size: 12px; }
+.probe-block .source-empty { color: var(--muted); font-size: 12px; font-weight: 400; flex-shrink: 1; min-width: 0; }
 .probe-error {
   background: var(--bg); padding: 8px; border-radius: 6px; font-size: 11px;
   white-space: pre-wrap; word-break: break-all; margin: 0; color: var(--danger);
@@ -692,6 +694,7 @@ button.act.danger:hover:not(:disabled) {
 .modal table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .modal th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px 4px 0; }
 .modal td { padding: 3px 8px 3px 0; vertical-align: top; }
+.source-accounts-table { min-width: 0; }
 .hkey { font-family: ui-monospace, monospace; color: var(--accent); white-space: nowrap; }
 .hval { font-family: ui-monospace, monospace; word-break: break-all; }
 
@@ -700,6 +703,7 @@ button.act.danger:hover:not(:disabled) {
   cursor: pointer; font-size: 11px; color: var(--muted); user-select: none;
 }
 .probe-meta { margin: 0 0 8px; font-size: 12px; color: var(--muted); }
+.token-import-no-break { white-space: nowrap; }
 .raw-body {
   background: var(--bg); padding: 8px; border-radius: 6px; font-size: 11px;
   white-space: pre-wrap; word-break: break-all; margin: 8px 0 0; max-height: 240px; overflow-y: auto;
@@ -720,10 +724,27 @@ button.act.danger:hover:not(:disabled) {
   background: var(--bg); border: 1px solid var(--line); color: var(--text);
   border-radius: 7px; padding: 6px 8px; font-size: 12px; font-family: inherit;
 }
+.source-path label { flex-shrink: 0; color: var(--muted); font-size: 11px; }
 .source-path input:focus { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: -1px; }
 .source-path input:disabled { opacity: 0.6; }
 .source-path button { flex-shrink: 0; }
 .source-path .hint { flex-shrink: 0; font-style: normal; opacity: 0.75; }
+
+@media (max-width: 560px) {
+  .source-accounts-table,
+  .source-accounts-table tbody,
+  .source-accounts-table tr,
+  .source-accounts-table td { display: block; width: 100%; }
+  .source-accounts-table thead {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+  .source-accounts-table tr { padding: 8px 0; border-top: 1px solid var(--line); }
+  .source-accounts-table td { padding: 2px 0; min-width: 0; overflow-wrap: break-word; }
+  .source-accounts-table td::before {
+    content: attr(data-label); display: block; color: var(--muted); font-size: 11px;
+  }
+}
 
 .probe-meta a { color: var(--accent); word-break: break-all; }
 .probe-meta code { background: var(--bg); padding: 2px 6px; border-radius: 4px; overflow-wrap: anywhere; }

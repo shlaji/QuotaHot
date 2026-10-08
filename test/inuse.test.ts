@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { loadAccounts } from '../src/server/creds.js';
 import { refreshClientsInUse, resetClientsInUse, scanClientsInUse } from '../src/server/inuse.js';
+import { setClientPaths } from '../src/server/clientpaths.js';
 
 /**
  * 「这台电脑正在用哪个账户」的核对。
@@ -157,4 +158,34 @@ test('凭证文件读不动时如实记一条，不当成没这个客户端', as
   assert.equal(codex?.accountId, '');
   assert.notEqual(codex?.error, '');
   await rm(dir, { recursive: true, force: true });
+});
+
+test('Pi 同一文件两个 provider 分别匹配，记录的非默认路径不交叉归属', async (context) => {
+  context.after(() => setClientPaths({}));
+  const configured = join(home, 'pi-configured', 'auth.json');
+  const recorded = join(home, 'pi-recorded', 'auth.json');
+  setClientPaths({ pi: configured });
+  const credentials = {
+    anthropic: { type: 'oauth', access: 'shared-pi-token', refresh: 'r-claude', expires: Date.now() + 3_600_000 },
+    'openai-codex': { type: 'oauth', access: 'shared-pi-token', refresh: 'r-codex', expires: Date.now() + 3_600_000, accountId: 'acct-pi' },
+  };
+  await writeJson(configured, credentials);
+  await writeJson(recorded, credentials);
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-inuse-'));
+  for (const [provider, email, access, source, accountId] of [
+    ['claude', 'pi-claude@x.com', 'shared-pi-token', 'pi-claude', ''],
+    ['codex', 'pi-codex@x.com', 'shared-pi-token', 'pi-codex', 'acct-pi'],
+  ]) {
+    await writeJson(join(dir, `${provider}.json`), {
+      type: provider, email, access_token: access, account_id: accountId,
+      source, sync_source: source, sync_path: recorded,
+    });
+  }
+  const found = (await scanClientsInUse(await loadAccounts(dir)))
+    .filter((client) => client.source.startsWith('pi-'));
+  assert.equal(found.length, 4);
+  for (const path of [configured, recorded]) {
+    assert.equal(found.find((client) => client.path === path && client.source === 'pi-claude')?.accountId, 'claude:pi-claude@x.com');
+    assert.equal(found.find((client) => client.path === path && client.source === 'pi-codex')?.accountId, 'codex:pi-codex@x.com');
+  }
 });

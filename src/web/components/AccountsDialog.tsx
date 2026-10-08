@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   AppConfig,
   ImportCandidate,
+  ImportResult,
   LoginMode,
   LoginStart,
   Provider,
@@ -14,11 +15,40 @@ const SOURCE_LABEL: Record<string, string> = {
   'cli-proxy-api': 'cli-proxy-api 认证目录',
   'codex-cli': 'Codex CLI',
   'claude-cli': 'Claude Code',
+  pi: 'Pi',
   'cockpit-tools': 'cockpit-tools',
   'qoder-cli': 'Qoder CLI',
   'qoder-desktop': 'Qoder Desktop',
   'qoder-ide': 'Qoder IDE',
 };
+
+const DISPLAYABLE_IMPORT_REASONS = new Set([
+  'Pi OAuth 凭证无效',
+  'Pi auth.json 格式无效',
+  'JSON 格式无效',
+  'JSON 必须是对象或对象数组',
+  '账户必须是 JSON 对象',
+  '不支持的账户类型',
+  '缺少 access_token',
+  '本次请求已导入该账户',
+  '保存账户失败',
+  '每次最多导入 20 个文件',
+  '仅支持 JSON 文件',
+  '文件超过 1 MiB',
+  '读取文件失败',
+  '已从其他来源导入',
+  '缺少 refresh_token，过期后无法续期',
+]);
+
+function importSummary(result: ImportResult): string {
+  const summary = `已导入 ${result.imported.length} 个账户`;
+  if (result.skipped.length === 0) return summary;
+  const reasons = [...new Set(result.skipped.map(({ reason }) =>
+    DISPLAYABLE_IMPORT_REASONS.has(reason) ? reason : '其他原因'))];
+  const remaining = reasons.length - 3;
+  const details = `${reasons.slice(0, 3).join('；')}${remaining > 0 ? `；另有 ${remaining} 种原因` : ''}`;
+  return `${summary}，跳过 ${result.skipped.length} 个（${details}）`;
+}
 
 /**
  * 这个来源从哪个文件读账户，可以当场改。
@@ -53,13 +83,18 @@ function SourcePath({
     void onSave(text.trim());
   };
 
+  const inputId = `source-path-${source.source}`;
+
   return (
     <p className="probe-meta source-path">
+      <label htmlFor={inputId}>路径</label>
       <input
+        id={inputId}
         type="text"
         value={text}
         disabled={busy}
         spellCheck={false}
+        aria-label={`${SOURCE_LABEL[source.source] ?? source.source} 来源路径`}
         placeholder={source.defaultPath}
         title="留空使用默认位置"
         onChange={(e) => {
@@ -350,8 +385,7 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify, onConfigC
     setBusy(true);
     try {
       const result = await api.importAccounts(ids);
-      const skipped = result.skipped.length > 0 ? `，跳过 ${result.skipped.length} 个` : '';
-      onNotify(`已导入 ${result.imported.length} 个账户${skipped}`);
+      onNotify(importSummary(result));
     } catch (err) {
       onNotify(String(err instanceof Error ? err.message : err));
     } finally {
@@ -363,8 +397,7 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify, onConfigC
     setBusy(true);
     try {
       const result = await api.importTokenFiles(files);
-      const skipped = result.skipped.length > 0 ? `，跳过 ${result.skipped.length} 个` : '';
-      onNotify(`已导入 ${result.imported.length} 个账户${skipped}`);
+      onNotify(importSummary(result));
     } catch (err) {
       onNotify(String(err instanceof Error ? err.message : err));
     } finally {
@@ -441,8 +474,8 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify, onConfigC
 
           <h2>从本机导入</h2>
           <p className="probe-meta">
-            每一处的路径都能直接改：留空用默认位置，填绝对路径（<code>~</code> 会展开成主目录）。
-            改完立刻按新位置重扫，跟随客户端、写回客户端、「本机在用」核对也一起跟着走。
+            每个来源都可改路径：留空恢复默认，或填写完整路径（支持 <code>~</code>）。
+            保存后立即重扫；跟随、写回和「本机在用」核对都会使用新路径。
           </p>
           {sources === null ? (
             <p className="empty">扫描中…</p>
@@ -451,8 +484,12 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify, onConfigC
               <section key={s.source} className="probe-block">
                 <h3>
                   {SOURCE_LABEL[s.source] ?? s.source}
-                  <span className={s.accounts.length > 0 ? 'ok' : 'bad'}>
-                    {s.accounts.length > 0 ? `${s.accounts.length} 个账户` : s.error || '没有账户'}
+                  <span className={s.accounts.length > 0 ? 'ok' : s.available && s.source === 'pi' ? 'source-empty' : 'bad'}>
+                    {s.accounts.length > 0
+                      ? `${s.accounts.length} 个账户`
+                      : s.available && s.source === 'pi'
+                        ? '未找到可导入的 Claude/Codex OAuth 凭证，请检查凭证类型和 access、refresh、expires 字段'
+                        : s.error || '没有账户'}
                   </span>
                 </h3>
                 <SourcePath
@@ -462,7 +499,7 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify, onConfigC
                 />
                 {s.accounts.length > 0 && (
                   <>
-                    <table>
+                    <table className="source-accounts-table">
                       <thead>
                         <tr>
                           <th>账户</th>
@@ -474,10 +511,10 @@ export function AccountsDialog({ open, accountsDir, onClose, onNotify, onConfigC
                       <tbody>
                         {s.accounts.map((a) => (
                           <tr key={a.id}>
-                            <td>{a.email}</td>
-                            <td>{a.provider}</td>
-                            <td>{a.expiresAt ? day(a.expiresAt) : '未知'}</td>
-                            <td>{a.followClient ? '跟随客户端' : '本程序刷新'}</td>
+                            <td data-label="账户">{a.email}</td>
+                            <td data-label="类型">{a.provider}</td>
+                            <td data-label="令牌到期">{a.expiresAt ? day(a.expiresAt) : '未知'}</td>
+                            <td data-label="续期方式">{a.followClient ? '跟随客户端' : '本程序刷新'}</td>
                           </tr>
                         ))}
                       </tbody>

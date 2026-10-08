@@ -43,6 +43,7 @@ test('没配过时，每个来源还是各客户端在本机的老位置', () =>
     'claude-cli': join(home, '.claude', '.credentials.json'),
     opencode: join(home, '.local', 'share', 'opencode', 'auth.json'),
     'omo-agent': join(home, '.omo', 'agent', 'auth.json'),
+    pi: join(home, '.pi', 'agent', 'auth.json'),
     'cockpit-tools': join(home, '.antigravity_cockpit'),
     'qoder-ide': join(home, '.config', 'Qoder', 'User', 'globalStorage', 'state.vscdb'),
     'qoder-cli': join(home, '.qoder', '.auth', 'user'),
@@ -51,6 +52,26 @@ test('没配过时，每个来源还是各客户端在本机的老位置', () =>
   assert.equal(clientPath('codex-cli'), join(home, '.codex', 'auth.json'));
   // 默认配置里一个覆盖都没有：升级上来的用户行为不该变
   assert.deepEqual(DEFAULT_CONFIG.clientPaths, {});
+});
+
+test('Pi 目录环境变量和配置覆盖均指向同一 auth.json', () => {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  try {
+    setClientPaths({});
+    process.env.PI_CODING_AGENT_DIR = join(home, 'pi-agent');
+    assert.equal(clientPath('pi'), join(home, 'pi-agent', 'auth.json'));
+    const configured = join(home, 'custom', 'auth.json');
+    setClientPaths(normalizeClientPaths({ pi: configured }));
+    assert.equal(clientPath('pi'), configured);
+    assert.deepEqual(normalizeClientPaths({ pi: '~/custom/auth.json' }), { pi: configured });
+    assert.deepEqual(normalizeClientPaths({ pi: 'relative/auth.json' }), {});
+    assert.match(validateClientPaths({ clientPaths: { pi: 'relative/auth.json' } }) ?? '', /Pi/);
+    assert.ok(CLIENT_PATH_KEYS.includes('pi'));
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    setClientPaths({});
+  }
 });
 
 test('Claude 的邮箱文件跟着凭证路径走，而不是单独再配一次', () => {

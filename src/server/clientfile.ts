@@ -11,6 +11,7 @@
  */
 import { readFile, stat } from 'node:fs/promises';
 import { claudeProfilePath, clientPath } from './clientpaths.js';
+import { record } from './qoder-session.js';
 import { profileOf, readQoderSnapshot } from './qoder.js';
 
 /** 从客户端凭证文件里读到的令牌。字段读不到时为空串或 0，不做猜测。 */
@@ -151,6 +152,24 @@ function readOmoAgentData(data: Record<string, unknown>): ClientTokens | null {
   };
 }
 
+async function readPiData(data: Record<string, unknown>, source: 'pi-claude' | 'pi-codex'): Promise<ClientTokens | null> {
+  const entry = data[source === 'pi-claude' ? 'anthropic' : 'openai-codex'];
+  if (!record(entry)) return null;
+  const { access, refresh, expires, accountId } = entry;
+  if (entry.type !== 'oauth' || typeof access !== 'string' || !access ||
+      typeof refresh !== 'string' || !refresh || typeof expires !== 'number' ||
+      !Number.isFinite(expires) || expires <= 0) return null;
+  if (source === 'pi-codex') {
+    if (typeof accountId !== 'string' || !accountId.trim()) return null;
+    const { accountIdOf } = await import('./creds.js');
+    const decoded = accountIdOf(access);
+    if (decoded && decoded !== accountId) return null;
+  }
+  return { accessToken: access, refreshToken: refresh, idToken: '',
+    accountId: source === 'pi-codex' && typeof accountId === 'string' ? accountId : '',
+    email: '', expiresAt: expires };
+}
+
 async function readOmoAgentFile(path: string): Promise<ClientTokens | null> {
   const data = await readJsonFile(path);
   return data ? readOmoAgentData(data) : null;
@@ -226,6 +245,10 @@ export function followSourceOf(
   source: string,
   syncPath: string,
 ): FollowSource | null {
+  if (source === 'pi-claude' || source === 'pi-codex') {
+    if (provider !== (source === 'pi-claude' ? 'claude' : 'codex') || !syncPath) return null;
+    return { source, label: CLIENT_LABELS[source], path: syncPath };
+  }
   if (syncPath && (source === 'claude-cli' || source === 'codex-cli')) {
     return { source, label: CLIENT_LABELS[source], path: syncPath };
   }
@@ -246,6 +269,8 @@ export function followSourceOf(
  * 认得出格式的都列在这儿，包括不会被跟随的 OpenCode——「本机在用」的标记要报它的名字。
  */
 export const CLIENT_LABELS: Record<string, string> = {
+  'pi-claude': 'Pi (Claude)',
+  'pi-codex': 'Pi (Codex)',
   'claude-cli': 'Claude Code',
   'codex-cli': 'Codex CLI',
   opencode: 'OpenCode',
@@ -259,6 +284,10 @@ export async function readClientTokens(
   source: string,
   path: string,
 ): Promise<ClientTokens | null> {
+  if (source === 'pi-claude' || source === 'pi-codex') {
+    const data = await readJsonFile(path);
+    return data ? readPiData(data, source) : null;
+  }
   if (source === 'claude-cli') return readClaudeCodeFile(path);
   if (source === 'codex-cli') return readCodexCliFile(path);
   if (source === 'opencode') return readOpencodeFile(path);
@@ -283,6 +312,7 @@ export async function tokensOfClientData(
   source: string,
   data: Record<string, unknown>,
 ): Promise<ClientTokens | null> {
+  if (source === 'pi-claude' || source === 'pi-codex') return readPiData(data, source);
   if (source === 'claude-cli') return readClaudeCodeData(data);
   if (source === 'codex-cli') return readCodexCliData(data);
   if (source === 'opencode') return readOpencodeData(data);

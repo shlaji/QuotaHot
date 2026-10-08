@@ -18,7 +18,8 @@ export function TokenFileImport({ busy, onFiles }: TokenFileImportProps) {
     <section className="probe-block">
       <h3>上传 JSON 令牌文件</h3>
       <p className="probe-meta">
-        支持 Claude、Codex 的 JSON 对象或对象数组，也支持 cockpit-tools 的 Claude/Codex 导出。Qoder 导出只含元数据，不含可迁移令牌。每次最多 20 个文件，每个不超过 1 MiB；不支持纯文本令牌。
+        支持 Claude/Codex JSON 对象或数组、Pi auth.json，以及 cockpit-tools 的 Claude/Codex 导出。Pi auth.json 上传为独立副本，
+        <span className="token-import-no-break">不改原文件、不从中同步</span>。Qoder 导出不含可迁移令牌。最多 20 个 JSON 文件，每个不超过 1 MiB；不支持纯文本令牌。
       </p>
       <input
         ref={inputRef}

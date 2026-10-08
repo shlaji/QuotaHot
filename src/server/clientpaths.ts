@@ -54,6 +54,8 @@ export function defaultClientPath(key: ClientPathKey): string {
       );
     case 'omo-agent':
       return join(homedir(), '.omo', 'agent', 'auth.json');
+    case 'pi':
+      return join(process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), '.pi', 'agent'), 'auth.json');
     case 'cockpit-tools':
       return join(homedir(), '.antigravity_cockpit');
     case 'qoder-ide':

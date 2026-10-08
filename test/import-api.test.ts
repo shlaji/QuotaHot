@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 const secret = 'upload-secret-never-in-response';
+const synthetic = (provider: 'claude' | 'codex', identity: string) =>
+  `pi-${provider}-${createHash('sha256').update(identity).digest('hex').slice(0, 24)}`;
 const token = (email: string, accessToken = secret) => JSON.stringify({ type: 'codex', email, access_token: accessToken });
 const upload = (files: readonly File[]) => {
   const form = new FormData();
@@ -16,6 +19,11 @@ const upload = (files: readonly File[]) => {
 
 test('token-file API through the live server', { timeout: 30_000 }, async (context) => {
   const dir = await mkdtemp(join(tmpdir(), 'quotahot-import-api-'));
+  const piDir = join(dir, 'pi-agent');
+  const piPath = join(piDir, 'auth.json');
+  const piAuth = { anthropic: { type: 'oauth', access: 'pi-claude-secret', refresh: 'pi-claude-refresh', expires: 2_100_000_000_000 },
+    'openai-codex': { type: 'oauth', access: 'pi-codex-secret', refresh: 'pi-codex-refresh', expires: 2_100_000_000_000, accountId: 'pi-account' } };
+  await mkdir(piDir);
   await writeFile(join(dir, 'config.json'), JSON.stringify({ usageRefreshMinutes: 0, clientCheckMinutes: 0 }));
   const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
     import { appendFile } from 'node:fs/promises';
@@ -28,7 +36,7 @@ test('token-file API through the live server', { timeout: 30_000 }, async (conte
     await import(${JSON.stringify(new URL('../src/main.ts', import.meta.url).href)});
   `], {
     env: { ...process.env, HOME: dir, XDG_DATA_HOME: dir, XDG_CONFIG_HOME: dir, CODEX_HOME: join(dir, 'codex'),
-      QUOTAHOT_DATA_DIR: dir, QUOTAHOT_HOST: '127.0.0.1', QUOTAHOT_AUTH_USERNAME: '', QUOTAHOT_AUTH_PASSWORD: '', PORT: '0' },
+      PI_CODING_AGENT_DIR: piDir, QUOTAHOT_DATA_DIR: dir, QUOTAHOT_HOST: '127.0.0.1', QUOTAHOT_AUTH_USERNAME: '', QUOTAHOT_AUTH_PASSWORD: '', PORT: '0' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   context.after(async () => {
@@ -48,6 +56,55 @@ test('token-file API through the live server', { timeout: 30_000 }, async (conte
     child.once('error', reject);
   });
   const post = (body: BodyInit) => fetch(`${base}/api/accounts/import-files`, { method: 'POST', body });
+
+  await context.test('lists one Pi source and imports both provider identities in follow mode', async () => {
+    await writeFile(piPath, JSON.stringify(piAuth));
+    const response = await fetch(`${base}/api/accounts/sources`);
+    const sources = await response.json();
+    const pi = sources.find((source: { source: string }) => source.source === 'pi');
+    assert.equal(pi.path, piPath);
+    assert.deepEqual(pi.accounts.map(({ provider, followClient }: { provider: string; followClient: boolean }) => ({ provider, followClient })),
+      [{ provider: 'claude', followClient: true }, { provider: 'codex', followClient: true }]);
+    assert.equal(JSON.stringify(sources).includes('pi-claude-secret'), false);
+    const imported = await fetch(`${base}/api/accounts/import`, { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sources: ['pi'] }) });
+    const claudeEmail = synthetic('claude', piAuth.anthropic.access);
+    const codexEmail = synthetic('codex', piAuth['openai-codex'].accountId);
+    assert.deepEqual(await imported.json(), { imported: [`claude:${claudeEmail}`, `codex:${codexEmail}`], skipped: [] });
+    for (const [provider, email] of [['claude', claudeEmail], ['codex', codexEmail]]) {
+      const account = JSON.parse(await readFile(join(dir, 'accounts', `${provider}-${email.slice(0, 80)}.json`), 'utf8'));
+      assert.equal(account.source, `pi-${provider}`);
+      assert.equal(account.sync_source, `pi-${provider}`);
+      assert.equal(account.sync_path, piPath);
+      assert.equal(account.auto_refresh, false);
+    }
+  });
+
+  await context.test('uploads Pi OAuth providers as detached accounts and skips unsupported entries safely', async () => {
+    const response = await post(upload([new File([JSON.stringify({ ...piAuth, unknown: { type: 'api_key', key: secret } })], 'auth.json')]));
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    const claudeEmail = synthetic('claude', piAuth.anthropic.access);
+    const codexEmail = synthetic('codex', piAuth['openai-codex'].accountId);
+    assert.deepEqual(result.imported, [`claude:${claudeEmail}`, `codex:${codexEmail}`]);
+    assert.equal(JSON.stringify(result).includes(secret), false);
+    for (const [provider, email] of [['claude', claudeEmail], ['codex', codexEmail]]) {
+      const account = JSON.parse(await readFile(join(dir, 'accounts', `${provider}-${email.slice(0, 80)}.json`), 'utf8'));
+      assert.equal(account.source, 'token-file');
+      assert.equal(account.sync_path, '');
+      assert.equal(account.auto_refresh, true);
+    }
+    const single = await post(upload([new File([JSON.stringify({ 'openai-codex': piAuth['openai-codex'] })], 'single.json')]));
+    assert.deepEqual(await single.json(), { imported: [`codex:${codexEmail}`], skipped: [] });
+    const claudeOnly = await post(upload([new File([JSON.stringify({ anthropic: piAuth.anthropic })], 'claude-only.json')]));
+    assert.deepEqual(await claudeOnly.json(), { imported: [`claude:${claudeEmail}`], skipped: [] });
+    const invalid = await post(upload([new File([JSON.stringify({ anthropic: { ...piAuth.anthropic, type: 'api_key' },
+      'openai-codex': piAuth['openai-codex'] })], 'mixed-pi.json')]));
+    const invalidResult = await invalid.json();
+    assert.deepEqual(invalidResult, { imported: [`codex:${codexEmail}`],
+      skipped: [{ id: 'mixed-pi.json:anthropic', reason: 'Pi OAuth 凭证无效' }] });
+    assert.equal(JSON.stringify(invalidResult).includes('pi-claude-secret'), false);
+  });
 
   await context.test('imports repeated native files in order and publishes the account state', async () => {
     const controller = new AbortController();
@@ -139,6 +196,7 @@ test('token-file API through the live server', { timeout: 30_000 }, async (conte
   });
 
   await context.test('preserves local source import behavior', async () => {
+    await rm(piPath);
     const response = await fetch(`${base}/api/accounts/import`, { method: 'POST',
       headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sources: [] }) });
     assert.equal(response.status, 200);

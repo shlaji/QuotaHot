@@ -19,6 +19,7 @@ import { dirname } from 'node:path';
 import {
   fileExists,
   readJsonFile,
+  tokensOfClientData,
 } from './clientfile.js';
 import { clientPath } from './clientpaths.js';
 import {
@@ -40,6 +41,8 @@ const WRITABLE: Record<string, string> = {
   'claude-cli': 'Claude Code',
   'codex-cli': 'Codex CLI',
   opencode: 'OpenCode',
+  'pi-claude': 'Pi (Claude)',
+  'pi-codex': 'Pi (Codex)',
   'omo-agent': 'Oh-My-OpenCode agent',
   'cli-proxy-api': 'cli-proxy-api',
 };
@@ -101,6 +104,11 @@ export async function syncTargetsOfMany(
 
 function targetsOf(acct: Account, opencodePresent: boolean, omoAgentPresent: boolean): SyncTarget[] {
   const source = acct.syncSource || acct.source;
+  if (acct.source === 'pi' && source !== 'pi-claude' && source !== 'pi-codex') return [];
+  if (source === 'pi-claude' || source === 'pi-codex') {
+    if (!acct.syncPath || acct.provider !== (source === 'pi-claude' ? 'claude' : 'codex')) return [];
+    return [{ source, label: WRITABLE[source], path: acct.syncPath }];
+  }
   if (acct.provider === 'codex') {
     const cliPath = source === 'codex-cli' && acct.syncPath ? acct.syncPath : clientPath('codex-cli');
     const targets = [{ source: 'codex-cli', label: WRITABLE['codex-cli'], path: cliPath }];
@@ -110,13 +118,16 @@ function targetsOf(acct: Account, opencodePresent: boolean, omoAgentPresent: boo
     if (omoAgentPresent) {
       targets.push({ source: 'omo-agent', label: WRITABLE['omo-agent'], path: clientPath('omo-agent') });
     }
+    targets.push({ source: 'pi-codex', label: WRITABLE['pi-codex'], path: clientPath('pi') });
     return targets;
   }
   if (acct.syncPath && WRITABLE[source]) {
-    return [{ source, label: WRITABLE[source], path: acct.syncPath }];
+    return [{ source, label: WRITABLE[source], path: acct.syncPath },
+      { source: 'pi-claude', label: WRITABLE['pi-claude'], path: clientPath('pi') }];
   }
   if (acct.provider === 'claude') {
-    return [{ source: 'claude-cli', label: WRITABLE['claude-cli'], path: clientPath('claude-cli') }];
+    return [{ source: 'claude-cli', label: WRITABLE['claude-cli'], path: clientPath('claude-cli') },
+      { source: 'pi-claude', label: WRITABLE['pi-claude'], path: clientPath('pi') }];
   }
   return [];
 }
@@ -201,6 +212,16 @@ function tokenPatches(source: string, acct: Account): Patch[] {
       { field: 'openai.accountId', value: acct.accountId },
     ];
   }
+  if (source === 'pi-claude' || source === 'pi-codex') {
+    const provider = source === 'pi-claude' ? 'anthropic' : 'openai-codex';
+    return [
+      { field: `${provider}.type`, value: 'oauth' },
+      { field: `${provider}.access`, value: acct.accessToken, kind: 'secret' },
+      { field: `${provider}.refresh`, value: acct.refreshToken, kind: 'secret' },
+      { field: `${provider}.expires`, value: acct.expiresAt, kind: 'time' },
+      ...(source === 'pi-codex' ? [{ field: `${provider}.accountId`, value: acct.accountId }] : []),
+    ];
+  }
   if (source === 'omo-agent') {
     return [
       { field: 'chatgpt-subscription.type', value: 'oauth' },
@@ -228,7 +249,8 @@ function tokenPatches(source: string, acct: Account): Patch[] {
  */
 function stampPatches(source: string): Patch[] {
   // Claude Code 和 OpenCode 的文件里本来就没有这一项，别给人家凭空添一个
-  if (source === 'claude-cli' || source === 'opencode' || source === 'omo-agent') return [];
+  if (source === 'claude-cli' || source === 'opencode' || source === 'omo-agent' ||
+      source === 'pi-claude' || source === 'pi-codex') return [];
   return [{ field: 'last_refresh', value: new Date().toISOString(), kind: 'time' }];
 }
 
@@ -238,6 +260,8 @@ function scopeKeyOf(source: string): string {
   if (source === 'codex-cli') return 'tokens';
   if (source === 'opencode') return 'openai';
   if (source === 'omo-agent') return 'chatgpt-subscription';
+  if (source === 'pi-claude') return 'anthropic';
+  if (source === 'pi-codex') return 'openai-codex';
   return '';
 }
 
@@ -278,7 +302,22 @@ async function syncOne(
   const base = { path: target.path, source: target.source, label: target.label };
   try {
     const created = !(await fileExists(target.path));
-    const data = (await readJsonFile(target.path)) ?? {};
+    const read = created ? null : await readJsonFile(target.path);
+    if (!created && (!read || Array.isArray(read)) &&
+        (target.source === 'pi-claude' || target.source === 'pi-codex')) {
+      throw new Error(`无法解析已有的 ${target.label} 凭证文件`);
+    }
+    const data = read ?? {};
+    if (target.source === 'pi-claude' || target.source === 'pi-codex') {
+      if (!acct.refreshToken || !Number.isFinite(acct.expiresAt) || acct.expiresAt <= 0 ||
+          (target.source === 'pi-codex' && !acct.accountId.trim())) {
+        throw new Error(`当前账户缺少写入 ${target.label} 所需的 OAuth 凭证`);
+      }
+      const provider = scopeKeyOf(target.source);
+      if (Object.hasOwn(data, provider) && !await tokensOfClientData(target.source, data)) {
+        throw new Error(`${target.label} 的现有凭证类型不支持或字段不完整`);
+      }
+    }
     const warning = created ? '' : occupantWarning(data, target.source, acct);
 
     const changes = apply(data, tokenPatches(target.source, acct));

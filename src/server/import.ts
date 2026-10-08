@@ -7,8 +7,9 @@
  *
  * 各来源的文件格式都不一样，所以每个来源单独解析，统一收敛成 AccountInput。
  */
-import { readdir, stat } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   accountIdOf,
   emailOf,
@@ -110,6 +111,45 @@ function cockpitCredentials(data: Record<string, unknown>): {
   return undefined;
 }
 
+function piSyntheticKey(provider: 'claude' | 'codex', identity: string): string {
+  return `pi-${provider}-${createHash('sha256').update(identity).digest('hex').slice(0, 24)}`;
+}
+
+function piAccounts(data: Record<string, unknown>, name: string): ParsedTokenFile {
+  const result: ParsedTokenFile = { accounts: [], skipped: [] };
+  for (const [key, provider] of [
+    ['anthropic', 'claude'],
+    ['openai-codex', 'codex'],
+  ] as const) {
+    if (!(key in data)) continue;
+    const entry = data[key];
+    const id = `${name}:${key}`;
+    const claim = provider === 'codex' && tokenRecord(entry) && typeof entry.access === 'string'
+      ? findClaim(decodeJwt(entry.access), (field) => field === 'chatgpt_account_id') : undefined;
+    if (!tokenRecord(entry) || entry.type !== 'oauth' ||
+        typeof entry.access !== 'string' || !entry.access.trim() ||
+        typeof entry.refresh !== 'string' || !entry.refresh.trim() ||
+        typeof entry.expires !== 'number' || !Number.isFinite(entry.expires) || entry.expires <= 0 ||
+        (provider === 'codex' && (typeof entry.accountId !== 'string' || !entry.accountId.trim() ||
+          (typeof claim === 'string' && claim !== entry.accountId.trim())))) {
+      result.skipped.push({ id, reason: 'Pi OAuth 凭证无效' });
+      continue;
+    }
+    result.accounts.push({
+      provider,
+      email: emailOf(entry.access).toLowerCase() || piSyntheticKey(provider, provider === 'codex' ? str(entry.accountId).trim() : entry.access),
+      accountId: provider === 'codex' ? str(entry.accountId).trim() : accountIdOf(entry.access),
+      accessToken: entry.access,
+      refreshToken: entry.refresh,
+      idToken: '',
+      expiresAt: entry.expires,
+      source: 'token-file',
+      autoRefresh: true,
+    });
+  }
+  return result;
+}
+
 export function parseTokenFile(name: string, text: string): ParsedTokenFile {
   const result: ParsedTokenFile = { accounts: [], skipped: [] };
   let root: unknown;
@@ -129,6 +169,12 @@ export function parseTokenFile(name: string, text: string): ParsedTokenFile {
     const id = `${name}${suffix}`;
     if (!tokenRecord(data)) {
       result.skipped.push({ id, reason: '账户必须是 JSON 对象' });
+      continue;
+    }
+    if ('anthropic' in data || 'openai-codex' in data) {
+      const pi = piAccounts(data, id);
+      result.accounts.push(...pi.accounts);
+      result.skipped.push(...pi.skipped);
       continue;
     }
     const cockpit = cockpitCredentials(data);
@@ -285,6 +331,23 @@ async function readClaudeCli(path: string): Promise<AccountInput[]> {
   ];
 }
 
+async function readPi(path: string): Promise<AccountInput[]> {
+  const text = await readFile(path, 'utf8');
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new SyntaxError('Pi auth.json 格式无效');
+  }
+  if (!tokenRecord(data)) throw new SyntaxError('Pi auth.json 格式无效');
+  return piAccounts(data, 'pi').accounts.map((account) => ({
+    ...account,
+    source: account.provider === 'claude' ? 'pi-claude' : 'pi-codex',
+    syncPath: path,
+    autoRefresh: false,
+  }));
+}
+
 /**
  * Qoder IDE：凭证在 VS Code 式的 state.vscdb 里，还被 Electron safeStorage 加密过，
  * 解析细节都在 qoder.ts。
@@ -342,6 +405,12 @@ function knownSources(): Source[] {
       label: 'Claude Code',
       path: clientPath('claude-cli'),
       read: readClaudeCli,
+    },
+    {
+      id: 'pi',
+      label: 'Pi',
+      path: clientPath('pi'),
+      read: readPi,
     },
     {
       id: 'cockpit-tools',

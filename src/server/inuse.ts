@@ -40,6 +40,8 @@ function defaultSlots(): ClientSlot[] {
     { source: 'claude-cli', label: CLIENT_LABELS['claude-cli'], path: clientPath('claude-cli'), provider: 'claude' },
     { source: 'codex-cli', label: CLIENT_LABELS['codex-cli'], path: clientPath('codex-cli'), provider: 'codex' },
     { source: 'opencode', label: CLIENT_LABELS.opencode, path: clientPath('opencode'), provider: 'codex' },
+    { source: 'pi-claude', label: CLIENT_LABELS['pi-claude'], path: clientPath('pi'), provider: 'claude' },
+    { source: 'pi-codex', label: CLIENT_LABELS['pi-codex'], path: clientPath('pi'), provider: 'codex' },
     { source: 'qoder-ide', label: CLIENT_LABELS['qoder-ide'], path: clientPath('qoder-ide'), provider: 'qoder' },
     ...(['qoder-cli', 'qoder-desktop'] as const).map((source): ClientSlot => ({
       source, label: QODER_LABELS[source], path: clientPath(source), provider: 'qoder',
@@ -52,16 +54,21 @@ function defaultSlots(): ClientSlot[] {
  *
  * 默认位置之外，还得带上账户自己记着的 sync_path：从别处导入的 Codex CLI 可能压根不在
  * ~/.codex 下（CODEX_HOME 改过），只看默认位置就会把用户真正在用的那个客户端漏掉。
- * 同一个路径只核对一次。
+ * 同一个来源和路径只核对一次。
  */
 function slotsOf(accounts: readonly Account[]): ClientSlot[] {
   const slots = defaultSlots();
-  const seen = new Set(slots.map((s) => s.path));
+  const seen = new Set(slots.map(keyOf));
   for (const a of accounts) {
     const source = a.syncSource || a.source;
-    if (!a.syncPath || seen.has(a.syncPath) || !CLIENT_LABELS[source]) continue;
-    seen.add(a.syncPath);
-    slots.push({ source, label: CLIENT_LABELS[source], path: a.syncPath, provider: a.provider });
+    if (!a.syncPath || !CLIENT_LABELS[source]) continue;
+    const provider = source === 'pi-claude' ? 'claude' : source === 'pi-codex' ? 'codex' : a.provider;
+    if (provider !== a.provider) continue;
+    const slot = { source, label: CLIENT_LABELS[source], path: a.syncPath, provider };
+    const key = keyOf(slot);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    slots.push(slot);
   }
   return slots;
 }

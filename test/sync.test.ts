@@ -392,3 +392,44 @@ test('cli-proxy-api 的来源文件不算客户端：仍按 ~/.codex/auth.json �
   assert.equal(check.ok, false, 'Codex CLI 上登录的是 acct-2，跟随它就会同步到别人的令牌');
   assert.equal(check.path, '');
 });
+
+test('Pi Anthropic token 轮换后无法独立核验身份时拒绝跟随且不改账户', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-follow-'));
+  const source = join(dir, 'pi-auth.json');
+  const accountPath = join(dir, 'claude-pi.json');
+  await writeFile(source, JSON.stringify({ anthropic: {
+    type: 'oauth', access: 'rotated-token', refresh: 'rotated-refresh', expires: Date.now() + 3_600_000,
+  } }));
+  await writeFile(accountPath, JSON.stringify({
+    type: 'claude', email: 'a@example.com', access_token: 'old-token', refresh_token: 'old-refresh',
+    expired: new Date(Date.now() - 60_000).toISOString(), source: 'pi-claude',
+    sync_source: 'pi-claude', sync_path: source, auto_refresh: false,
+  }));
+  const [acct] = await loadAccounts(dir);
+  const before = await readFile(accountPath, 'utf8');
+  const check = await checkFollowClient(acct);
+  assert.equal(check.ok, false);
+  assert.match(check.reason, /认不出/);
+  assert.equal(await ensureFresh(acct, () => {}), false);
+  assert.equal(await readFile(accountPath, 'utf8'), before);
+});
+
+test('Pi Codex follows rotated token only with matching accountId at recorded path', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'quotahot-pi-follow-'));
+  const source = join(dir, 'custom-auth.json');
+  await writeFile(source, JSON.stringify({ 'openai-codex': {
+    type: 'oauth', access: 'rotated-token', refresh: 'rotated-refresh',
+    expires: Date.now() + 3_600_000, accountId: 'acct-pi',
+  } }));
+  await writeFile(join(dir, 'codex-pi.json'), JSON.stringify({
+    type: 'codex', email: 'c@example.com', account_id: 'acct-pi', access_token: 'old-token',
+    refresh_token: 'old-refresh', expired: new Date(Date.now() - 60_000).toISOString(),
+    source: 'pi-codex', sync_source: 'pi-codex', sync_path: source, auto_refresh: false,
+  }));
+  const [acct] = await loadAccounts(dir);
+  const check = await checkFollowClient(acct);
+  assert.equal(check.source, 'pi-codex');
+  assert.equal(check.path, source);
+  assert.equal(await ensureFresh(acct, () => {}), true);
+  assert.equal(acct.accessToken, 'rotated-token');
+});

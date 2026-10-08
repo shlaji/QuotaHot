@@ -16,6 +16,7 @@ export type ClientPathKey =
   | 'claude-cli'
   | 'opencode'
   | 'omo-agent'
+  | 'pi'
   | 'cockpit-tools'
   | 'qoder-ide'
   | 'qoder-cli'
@@ -37,6 +38,7 @@ export const CLIENT_PATH_FIELDS: readonly ClientPathField[] = [
   { key: 'claude-cli', label: 'Claude Code' },
   { key: 'opencode', label: 'OpenCode' },
   { key: 'omo-agent', label: 'Oh-My-OpenCode agent' },
+  { key: 'pi', label: 'Pi' },
   { key: 'cockpit-tools', label: 'cockpit-tools' },
   { key: 'qoder-ide', label: 'Qoder IDE' },
   { key: 'qoder-cli', label: 'Qoder CLI' },

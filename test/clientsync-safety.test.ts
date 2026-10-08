@@ -162,6 +162,52 @@ test('consistent explicit and JWT identities allow automatic sync', async () => 
   assert.equal(JSON.parse(await fs.readFile(client, 'utf8')).tokens.access_token, 'new-token');
 });
 
+test('Pi Codex auto writeback rejects explicit accountId conflicting with access JWT', async () => {
+  const { account, client } = await fixture({ 'openai-codex': {
+    type: 'oauth', accountId: 'A', access: jwt({ chatgpt_account_id: 'B' }), refresh: 'old-r', expires: 1,
+  } });
+  account.syncSource = 'pi-codex';
+  const before = await fs.readFile(client, 'utf8');
+  const [result] = await syncRefreshedTokenToClients(account);
+  assert.equal(await fs.readFile(client, 'utf8'), before);
+  assert.match(result.warning, /跳过/);
+});
+
+test('Pi auto writeback skips missing or malformed provider without replacing sibling', async () => {
+  const { account, client } = await fixture({ anthropic: { type: 'oauth', access: 'other', refresh: 'other', expires: 1 } });
+  account.syncSource = 'pi-codex';
+  const before = await fs.readFile(client, 'utf8');
+  const [result] = await syncRefreshedTokenToClients(account);
+  assert.equal(await fs.readFile(client, 'utf8'), before);
+  assert.match(result.warning, /跳过/);
+  assert.equal(result.changes.length, 0);
+});
+
+test('Pi auto writeback refuses malformed existing OAuth provider data', async () => {
+  const originalPi = { 'openai-codex': { type: 'api_key', key: 'preserve' },
+    anthropic: { type: 'oauth', access: 'other', refresh: 'other', expires: 1 } };
+  const { account, client } = await fixture(originalPi);
+  account.syncSource = 'pi-codex';
+  const before = await fs.readFile(client, 'utf8');
+  const [result] = await syncRefreshedTokenToClients(account);
+  assert.equal(await fs.readFile(client, 'utf8'), before);
+  assert.match(result.warning, /跳过/);
+  assert.equal(result.changes.length, 0);
+});
+
+test('Pi auto writeback rejects in-place change after verified snapshot', async () => {
+  const originalPi = { 'openai-codex': { type: 'oauth', access: 'old', refresh: 'old-r', expires: 1, accountId: 'A' } };
+  const { account, client } = await fixture(originalPi);
+  account.syncSource = 'pi-codex';
+  const changed = JSON.stringify({ ...originalPi, extra: true });
+  const [result] = await syncRefreshedTokenToClients(account, {
+    onTargetValidated: async () => fs.writeFile(client, changed),
+  });
+  assert.equal(await fs.readFile(client, 'utf8'), changed);
+  assert.match(result.warning, /跳过/);
+  assert.equal(result.changes.length, 0);
+});
+
 test('directory sync failure leaves the active file untouched and retains the published backup', async () => {
   const { account, client, dir } = await fixture(original);
   observedTarget = client;
