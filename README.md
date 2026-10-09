@@ -345,7 +345,7 @@ CLI 对认证失败、触限这类问题只给一个非零退出码和一段人�
 
 ## API 服务：把账号池变成一个转发端点
 
-保活解决的是「账户别闲着」，这一节解决的是另一半：**这些账户的额度，怎么让你手边的编码客户端直接用上**。打开之后，本程序在同一个端口上多出一组 `/v1/*` 接口，同时说 **Anthropic Messages** 和 **OpenAI Chat Completions** 两种方言；收到请求就从账号池里挑一个还有额度的账户，用它的凭证发给真正的上游，再把响应按客户端要的方言翻回去。
+保活解决的是「账户别闲着」，这一节解决的是另一半：**这些账户的额度，怎么让你手边的编码客户端直接用上**。打开之后，本程序在同一个端口上多出一组 `/v1/*` 接口，支持 **Anthropic Messages**、**OpenAI Chat Completions** 和 **OpenAI Responses**；收到请求就从账号池里挑一个还有额度的账户，用它的凭证发给真正的上游，再把响应按客户端要的格式翻回去。
 
 **默认是关的**，而且必须由你自己在配置页按一下。装了这个程序的人未必想在本机开一个能花掉全部额度的端点——这件事不该由默认值替谁决定。
 
@@ -370,18 +370,34 @@ CLI 对认证失败、触限这类问题只给一个非零退出码和一段人�
 
 `/v1/*` 这一族**挂在 Web 的 Basic Auth 之前**，自己校验 key。原因很实际：让 Claude Code 去应付一次浏览器式的 Basic Auth 挑战是不现实的。所以 `QUOTAHOT_AUTH_PASSWORD` 管的是界面和 `/api/*`，管不着 `/v1/*`；反过来，网关的 key 也进不了界面。两把钥匙各开各的门。
 
-四个端点：
+五个端点：
 
 | 端点 | 说明 |
 |---|---|
 | `POST /v1/messages` | Anthropic Messages，流式与非流式都支持 |
 | `POST /v1/chat/completions` | OpenAI Chat Completions，含 `tool_calls`、`reasoning_content` |
+| `POST /v1/responses` | OpenAI Responses，无状态的流式与非流式请求，复用同一账号池 |
 | `GET /v1/models` | 列出当前账户池可用的模型；需要带 API key |
 | `POST /v1/messages/count_tokens` | 按字符折算的**估算值**。两家上游都没有只读计数接口，真要问就得发一次真请求；拿它判断「要不要压缩上下文」够用，当账单用则不行 |
 
+Responses 的非流式请求示例（将占位符换成你自己设置的网关 key 和可用模型）：
+
+```bash
+curl -sS http://127.0.0.1:8686/v1/responses \
+  -H 'Authorization: Bearer <你的API_KEY>' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-5.6-luna","input":"你好","stream":false}'
+```
+
+`input` 可传字符串，或传带角色的消息数组（`system`、`developer`、`user`、`assistant`）；消息内容支持文本，以及用户消息中的图片 URL / base64 data URL。也支持 `instructions`、`max_output_tokens`、`reasoning.effort`（仅 `low` / `medium` / `high`，不支持 `none`），以及函数工具定义、`tool_choice`、`function_call` / `function_call_output`。工具结果请作为下一次请求的 `input` 显式带回；返回的 `id` 不能作为会话句柄继续调用。`tools` 仅支持 `type: "function"`，不支持严格模式工具定义。
+
+传 `"stream":true` 时返回 Responses 格式的 SSE 事件，包含 `response.created`、文本或函数参数的增量事件，以及结束时的 `response.completed`；达到输出上限时为 `response.incomplete`，流内错误为 `response.failed`。非流式返回一份完整的 Response JSON。当前是**无状态转发**：不支持 `previous_response_id`、`conversation`、`background:true` 和 `store:true`；需要多轮对话时，请在每次请求的 `input` 中自行带齐历史内容。
+
+Responses 和另外两种格式走相同的 Claude / Codex / Qoder 账号池、额度和鉴权规则。模型按现有 provider 路由规则挑选；只有开启配置页的**跨家转发**后，才允许在没有匹配账户时转给其他 provider，不会因为使用 Responses 格式就自动跨家切换。
+
 ### 里面是怎么走的
 
-**Anthropic Messages 格式是内部的中间表示。** 它是两种方言里信息最全的那个：thinking 块、流式吐出来的 tool_use JSON、按块结构化的 system，OpenAI 那套里都没有对应物。以它为中心，进出各写两个转换器就够了；反过来以 OpenAI 格式为中心，或者不设中心直接两两互转，要么丢信息，要么写成一张四格的转换矩阵。
+**Anthropic Messages 格式是内部的中间表示。** 它能保留 thinking 块、流式吐出来的 tool_use JSON 和按块结构化的 system。Chat Completions 与 Responses 的输入输出都通过它转换，不在客户端格式之间直接两两互转。
 
 **所有出站都是流式的。** 客户端要非流式时，在本地把事件流收完再拼成一个完整响应（`collect()`）。这样上游只有一条代码路径，两种上游的差异也只体现在各自的转换器里。
 

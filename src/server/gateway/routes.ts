@@ -9,10 +9,12 @@
  */
 import { Hono } from 'hono';
 import { Readable } from 'node:stream';
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { catalogFor } from '../catalog.js';
 import { collect, toMessageResponse, type AnthropicRequest } from './anthropic.js';
 import { errorFrame, fromOpenAi, toChatCompletion, toChatStream } from './openai.js';
+import { parseResponsesRequest, ResponsesInputError } from './responses-input.js';
+import { toResponsesResult, toResponsesStream } from './responses-output.js';
 import { sseFrame } from './sse.js';
 import { NoAccountError, runForward, type GatewayDeps } from './service.js';
 import { isForwardable } from './pool.js';
@@ -61,7 +63,7 @@ function denyReason(c: Context, deps: GatewayDeps): string {
 
 /** AsyncGenerator<string> → 能交给 Hono 的响应流。 */
 function toStream(chunks: AsyncGenerator<string>): ReadableStream {
-  return Readable.toWeb(Readable.from(chunks)) as ReadableStream;
+  return Readable.toWeb(Readable.from(chunks).map((chunk: string) => Buffer.from(chunk))) as ReadableStream;
 }
 
 const STREAM_HEADERS = {
@@ -180,6 +182,49 @@ export function gatewayRoutes(deps: GatewayDeps): Hono {
       }
       const result = await collect(outcome.events);
       return c.json(toChatCompletion(result, outcome.model, id));
+    } catch (err) {
+      return failure(c, err);
+    }
+  });
+
+  routes.post('/v1/responses', async (c) => {
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return badRequest(c, '请求体必须是 JSON');
+    }
+
+    let request: AnthropicRequest;
+    try {
+      request = parseResponsesRequest(raw);
+    } catch (err) {
+      if (err instanceof ResponsesInputError) return badRequest(c, err.message);
+      throw err;
+    }
+
+    const id = `resp_${randomUUID()}`;
+    try {
+      const outcome = await runForward(deps, request, { signal: c.req.raw.signal });
+      if (request.stream === true) {
+        const frames = guarded(toResponsesStream(outcome.events, outcome.model, id), (message) =>
+          sseFrame('response.failed', JSON.stringify({
+            type: 'response.failed',
+            response: { id, status: 'failed', error: { code: 'upstream_error', message } },
+          })),
+        );
+        return c.newResponse(toStream(frames), 200, STREAM_HEADERS);
+      }
+      const events = (async function* (): EventStream {
+        let stopped = false;
+        for await (const evt of outcome.events) {
+          if (evt.event === 'message_stop') stopped = true;
+          yield evt;
+        }
+        if (!stopped) throw new UpstreamError(502, 'Upstream stream ended before message_stop');
+      })();
+      const result = await collect(events);
+      return c.json(toResponsesResult(result, outcome.model, id));
     } catch (err) {
       return failure(c, err);
     }

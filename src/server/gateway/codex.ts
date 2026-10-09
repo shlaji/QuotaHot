@@ -39,6 +39,10 @@ function textFromContent(content: unknown): string {
 function inputItems(role: 'user' | 'assistant', blocks: ContentBlock[]): Json[] {
   const items: Json[] = [];
   const parts: Json[] = [];
+  const flushParts = (): void => {
+    if (parts.length === 0) return;
+    items.push({ type: 'message', role, content: parts.splice(0) });
+  };
   for (const block of blocks) {
     if (block.type === 'text') {
       parts.push({ type: role === 'assistant' ? 'output_text' : 'input_text', text: String(block.text ?? '') });
@@ -50,6 +54,7 @@ function inputItems(role: 'user' | 'assistant', blocks: ContentBlock[]): Json[] 
           : String(source.url ?? '');
       if (url) parts.push({ type: 'input_image', image_url: url });
     } else if (block.type === 'tool_use') {
+      flushParts();
       items.push({
         type: 'function_call',
         name: String(block.name ?? ''),
@@ -58,6 +63,7 @@ function inputItems(role: 'user' | 'assistant', blocks: ContentBlock[]): Json[] 
       });
     } else if (block.type === 'tool_result') {
       // 工具结果在 Responses 里是独立 item，不属于任何一条消息
+      flushParts();
       items.push({
         type: 'function_call_output',
         call_id: String(block.tool_use_id ?? ''),
@@ -66,8 +72,8 @@ function inputItems(role: 'user' | 'assistant', blocks: ContentBlock[]): Json[] 
     }
     // thinking 块不回传：签名只对签发它的那家上游有意义，原样发给 Codex 只会被拒
   }
-  // 消息 item 要排在它自己产生的 function_call 之前，顺序错了上游会认为工具调用凭空出现
-  return parts.length > 0 ? [{ type: 'message', role, content: parts }, ...items] : items;
+  flushParts();
+  return items;
 }
 
 /** 内部 IR → Responses 请求体。 */
