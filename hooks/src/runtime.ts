@@ -191,7 +191,6 @@ export async function runHook(
     const result = await switchAccount({
       ...opts,
       provider: target.provider,
-      clients: [target.client],
       triggerClient: target.client,
       exhausted: true,
       cacheMs: 0,

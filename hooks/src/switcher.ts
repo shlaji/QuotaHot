@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { ACCOUNTS_DIR, loadConfig } from './config.js';
 import { accountIdOf, emailOf, loadAccounts } from './account-files.js';
 import { clientPath, readClientTokens, syncToClients } from './client-auth.js';
@@ -76,8 +77,8 @@ function options(partial: Partial<SwitchOptions>): SwitchOptions {
 }
 
 function clientsOf(provider: Provider): readonly string[] {
-  if (provider === 'codex') return ['codex-cli', 'opencode'];
-  if (provider === 'claude') return ['claude-cli'];
+  if (provider === 'codex') return ['codex-cli', 'opencode', 'pi-codex'];
+  if (provider === 'claude') return ['claude-cli', 'pi-claude'];
   return [];
 }
 
@@ -151,7 +152,8 @@ export async function surveyAccounts(
 
 async function switchLocked(config: SwitchOptions, network: NetworkConfig): Promise<SwitchResult> {
   const state = await readState();
-  const clients = config.clients.length > 0 ? config.clients : clientsOf(config.provider);
+  const clients = config.clients.length > 0 ? config.clients : clientsOf(config.provider).filter((client) =>
+    !client.startsWith('pi-') || client === config.triggerClient || existsSync(clientPath(client)));
   if (clients.length === 0) return result(`${config.provider} 没有可切换的客户端`, config.reason);
   const trigger = config.triggerClient && clients.includes(config.triggerClient) ? config.triggerClient : clients[0];
   if (trigger === undefined) return result('没有可切换的客户端', config.reason);

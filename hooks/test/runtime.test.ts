@@ -268,16 +268,16 @@ for (const [provider, accountProvider, client] of [
   ['anthropic', 'claude', 'pi-claude'],
   ['openai-codex', 'codex', 'pi-codex'],
 ] as const) {
-  test(`Pi ${provider} finalized quota error switches only ${client}`, async () => {
+  test(`Pi ${provider} finalized quota error triggers same-provider synchronization`, async () => {
     // Given: a finalized assistant quota failure with a sensitive error body.
     calls = [];
     reply = { ...reply, switched: true, message: 'private@example.invalid token=secret-token', from: 'private@example.invalid', to: 'other@example.invalid', checked: [], written: [] };
     // When: Pi supplies the raw assistant message.
     const out = await runHook('pi', JSON.stringify({ role: 'assistant', provider, stopReason: 'error', errorMessage: 'usage limit reached secret-error' }));
-    // Then: the shared switcher receives only the corresponding Pi target and output is safe.
+    // Then: the shared switcher uses the Pi trigger with default same-provider targets and output is safe.
     assert.equal(calls.length, 1);
     assert.equal(calls[0].provider, accountProvider);
-    assert.deepEqual(calls[0].clients, [client]);
+    assert.equal(calls[0].clients, undefined);
     assert.equal(calls[0].triggerClient, client);
     assert.equal(calls[0].exhausted, true);
     assert.equal(calls[0].cacheMs, 0);

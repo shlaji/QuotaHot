@@ -170,7 +170,7 @@ process.stdout.write(JSON.stringify({ switched: true, message: body, outcome: 's
   assert.equal(notifications.length, 1);
 });
 
-test('Pi quota event runs actual CLI and writes only selected provider auth', async (context) => {
+test('Pi quota event runs actual CLI and synchronizes same-provider clients', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'quotahot-pi-real-'));
   context.after(() => rm(root, { recursive: true, force: true }));
   const agent = join(root, 'pi-agent');
@@ -212,5 +212,7 @@ test('Pi quota event runs actual CLI and writes only selected provider auth', as
   assert.deepEqual(result.anthropic, unchanged);
   assert.equal(notifications.length, 1);
   assert.doesNotMatch(notifications[0] ?? '', /a@x\.com|b@x\.com|token/);
-  await assert.rejects(access(join(root, '.codex', 'auth.json')));
+  const codex = JSON.parse(await readFile(join(root, '.codex', 'auth.json'), 'utf8'));
+  assert.equal(codex.tokens.access_token, 'token-b');
+  await assert.rejects(access(join(root, 'client-data', 'opencode', 'auth.json')));
 });

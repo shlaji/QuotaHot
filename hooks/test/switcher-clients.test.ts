@@ -59,6 +59,92 @@ test('OpenCode trigger uses the OpenCode current account', async () => {
   assert.equal(nested(opencodeAuthPath, 'openai', 'access'), 'token-b@x.com');
 });
 
+for (const triggerClient of ['codex-cli', 'opencode', 'pi-codex']) {
+  test(`${triggerClient} quota switch synchronizes installed same-provider clients`, async () => {
+    // Given: each Codex-family client uses A and Pi also has an unrelated Anthropic login.
+    reset();
+    const piPath = join(home, '.pi', 'agent', 'auth.json');
+    mkdirSync(join(home, '.pi', 'agent'), { recursive: true });
+    writeFileSync(piPath, JSON.stringify({
+      'openai-codex': { type: 'oauth', access: 'token-a@x.com', refresh: 'refresh-a', expires: 123, accountId: 'acct-a@x.com' },
+      anthropic: { type: 'oauth', access: 'unrelated', refresh: 'unrelated-refresh', expires: 123 },
+    }));
+    usageByEmail.set('b@x.com', [usageWindow('primary', 2, 3_600_000)]);
+    // When: any installed client triggers an automatic switch.
+    const result = await switchWithUsage({ minIntervalMs: 0, exhausted: true, triggerClient });
+    // Then: all installed Codex stores share B without touching the Anthropic login.
+    assert.equal(result.switched, true);
+    assert.equal(nested(codexAuthPath, 'tokens', 'access_token'), 'token-b@x.com');
+    assert.equal(nested(opencodeAuthPath, 'openai', 'access'), 'token-b@x.com');
+    assert.equal(nested(piPath, 'openai-codex', 'access'), 'token-b@x.com');
+    assert.equal(nested(piPath, 'anthropic', 'access'), 'unrelated');
+  });
+}
+
+for (const triggerClient of ['claude-cli', 'pi-claude']) {
+  test(`${triggerClient} synchronizes Claude Code and Pi Anthropic without changing Pi Codex`, async () => {
+  // Given: both Claude stores use A while Pi Codex has a separate login.
+  reset();
+  for (const email of ['a@x.com', 'b@x.com']) {
+    writeFileSync(join(accountsDir, `claude-${email}.json`), JSON.stringify({
+      type: 'claude', email, access_token: `claude-token-${email}`,
+      refresh_token: `claude-refresh-${email}`,
+      expired: new Date(Date.now() + 86_400_000).toISOString(), auto_refresh: true,
+    }));
+  }
+  const piPath = join(home, '.pi', 'agent', 'auth.json');
+  mkdirSync(join(home, '.pi', 'agent'), { recursive: true });
+  writeFileSync(piPath, JSON.stringify({
+    anthropic: { type: 'oauth', access: 'claude-token-a@x.com', refresh: 'claude-refresh-a', expires: 123 },
+    'openai-codex': { type: 'oauth', access: 'codex-untouched', refresh: 'codex-refresh', expires: 123, accountId: 'codex-id' },
+  }));
+  const claudePath = clientPath('claude-cli');
+  mkdirSync(join(home, '.claude'), { recursive: true });
+  writeFileSync(claudePath, JSON.stringify({ claudeAiOauth: { accessToken: 'claude-token-a@x.com' } }));
+  usageByEmail.set('b@x.com', [usageWindow('5h', 2, 3_600_000)]);
+  try {
+    // When: either Claude client triggers the automatic switch.
+    const result = await switchWithUsage({ provider: 'claude', minIntervalMs: 0, exhausted: true, triggerClient });
+    // Then: both Claude stores use B; Codex stores and Pi Codex retain their logins.
+    assert.equal(result.switched, true);
+    assert.equal(nested(claudePath, 'claudeAiOauth', 'accessToken'), 'claude-token-b@x.com');
+    assert.equal(nested(piPath, 'anthropic', 'access'), 'claude-token-b@x.com');
+    assert.equal(nested(piPath, 'openai-codex', 'access'), 'codex-untouched');
+    assert.equal(nested(codexAuthPath, 'tokens', 'access_token'), 'token-a@x.com');
+  } finally {
+    rmSync(claudePath, { force: true });
+  }
+  });
+}
+
+test('default Codex switch skips absent Pi auth without creating it', async () => {
+  // Given: Pi has no installed auth store.
+  reset();
+  const piPath = join(home, '.pi', 'agent', 'auth.json');
+  rmSync(piPath, { force: true });
+  usageByEmail.set('b@x.com', [usageWindow('primary', 2, 3_600_000)]);
+  // When: Codex CLI triggers a default switch.
+  const result = await switchWithUsage({ minIntervalMs: 0, exhausted: true, triggerClient: 'codex-cli' });
+  // Then: existing clients switch, but no Pi file is invented.
+  assert.equal(result.switched, true);
+  assert.equal(existsSync(piPath), false);
+  assert.equal(result.written.some((write) => write.source === 'pi-codex'), false);
+});
+
+test('Pi trigger without auth reports a failed trigger write', async () => {
+  // Given: Pi auth does not exist, though other Codex clients do.
+  reset();
+  const piPath = join(home, '.pi', 'agent', 'auth.json');
+  rmSync(piPath, { force: true });
+  usageByEmail.set('b@x.com', [usageWindow('primary', 2, 3_600_000)]);
+  // When: Pi requests an automatic switch.
+  const result = await switchWithUsage({ minIntervalMs: 0, exhausted: true, triggerClient: 'pi-codex' });
+  // Then: the Pi write fails without creating its auth file or claiming success.
+  assert.equal(result.switched, false);
+  assert.equal(existsSync(piPath), false);
+  assert.equal(result.written.some((write) => write.source === 'pi-codex' && Boolean(write.error)), true);
+});
+
 test('trigger-client write failure preserves partial result and permits immediate retry', async () => {
   // Given: the OpenCode backup path blocks its write while Codex remains writable.
   reset();
