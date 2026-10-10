@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile, stat } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile, stat } from 'node:fs/promises';
 import { createCipheriv, pbkdf2Sync } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,68 @@ import { saveAccount, loadAccount, loadAccounts } from '../src/server/creds.js';
 import { qoderTargets, switchQoderAccount } from '../src/server/qoder-switch.js';
 import { qoderRoutes } from '../src/server/qoder-routes.js';
 import { readQoderSessions } from '../src/server/qoder-session.js';
+import { decryptSafeStorage } from '../src/server/qoder.js';
 import type { QoderProcesses } from '../src/server/qoder-process.js';
+
+function v11Credential(password: string): Buffer {
+  const cipher = createCipheriv('aes-128-cbc', pbkdf2Sync(password, 'saltysalt', 1, 16, 'sha1'), Buffer.alloc(16, 32));
+  return Buffer.concat([Buffer.from('v11'), cipher.update('fixture payload'), cipher.final()]);
+}
+
+test('Linux v11 缺少 secret-tool 且空密码无法解密时提示安装 libsecret-tools', { skip: process.platform !== 'linux' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'quotahot-qoder-path-'));
+  const originalPath = process.env.PATH;
+  try {
+    process.env.PATH = root;
+    assert.throws(() => decryptSafeStorage(v11Credential('keyring-password')), /libsecret-tools.*secret-tool/);
+  } finally {
+    process.env.PATH = originalPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Linux v11 缺少 secret-tool 时仍可使用空密码解密', { skip: process.platform !== 'linux' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'quotahot-qoder-path-'));
+  const originalPath = process.env.PATH;
+  try {
+    process.env.PATH = root;
+    assert.equal(decryptSafeStorage(v11Credential('')), 'fixture payload');
+  } finally {
+    process.env.PATH = originalPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Linux v11 密钥环不可用不误报缺少 secret-tool', { skip: process.platform !== 'linux' }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'quotahot-qoder-path-'));
+  const originalPath = process.env.PATH;
+  try {
+    const executable = join(root, 'secret-tool');
+    await writeFile(executable, '#!/bin/sh\nexit 1\n');
+    await chmod(executable, 0o755);
+    process.env.PATH = root;
+    assert.throws(() => decryptSafeStorage(v11Credential('keyring-password')), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /Qoder 凭证解密失败/);
+      assert.doesNotMatch(error.message, /libsecret-tools/);
+      return true;
+    });
+  } finally {
+    process.env.PATH = originalPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Windows 上未知密文前缀仍提示 DPAPI 不支持', () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  assert.ok(platform);
+  try {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    assert.throws(() => decryptSafeStorage(Buffer.from('future encrypted payload')), /DPAPI.*不支持/);
+  } finally {
+    Object.defineProperty(process, 'platform', platform);
+  }
+});
 
 function desktopCredential(id: string): Buffer {
   const cipher = createCipheriv('aes-128-cbc', pbkdf2Sync('peanuts', 'saltysalt', 1, 16, 'sha1'), Buffer.alloc(16, 32));

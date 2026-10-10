@@ -125,10 +125,11 @@ function deriveKey(password: string, iterations: number): Buffer {
   return pbkdf2Sync(password, SALT, iterations, 16, 'sha1');
 }
 
-function commandOutput(cmd: string, args: string[]): string {
+function commandOutput(cmd: string, args: string[]): string | null {
   try {
     return execFileSync(cmd, args, { encoding: 'utf8', timeout: 5000 }).trim();
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
     return '';
   }
 }
@@ -140,19 +141,24 @@ function commandOutput(cmd: string, args: string[]): string {
  * 空密码，因此拿不到也不算失败，让调用方再试一遍空密码派生的密钥。
  * v10 则是众所周知的固定密码 'peanuts'。
  */
-function linuxKeys(prefix: string, application = 'Qoder'): Buffer[] {
+function linuxKeys(prefix: string, application = 'Qoder'): { keys: Buffer[]; missingSecretTool: boolean } {
   const empty = deriveKey('', 1);
-  if (prefix === 'v10') return [deriveKey('peanuts', 1), empty];
+  if (prefix === 'v10') return { keys: [deriveKey('peanuts', 1), empty], missingSecretTool: false };
   const keys: Buffer[] = [];
+  let missingSecretTool = false;
   for (const app of [application, application.toLowerCase()]) {
     const password = commandOutput('secret-tool', ['lookup', 'application', app]);
+    if (password === null) {
+      missingSecretTool = true;
+      break;
+    }
     if (password) {
       keys.push(deriveKey(password, 1));
       break;
     }
   }
   keys.push(empty);
-  return keys;
+  return { keys, missingSecretTool };
 }
 
 /** macOS 的密钥存在钥匙串里，条目名随发行版本变过，这里按参照实现的顺序试一遍。 */
@@ -190,16 +196,17 @@ function decryptCbc(payload: Buffer, key: Buffer): string {
  * 那里如实报错，而不是给出一段乱码让用户以为是别的问题。
  */
 export function decryptSafeStorage(encrypted: Buffer, application = 'Qoder'): string {
+  if (process.platform === 'win32') {
+    throw new Error('Windows 上的 Qoder 凭证由 DPAPI 加密，本程序暂不支持导入');
+  }
   const prefix = encrypted.subarray(0, 3).toString('latin1');
   if (prefix !== 'v10' && prefix !== 'v11') {
     throw new Error(`无法识别的 safeStorage 密文前缀: ${JSON.stringify(prefix)}`);
   }
-  if (process.platform === 'win32') {
-    throw new Error('Windows 上的 Qoder 凭证由 DPAPI 加密，本程序暂不支持导入');
-  }
 
   const body = encrypted.subarray(3);
-  const keys = process.platform === 'darwin' ? macKeys() : linuxKeys(prefix, application);
+  const linux = process.platform === 'darwin' ? null : linuxKeys(prefix, application);
+  const keys = linux ? linux.keys : macKeys();
   if (keys.length === 0) {
     throw new Error('没能取到 Qoder 的 safeStorage 密钥，请确认系统钥匙串/密钥环可用');
   }
@@ -210,6 +217,9 @@ export function decryptSafeStorage(encrypted: Buffer, application = 'Qoder'): st
     } catch (err) {
       last = String((err as Error).message ?? err);
     }
+  }
+  if (linux?.missingSecretTool) {
+    throw new Error('Qoder 凭证解密失败：缺少 libsecret-tools 提供的 secret-tool，请安装后重试');
   }
   throw new Error(`Qoder 凭证解密失败: ${last}`);
 }
