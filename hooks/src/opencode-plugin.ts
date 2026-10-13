@@ -3,7 +3,7 @@ import { classifyQuotaSignal } from './quota-signal.js';
 export function opencodePlugin(command: string | readonly string[]): string {
   return `// quotahot:start
 // 由 \`quotahot-hook install opencode\` 生成；重新安装会整份覆盖。
-// 作用：OpenCode 撞上限额时，自动把 ~/.local/share/opencode/auth.json 换成另一个还有额度的账户。
+// 作用：OpenCode 模型请求前检查额度，达到阈值或明确触限时切换账户。
 import { spawn } from "node:child_process";
 
 const COMMAND = ${JSON.stringify(typeof command === 'string' ? [command] : command)};
@@ -207,6 +207,10 @@ export const QuotaHot = async ({ client }) => {
   };
 
   return {
+    "chat.params": async ({ model }) => {
+      if (model?.providerID !== "openai") return;
+      await run({ source: "opencode", check: true, provider: "openai" });
+    },
     event: async ({ event }) => {
       if (!event || typeof event.type !== "string") return;
       const sessionID = event.properties?.sessionID || event.properties?.info?.id;

@@ -9,7 +9,7 @@ import { readState, STATE_PATH, withSwitchLock, writeState, type AccountMemo, ty
 import type { Account, Provider, SyncResult, UsageResult, Window } from './types.js';
 
 export { STATE_PATH };
-export const DEFAULT_THRESHOLD = 95;
+export const DEFAULT_THRESHOLD = 80;
 export const DEFAULT_CACHE_MS = 5 * 60_000;
 export const DEFAULT_MIN_INTERVAL_MS = 60_000;
 const FALLBACK_COOLDOWN_MS = 30 * 60_000;
@@ -36,6 +36,7 @@ export type SwitchOptions = {
   readonly triggerClient?: string;
   readonly reason: string;
   readonly exhausted: boolean;
+  readonly proactive: boolean;
   readonly threshold: number;
   readonly cacheMs: number;
   readonly minIntervalMs: number;
@@ -69,7 +70,7 @@ function result(message: string, reason: string, partial: Partial<SwitchResult> 
 
 function options(partial: Partial<SwitchOptions>): SwitchOptions {
   return {
-    provider: 'codex', clients: [], reason: '手动触发', exhausted: false,
+    provider: 'codex', clients: [], reason: '手动触发', exhausted: false, proactive: false,
     threshold: DEFAULT_THRESHOLD, cacheMs: DEFAULT_CACHE_MS,
     minIntervalMs: DEFAULT_MIN_INTERVAL_MS, check: true, dryRun: false,
     ...partial,
@@ -103,22 +104,23 @@ function status(account: Account, memo: AccountMemo, source: AccountStatus['sour
 async function assess(account: Account, state: SwitchState, config: SwitchOptions, network: NetworkConfig): Promise<AccountStatus> {
   const now = Date.now();
   const memo = state.accounts[account.id];
-  if (memo && memo.blockedUntil > now && config.cacheMs > 0) return status(account, memo, 'cooldown');
+  const cached = memo && ('proactive' in memo ? memo.proactive === config.proactive : !config.proactive) ? memo : undefined;
+  if (cached && cached.blockedUntil > now && config.cacheMs > 0 && (!config.proactive || now - cached.checkedAt < config.cacheMs)) return status(account, cached, 'cooldown');
   if (!config.check) return memo ? status(account, memo, 'cache') : { id: account.id, email: account.email, usable: true, usedPercent: null, resetAt: 0, source: 'skipped', error: '' };
-  if (memo && now - memo.checkedAt < config.cacheMs) return status(account, memo, 'cache');
+  if (cached && now - cached.checkedAt < config.cacheMs) return status(account, cached, 'cache');
   const fresh = config.dryRun ? account.expiresAt > now : await ensureFresh(account, network);
   if (!fresh) return { id: account.id, email: account.email, usable: false, usedPercent: memo?.usedPercent ?? null, resetAt: 0, source: 'error', error: config.dryRun ? '只读预览不能刷新过期或有效期未知的令牌' : '令牌已过期且续期失败' };
   const usage = await (config.usageQuery ?? queryHookUsage)(account, network);
   if (!usage.ok) return { id: account.id, email: account.email, usable: false, usedPercent: memo?.usedPercent ?? null, resetAt: 0, source: 'error', error: usage.error || `额度查询返回 HTTP ${usage.status}` };
   const threshold = exhaustionOf(usage.windows, config.threshold, now);
-  const exhausted = usage.quotaAvailable === null ? threshold.exhausted : !usage.quotaAvailable;
+  const exhausted = usage.quotaAvailable === false || (config.proactive || usage.quotaAvailable === null) && threshold.exhausted;
   const latestReset = usage.windows.reduce((latest, window) => window.resetAt > now ? Math.max(latest, window.resetAt) : latest, 0);
   const resetAt = exhausted ? threshold.resetAt || latestReset || now + FALLBACK_COOLDOWN_MS : 0;
   const primary = usage.windows.find((window) => window.windowMinutes === null
     ? window.name === '5h' || window.name === 'primary'
     : window.windowMinutes >= 240 && window.windowMinutes <= 360);
   const known = usage.windows.flatMap((window) => window.usedPercent === null ? [] : [window.usedPercent]);
-  const next = { usedPercent: primary?.usedPercent ?? (known.length > 0 ? Math.max(...known) : null), resetAt, checkedAt: now, blockedUntil: exhausted ? resetAt : 0 };
+  const next = { usedPercent: primary?.usedPercent ?? (known.length > 0 ? Math.max(...known) : null), resetAt, checkedAt: now, blockedUntil: exhausted ? resetAt : 0, ...(config.proactive ? { proactive: true } : {}) };
   state.accounts[account.id] = next;
   return { ...status(account, next, 'live'), usable: !exhausted };
 }

@@ -129,6 +129,50 @@ test('Pi install and uninstall preserve a symlink even when its target has our m
   assert.equal(await readFile(target, 'utf8'), piExtensionSource(['/old-hook']));
 });
 
+test('Pi generated extension awaits pre-request checks only for supported model providers', async (context) => {
+  // Given: the installed extension invokes a child which records its input before exiting.
+  const root = await mkdtemp(join(tmpdir(), 'quotahot-pi-precheck-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const hook = join(root, 'fake-hook.mjs');
+  const calls = join(root, 'calls.jsonl');
+  const completed = join(root, 'completed.jsonl');
+  await writeFile(hook, `import { appendFileSync } from 'node:fs';
+let body = ''; for await (const chunk of process.stdin) body += chunk;
+appendFileSync(process.env.CALLS, body + '\\n');
+if (process.env.FAIL_HOOK === '1') process.exit(1);
+setTimeout(() => {
+  appendFileSync(process.env.COMPLETED, body + '\\n');
+  process.stdout.write(JSON.stringify({ switched: true }));
+}, 20);`);
+  const path = join(root, 'extension.ts');
+  await writeFile(path, piExtensionSource([process.execPath, hook, 'run', 'pi']));
+  const generated = await import(path);
+  const listeners = new Map<string, (event: unknown, ctx: { model?: { provider: string }; secret?: string }) => Promise<void>>();
+  generated.default({ on: (name: string, handler: (event: unknown, ctx: { model?: { provider: string }; secret?: string }) => Promise<void>) => listeners.set(name, handler) });
+  const handle = listeners.get('before_agent_start');
+  assert.ok(handle);
+  const previous = { CALLS: process.env.CALLS, COMPLETED: process.env.COMPLETED, FAIL_HOOK: process.env.FAIL_HOOK };
+  process.env.CALLS = calls;
+  process.env.COMPLETED = completed;
+  context.after(() => { for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } });
+
+  // When: Pi starts requests for supported models, followed by unsupported and missing models.
+  for (const provider of ['anthropic', 'openai-codex']) {
+    await handle({}, { model: { provider }, secret: 'must-not-leak' });
+  }
+  await handle({}, { model: { provider: 'other' }, secret: 'must-not-leak' });
+  await handle({}, {});
+
+  // Then: each supported request awaited child exit and sent only the check envelope.
+  const expected = ['anthropic', 'openai-codex'].map((provider) => ({ source: 'pi', check: true, provider }));
+  assert.deepEqual((await readFile(calls, 'utf8')).trim().split('\n').map((line) => JSON.parse(line)), expected);
+  assert.deepEqual((await readFile(completed, 'utf8')).trim().split('\n').map((line) => JSON.parse(line)), expected);
+
+  // When: the child fails, Pi must still be allowed to start the request.
+  process.env.FAIL_HOOK = '1';
+  await assert.doesNotReject(handle({}, { model: { provider: 'anthropic' } }));
+});
+
 test('Pi generated extension filters finalized quota errors and fails open on hook failure', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'quotahot-pi-extension-'));
   context.after(() => rm(root, { recursive: true, force: true }));

@@ -42,6 +42,12 @@ function callHook(message) {
 }
 
 export default function (pi) {
+  pi.on('before_agent_start', async (_event, ctx) => {
+    const provider = ctx.model?.provider;
+    if (provider !== 'anthropic' && provider !== 'openai-codex') return;
+    await callHook({ source: 'pi', check: true, provider }).catch(() => false);
+  });
+
   pi.on('message_end', async (event, ctx) => {
     try {
       const message = event.message;

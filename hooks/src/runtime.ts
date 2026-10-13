@@ -182,6 +182,28 @@ export async function runHook(
       : payload.provider === 'openai-codex'
         ? { provider: 'codex', client: 'pi-codex' } as const
         : null;
+    if (payload.source === 'pi' && payload.check === true && target
+      && !(payload.role === 'assistant' && payload.stopReason === 'error')) {
+      const result = await switchAccount({
+        ...opts,
+        provider: target.provider,
+        triggerClient: target.client,
+        proactive: true,
+        exhausted: false,
+        threshold: 80,
+        cacheMs: 300_000,
+        reason: 'Pi 请求前额度检查',
+        usageQuery: queryHookUsage,
+      });
+      const outcome: HookOutcome = result.switched ? 'switched' : result.checked[0]?.usable ? 'skipped_no_signal' :
+        result.checked.some((account) => account.source === 'error') || result.written.some((write) => write.error)
+          ? 'check_failed'
+          : 'no_candidate';
+      return {
+        stdout: JSON.stringify({ switched: result.switched, outcome, message: result.switched ? 'QuotaHot: 已切换 Pi 账户；新凭证将在后续使用时生效。' : '' }),
+        result, skipped: '', outcome,
+      };
+    }
     if (payload.role !== 'assistant' || payload.stopReason !== 'error' || !target
       || typeof payload.errorMessage !== 'string'
       || !/(?:quota|limit)(?:\b|_)|\btoo many requests\b/i.test(payload.errorMessage)
@@ -213,6 +235,34 @@ export async function runHook(
     };
   }
 
+  if (payload.source === 'opencode' && payload.check === true && payload.provider === 'openai'
+    && !opencodeSignal(payload).hit) {
+    const result = await switchAccount({
+      ...opts,
+      provider: 'codex',
+      triggerClient: 'opencode',
+      proactive: true,
+      exhausted: false,
+      threshold: 80,
+      cacheMs: 300_000,
+      reason: 'OpenCode 请求前额度检查',
+      usageQuery: opts.usageQuery ?? queryHookUsage,
+    });
+    const outcome: HookOutcome = result.switched ? 'switched' : result.checked[0]?.usable ? 'skipped_no_signal' :
+      result.checked.some((account) => account.source === 'error') || result.written.some((write) => write.error)
+        ? 'check_failed'
+        : 'no_candidate';
+    return {
+      stdout: JSON.stringify({
+        switched: result.switched, outcome,
+        message: result.switched ? '账户已切换' : '',
+        reason: result.reason,
+        from: result.switched ? '[redacted]' : '',
+        to: result.switched ? '[redacted]' : '',
+      }),
+      result, skipped: '', outcome,
+    };
+  }
   const signal = opencodeSignal(payload);
   if (!signal.hit) {
     return { stdout: JSON.stringify({ switched: false, message: '', outcome: 'skipped_no_signal' }), result: null, skipped: '事件里没有限额迹象', outcome: 'skipped_no_signal' };

@@ -56,12 +56,13 @@ async function fixture(t: TestContext, messages: readonly object[], delay = 0, m
   const directory = await mkdtemp(join(tmpdir(), 'quotahot-plugin-events-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const counter = join(directory, 'spawns');
+  const payloadPath = join(directory, 'payload');
   const command = join(directory, 'quotahot-hook');
   const commandPath = mode === 'spawn-error' ? join(directory, 'missing') : command;
-  const commandBody = mode === 'epipe' ? `printf '%s' '{"switched":true,"message":"safe"}'; exec 0>&-; sleep .01` : mode === 'malformed' ? "printf '%s' nope" : mode === 'oversized' ? 'head -c 65537 /dev/zero' : mode === 'nonzero' ? 'exit 2' : mode === 'hung' ? 'sleep 1' : mode === 'stderr' ? `printf '%s' 'Bearer secret-token account@example.com' >&2\nhead -c 131072 /dev/zero >&2\nprintf x >> ${JSON.stringify(counter)}\nprintf '%s' '${response}'` : `printf x >> ${JSON.stringify(counter)}
-printf '%s' '${response}'`;
+  const commandBody = mode === 'epipe' ? `printf '%s' '{"switched":true,"message":"safe"}'; exec 0>&-; sleep .01` : mode === 'malformed' ? "printf '%s' nope" : mode === 'oversized' ? 'head -c 65537 /dev/zero' : mode === 'nonzero' ? 'exit 2' : mode === 'hung' ? 'sleep 1' : mode === 'stderr' ? `printf '%s' 'Bearer secret-token account@example.com' >&2\nhead -c 131072 /dev/zero >&2\nprintf x >> ${JSON.stringify(counter)}\nprintf '%s' '${response}'` : `${mode === 'delayed' ? 'sleep .05\n' : ''}printf x >> ${JSON.stringify(counter)}
+ printf '%s' '${response}'`;
   await writeFile(command, `#!/bin/sh
-${mode === 'epipe' ? '' : 'cat >/dev/null'}
+${mode === 'epipe' ? '' : `cat > ${JSON.stringify(payloadPath)}`}
 ${commandBody}
 `);
   await chmod(command, 0o700);
@@ -90,7 +91,7 @@ ${commandBody}
       },
     },
   });
-  return { plugin, counter, notifications, logs, get lookups() { return lookups; } };
+  return { plugin, counter, payloadPath, notifications, logs, get lookups() { return lookups; } };
 }
 
 function retry(sessionID: string, message: string) {
@@ -100,6 +101,37 @@ function retry(sessionID: string, message: string) {
 function assistant(sessionID: string, id: string, providerID: string, created: number) {
   return { event: { type: 'message.updated', properties: { info: { id, sessionID, role: 'assistant', providerID, modelID: 'model', time: { created } } } } };
 }
+
+test('chat.params waits for OpenAI check child completion before returning', async (t) => {
+  const state = await fixture(t, [], 0, 'delayed');
+  let settled = false;
+
+  const pending = state.plugin['chat.params']({ sessionID: 'new-session', model: { providerID: 'openai', modelID: 'gpt-5' } }, {});
+  void pending.then(() => { settled = true; });
+  await new Promise(setImmediate);
+  assert.equal(settled, false);
+  await pending;
+
+  assert.equal(await readFile(state.counter, 'utf8'), 'x');
+  assert.deepEqual(JSON.parse(await readFile(state.payloadPath, 'utf8')), { source: 'opencode', check: true, provider: 'openai' });
+});
+
+test('chat.params skips non-OpenAI providers even when the session used OpenAI before', async (t) => {
+  const state = await fixture(t, []);
+  await state.plugin.event(assistant('shared-session', 'old-message', 'openai', 1));
+
+  await state.plugin['chat.params']({ sessionID: 'shared-session', model: { providerID: 'anthropic', modelID: 'claude' } }, {});
+
+  await assert.rejects(readFile(state.counter, 'utf8'), { code: 'ENOENT' });
+});
+
+test('chat.params fails open when the child cannot start or returns invalid output', async (t) => {
+  for (const mode of ['spawn-error', 'malformed']) {
+    const state = await fixture(t, [], 0, mode);
+
+    await assert.doesNotReject(state.plugin['chat.params']({ sessionID: mode, model: { providerID: 'openai', modelID: 'gpt-5' } }, {}));
+  }
+});
 
 test('retry dispatch is provider-safe and preserves newest metadata ordering', async (t) => {
   const { plugin, counter } = await fixture(t, []);
