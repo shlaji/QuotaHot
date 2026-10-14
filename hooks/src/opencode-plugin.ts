@@ -1,9 +1,10 @@
 import { classifyQuotaSignal } from './quota-signal.js';
+import { opencodeRecoverySource } from './opencode-recovery.js';
 
 export function opencodePlugin(command: string | readonly string[]): string {
   return `// quotahot:start
 // 由 \`quotahot-hook install opencode\` 生成；重新安装会整份覆盖。
-// 作用：OpenCode 模型请求前检查额度，达到阈值或明确触限时切换账户。
+// 作用：明确触限时切换账户，额度恢复后续跑仍处于失败空闲状态的会话。
 import { spawn } from "node:child_process";
 
 const COMMAND = ${JSON.stringify(typeof command === 'string' ? [command] : command)};
@@ -16,8 +17,7 @@ const LOOKUP_TIMEOUT_MS = 2000;
 const assistantMessages = new Map();
 const lookupPromises = new Map();
 const deletedSessions = new Map();
-let inFlightAttempt = null;
-let attemptGeneration = 0;
+${opencodeRecoverySource}
 
 function sessionCache(sessionID) {
   let messages = assistantMessages.get(sessionID);
@@ -45,7 +45,8 @@ function remember(sessionID, info) {
   const messages = sessionCache(sessionID);
   const created = Number(info.time?.created || 0);
   const previous = messages.get(info.id);
-  if (!previous || created >= previous.created) messages.set(info.id, { created, providerID: typeof info.providerID === "string" ? info.providerID : "" });
+  if (!previous || created >= previous.created) messages.set(info.id, { created, parentID: info.parentID, providerID: typeof info.providerID === "string" ? info.providerID : "" });
+  while (messages.size > SESSION_CACHE_LIMIT) messages.delete(messages.keys().next().value);
 }
 
 function cachedProvider(sessionID) {
@@ -60,6 +61,7 @@ function cachedProvider(sessionID) {
 }
 
 function rememberLookup(sessionID, result) {
+  if (result?.error) return;
   const data = Array.isArray(result) ? result : result?.data;
   for (const item of Array.isArray(data) ? data : []) remember(sessionID, item?.info);
 }
@@ -105,9 +107,7 @@ function quotaRetry(event) {
 }
 
 function callHook(payload) {
-  if (inFlightAttempt) return inFlightAttempt;
-  const generation = ++attemptGeneration;
-  const attempt = new Promise((resolve) => {
+  return new Promise((resolve) => {
     const parts = COMMAND;
     let child;
     try {
@@ -164,10 +164,6 @@ function callHook(payload) {
     });
     child.stdin.end(JSON.stringify(payload));
   });
-  inFlightAttempt = attempt;
-  return attempt.finally(() => {
-    if (inFlightAttempt === attempt && attemptGeneration === generation) inFlightAttempt = null;
-  });
 }
 
 export const QuotaHot = async ({ client }) => {
@@ -206,15 +202,17 @@ export const QuotaHot = async ({ client }) => {
     return out;
   };
 
+  const recovery = createRecovery(client, run, toast);
   return {
-    "chat.params": async ({ model }) => {
-      if (model?.providerID !== "openai") return;
-      await run({ source: "opencode", check: true, provider: "openai" });
-    },
+    dispose: recovery.dispose,
     event: async ({ event }) => {
-      if (!event || typeof event.type !== "string") return;
-      const sessionID = event.properties?.sessionID || event.properties?.info?.id;
+      if (recovery.disposed || !event || typeof event.type !== "string") return;
+      const sessionID = event.properties?.sessionID || event.properties?.info?.sessionID || event.properties?.info?.id;
       if (sessionID && deletedSessions.has(sessionID)) return;
+      const quotaEvent = quotaRetry(event) ||
+        (event.type === "session.error" && event.properties?.error?.name !== "MessageAbortedError" && classifyQuotaSignal(event) !== null);
+      if (quotaEvent && sessionID) return recovery.quota(event, sessionID);
+      await recovery.observe(event, sessionID);
       if (event.type === "session.deleted") {
         if (sessionID) {
           deletedSessions.set(sessionID, Date.now());
@@ -228,10 +226,6 @@ export const QuotaHot = async ({ client }) => {
         remember(event.properties?.info?.sessionID || event.properties?.sessionID, event.properties?.info);
         return;
       }
-      const quotaEvent = quotaRetry(event) ||
-        (event.type === "session.error" && classifyQuotaSignal(event) !== null);
-      if (!quotaEvent || !sessionID || (await retryProvider(client, sessionID)) !== "openai") return;
-      await run({ source: "opencode", event });
     },
   };
 };

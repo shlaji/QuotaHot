@@ -4,7 +4,6 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SwitchOptions, SwitchResult } from '../src/switcher.js';
-import { opencodePlugin } from '../src/install.js';
 
 /**
  * 钩子这一层只做一件事：把 codex / OpenCode 各自的载荷翻译成「撞没撞上限额」。
@@ -183,47 +182,49 @@ test('OpenCode 的旧版例行检查载荷也不再触发切换', async () => {
   assert.equal(out.result, null);
 });
 
-test('OpenCode explicit pre-request check routes to Codex proactive switching', async () => {
+test('OpenCode recovery polls Codex with fresh current and candidate usage', async () => {
   calls = [];
   reply = { ...reply, switched: true, checked: [], written: [], to: 'private@example.invalid' };
-  const out = await runHook('opencode', JSON.stringify({ source: 'opencode', check: true, provider: 'openai' }), { provider: 'claude', threshold: 95, cacheMs: 0 });
+  const out = await runHook('opencode', JSON.stringify({ source: 'opencode', recover: true, provider: 'openai' }), { provider: 'claude', threshold: 95, cacheMs: 300_000 });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].provider, 'codex');
   assert.equal(calls[0].triggerClient, 'opencode');
-  assert.equal(calls[0].proactive, true);
-  assert.equal(calls[0].threshold, 80);
-  assert.equal(calls[0].cacheMs, 300_000);
+  assert.equal(calls[0].recover, true);
+  assert.equal(calls[0].threshold, 100);
+  assert.equal(calls[0].cacheMs, 0);
+  assert.equal(calls[0].minIntervalMs, 0);
   assert.equal(calls[0].exhausted, false);
   assert.equal(out.outcome, 'switched');
   assert.equal(JSON.parse(out.stdout).switched, true);
   assert.doesNotMatch(out.stdout, /private@example/);
 });
 
-test('OpenCode pre-request check stays quiet while the current account is usable', async () => {
+test('OpenCode recovery reports available while the current account is usable', async () => {
   calls = [];
   reply = { ...reply, switched: false, checked: [{
     id: 'current', email: 'current@example.invalid', usable: true, usedPercent: 30,
     resetAt: 0, source: 'cache', error: '',
   }], written: [] };
-  const out = await runHook('opencode', JSON.stringify({ source: 'opencode', check: true, provider: 'openai' }));
-  assert.equal(out.outcome, 'skipped_no_signal');
-  assert.equal(JSON.parse(out.stdout).outcome, 'skipped_no_signal');
+  const out = await runHook('opencode', JSON.stringify({ source: 'opencode', recover: true, provider: 'openai' }));
+  assert.equal(out.outcome, 'available');
+  assert.deepEqual(JSON.parse(out.stdout), { switched: false, outcome: 'available' });
 });
 
 for (const [provider, accountProvider, triggerClient] of [
   ['anthropic', 'claude', 'pi-claude'],
   ['openai-codex', 'codex', 'pi-codex'],
 ] as const) {
-  test(`Pi ${provider} explicit pre-request check routes to proactive switching`, async () => {
+  test(`Pi ${provider} recovery polls the mapped account pool`, async () => {
     calls = [];
     reply = { ...reply, switched: true, checked: [], written: [], to: 'private@example.invalid' };
-    const out = await runHook('pi', JSON.stringify({ source: 'pi', check: true, provider }));
+    const out = await runHook('pi', JSON.stringify({ source: 'pi', recover: true, provider }));
     assert.equal(calls.length, 1);
     assert.equal(calls[0].provider, accountProvider);
     assert.equal(calls[0].triggerClient, triggerClient);
-    assert.equal(calls[0].proactive, true);
-    assert.equal(calls[0].threshold, 80);
-    assert.equal(calls[0].cacheMs, 300_000);
+    assert.equal(calls[0].recover, true);
+    assert.equal(calls[0].threshold, 100);
+    assert.equal(calls[0].cacheMs, 0);
+    assert.equal(calls[0].minIntervalMs, 0);
     assert.equal(calls[0].exhausted, false);
     assert.equal(out.outcome, 'switched');
     assert.equal(JSON.parse(out.stdout).switched, true);
@@ -231,15 +232,17 @@ for (const [provider, accountProvider, triggerClient] of [
   });
 }
 
-test('pre-request checks without matching source, provider, or exact check flag are ignored', async () => {
+test('recovery requires exact source, provider, and recover flag', async () => {
   calls = [];
   const inputs = [
-    ['opencode', { source: 'pi', check: true, provider: 'openai' }],
-    ['opencode', { source: 'opencode', check: true, provider: 'anthropic' }],
-    ['opencode', { source: 'opencode', check: 'true', provider: 'openai' }],
-    ['pi', { source: 'opencode', check: true, provider: 'anthropic' }],
-    ['pi', { source: 'pi', check: true, provider: 'openai' }],
-    ['pi', { source: 'pi', check: 1, provider: 'openai-codex' }],
+    ['opencode', { source: 'pi', recover: true, provider: 'openai' }],
+    ['opencode', { source: 'opencode', recover: true, provider: 'anthropic' }],
+    ['opencode', { source: 'opencode', recover: 'true', provider: 'openai' }],
+    ['opencode', { source: 'opencode', check: true, provider: 'openai' }],
+    ['pi', { source: 'opencode', recover: true, provider: 'anthropic' }],
+    ['pi', { source: 'pi', recover: true, provider: 'openai' }],
+    ['pi', { source: 'pi', recover: 1, provider: 'openai-codex' }],
+    ['pi', { source: 'pi', check: true, provider: 'anthropic' }],
   ] as const;
   for (const [client, payload] of inputs) {
     const out = await runHook(client, JSON.stringify(payload));
@@ -250,47 +253,48 @@ test('pre-request checks without matching source, provider, or exact check flag 
   assert.deepEqual(calls, []);
 });
 
-test('explicit quota error wins over a check-shaped OpenCode payload', async () => {
+test('explicit quota error wins over a recovery-shaped OpenCode payload', async () => {
   calls = [];
   reply = { ...reply, switched: false, checked: [], written: [] };
-  await runHook('opencode', JSON.stringify({ source: 'opencode', check: true, provider: 'openai', event: { error: { status: 429 } } }));
+  await runHook('opencode', JSON.stringify({ source: 'opencode', recover: true, provider: 'openai', event: { error: { status: 429 } } }));
   assert.equal(calls[0].exhausted, true);
-  assert.equal(calls[0].proactive, undefined);
   assert.equal(calls[0].threshold, 100);
   assert.equal(calls[0].cacheMs, 0);
 });
 
-test('finalized Pi quota error wins over a check-shaped payload', async () => {
+test('finalized Pi quota error wins over a recovery-shaped payload', async () => {
   calls = [];
   reply = { ...reply, switched: false, checked: [], written: [] };
-  await runHook('pi', JSON.stringify({ source: 'pi', check: true, provider: 'anthropic', role: 'assistant', stopReason: 'error', errorMessage: 'usage limit reached' }));
+  await runHook('pi', JSON.stringify({ source: 'pi', recover: true, provider: 'anthropic', role: 'assistant', stopReason: 'error', errorMessage: 'usage limit reached' }));
   assert.equal(calls[0].exhausted, true);
-  assert.equal(calls[0].proactive, undefined);
   assert.equal(calls[0].threshold, 100);
   assert.equal(calls[0].cacheMs, 0);
 });
 
 for (const client of ['opencode', 'pi'] as const) {
-  test(`${client} proactive check returns safe check failure outcome`, async () => {
+  test(`${client} recovery returns safe check failure outcome`, async () => {
     calls = [];
     reply = { ...reply, switched: false, checked: [{ id: 'private', email: 'private@example.invalid', usable: false, usedPercent: null, resetAt: 0, source: 'error', error: 'private-token' }], written: [] };
     const out = await runHook(client, JSON.stringify(client === 'pi'
-      ? { source: 'pi', check: true, provider: 'anthropic' }
-      : { source: 'opencode', check: true, provider: 'openai' }));
+      ? { source: 'pi', recover: true, provider: 'anthropic' }
+      : { source: 'opencode', recover: true, provider: 'openai' }));
     assert.equal(out.outcome, 'check_failed');
     assert.equal(JSON.parse(out.stdout).outcome, 'check_failed');
     assert.doesNotMatch(out.stdout, /private|token/);
     reply = { ...reply, checked: [] };
   });
+
+  test(`${client} recovery exposes safe wait time when all accounts are exhausted`, async () => {
+    calls = [];
+    const waitUntil = Date.now() + 60_000;
+    reply = { ...reply, switched: false, checked: [], written: [], waitUntil };
+    const out = await runHook(client, JSON.stringify(client === 'pi'
+      ? { source: 'pi', recover: true, provider: 'anthropic' }
+      : { source: 'opencode', recover: true, provider: 'openai' }));
+    assert.deepEqual(JSON.parse(out.stdout), { switched: false, outcome: 'no_candidate', waitUntil });
+    reply = { ...reply, waitUntil: 0 };
+  });
 }
-
-test('OpenCode 插件在模型请求前检查额度，而非工具执行前检查', () => {
-  const source = opencodePlugin('/usr/local/bin/quotahot-hook');
-
-  assert.match(source, /event: async/);
-  assert.match(source, /"chat\.params": async/);
-  assert.doesNotMatch(source, /"tool\.execute\.before"/);
-});
 
 test('OpenCode 撞上 429 时切换，结果按插件认得的形状返回', async () => {
   calls = [];

@@ -131,6 +131,7 @@ export interface HookOutput {
 
 export type HookOutcome =
   | 'switched'
+  | 'available'
   | 'skipped_no_signal'
   | 'no_candidate'
   | 'check_failed'
@@ -182,25 +183,26 @@ export async function runHook(
       : payload.provider === 'openai-codex'
         ? { provider: 'codex', client: 'pi-codex' } as const
         : null;
-    if (payload.source === 'pi' && payload.check === true && target
+    if (payload.source === 'pi' && payload.recover === true && target
       && !(payload.role === 'assistant' && payload.stopReason === 'error')) {
       const result = await switchAccount({
         ...opts,
         provider: target.provider,
         triggerClient: target.client,
-        proactive: true,
+        recover: true,
         exhausted: false,
-        threshold: 80,
-        cacheMs: 300_000,
-        reason: 'Pi 请求前额度检查',
+        threshold: 100,
+        cacheMs: 0,
+        minIntervalMs: 0,
+        reason: 'Pi 额度恢复检查',
         usageQuery: queryHookUsage,
       });
-      const outcome: HookOutcome = result.switched ? 'switched' : result.checked[0]?.usable ? 'skipped_no_signal' :
+      const outcome: HookOutcome = result.switched ? 'switched' : result.checked[0]?.usable ? 'available' :
         result.checked.some((account) => account.source === 'error') || result.written.some((write) => write.error)
           ? 'check_failed'
           : 'no_candidate';
       return {
-        stdout: JSON.stringify({ switched: result.switched, outcome, message: result.switched ? 'QuotaHot: 已切换 Pi 账户；新凭证将在后续使用时生效。' : '' }),
+        stdout: JSON.stringify({ switched: result.switched, outcome, ...(result.waitUntil ? { waitUntil: result.waitUntil } : {}) }),
         result, skipped: '', outcome,
       };
     }
@@ -230,36 +232,32 @@ export async function runHook(
         message: result.switched
           ? 'QuotaHot: 已切换 Pi 账户。本次失败请求不会自动重试；新凭证将在后续使用时生效，Pi 可能需要重新解析认证或重新加载进程。'
           : '',
+        ...(result.waitUntil ? { waitUntil: result.waitUntil } : {}),
       }),
       result, skipped: '', outcome,
     };
   }
 
-  if (payload.source === 'opencode' && payload.check === true && payload.provider === 'openai'
+  if (payload.source === 'opencode' && payload.recover === true && payload.provider === 'openai'
     && !opencodeSignal(payload).hit) {
     const result = await switchAccount({
       ...opts,
       provider: 'codex',
       triggerClient: 'opencode',
-      proactive: true,
+      recover: true,
       exhausted: false,
-      threshold: 80,
-      cacheMs: 300_000,
-      reason: 'OpenCode 请求前额度检查',
+      threshold: 100,
+      cacheMs: 0,
+      minIntervalMs: 0,
+      reason: 'OpenCode 额度恢复检查',
       usageQuery: opts.usageQuery ?? queryHookUsage,
     });
-    const outcome: HookOutcome = result.switched ? 'switched' : result.checked[0]?.usable ? 'skipped_no_signal' :
+    const outcome: HookOutcome = result.switched ? 'switched' : result.checked[0]?.usable ? 'available' :
       result.checked.some((account) => account.source === 'error') || result.written.some((write) => write.error)
         ? 'check_failed'
         : 'no_candidate';
     return {
-      stdout: JSON.stringify({
-        switched: result.switched, outcome,
-        message: result.switched ? '账户已切换' : '',
-        reason: result.reason,
-        from: result.switched ? '[redacted]' : '',
-        to: result.switched ? '[redacted]' : '',
-      }),
+      stdout: JSON.stringify({ switched: result.switched, outcome, ...(result.waitUntil ? { waitUntil: result.waitUntil } : {}) }),
       result, skipped: '', outcome,
     };
   }
@@ -282,13 +280,14 @@ export async function runHook(
       ? 'check_failed'
       : 'no_candidate';
   return {
-    stdout: JSON.stringify({
-      switched: result.switched,
-      outcome,
-      message: result.switched ? '账户已切换' : '',
-      reason: result.reason,
-      from: result.switched ? '[redacted]' : '',
-      to: result.switched ? '[redacted]' : '',
+      stdout: JSON.stringify({
+        switched: result.switched,
+        outcome,
+        message: result.switched ? '账户已切换' : '',
+        reason: result.reason,
+        from: result.switched ? '[redacted]' : '',
+        to: result.switched ? '[redacted]' : '',
+        ...(result.waitUntil ? { waitUntil: result.waitUntil } : {}),
     }),
     result,
     skipped: '',

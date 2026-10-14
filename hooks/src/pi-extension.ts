@@ -35,17 +35,37 @@ function callHook(message) {
     });
     child.on('close', (code) => {
       if (code !== 0) return finish(false);
-      try { finish(JSON.parse(output).switched === true); } catch { finish(false); }
+      try {
+        const result = JSON.parse(output);
+        finish({ switched: result.switched === true, outcome: result.outcome });
+      } catch { finish(false); }
     });
     child.stdin.end(JSON.stringify(message));
   });
 }
 
 export default function (pi) {
-  pi.on('before_agent_start', async (_event, ctx) => {
-    const provider = ctx.model?.provider;
-    if (provider !== 'anthropic' && provider !== 'openai-codex') return;
-    await callHook({ source: 'pi', check: true, provider }).catch(() => false);
+  const polling = new Map();
+  let stopped = false;
+  function stop(provider) {
+    clearTimeout(polling.get(provider));
+    polling.delete(provider);
+  }
+  function schedule(provider) {
+    if (stopped || polling.has(provider)) return;
+    const timer = setTimeout(async () => {
+      polling.delete(provider);
+      const result = await callHook({ source: 'pi', recover: true, provider });
+      if (stopped) return;
+      if (result && (result.switched || result.outcome === 'available')) return;
+      schedule(provider);
+    }, 1800000);
+    timer.unref?.();
+    polling.set(provider, timer);
+  }
+  pi.on('session_shutdown', async () => {
+    stopped = true;
+    for (const provider of polling.keys()) stop(provider);
   });
 
   pi.on('message_end', async (event, ctx) => {
@@ -56,11 +76,14 @@ export default function (pi) {
       const text = message.errorMessage;
       if (typeof text !== 'string' || !/(?:quota|limit)(?:\\b|_)|\\btoo many requests\\b/i.test(text)) return;
       if (classifyQuotaSignal({ message: text }) !== 'quota_phrase') return;
-      if (await callHook(message)) {
+      const result = await callHook(message);
+      if (result && result.switched) {
+        stop(message.provider);
         try {
           ctx.ui?.notify?.('QuotaHot: Pi 账户已切换。本次失败请求不会自动重试；新凭证将在后续使用时生效。', 'info');
         } catch { /* UI is optional in non-interactive Pi modes. */ }
       }
+      if (result && (result.outcome === 'no_candidate' || result.outcome === 'check_failed')) schedule(message.provider);
     } catch { /* Never block Pi on an integration failure. */ }
   });
 }

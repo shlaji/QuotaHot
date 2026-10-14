@@ -1,6 +1,6 @@
 # QuotaHot Hook
 
-`quotahot-hook` 是一条独立的命令，额度达到切换阈值或用尽时，把 Codex CLI、OpenCode、Pi 或 Claude Code 切到另一个账户。它不会启动也不会调用 QuotaHot 的 Web 服务，两个程序谁也不 import 谁的源码。
+`quotahot-hook` 是一条独立的命令，遇到明确额度限制时把 Codex CLI、OpenCode、Pi 或 Claude Code 切到另一个账户。它不会启动也不会调用 QuotaHot 的 Web 服务，两个程序谁也不 import 谁的源码。
 
 它们之间唯一的关联是磁盘上的文件约定：两边都可能读 `QUOTAHOT_DATA_DIR`（默认 `~/.quotahot`）下的 `config.json` 和账户 JSON，但构建、安装、运行各走各的。
 
@@ -78,7 +78,7 @@ quotahot-hook install --help              # 只打印该命令的用法，绝不
 
 安装时写进去的是 `quotahot-hook` 的绝对路径调用。Codex 那几条进 `~/.codex/hooks.json`；OpenCode 插件落在 `$XDG_CONFIG_HOME/opencode/plugin` 或 `plugins` 下。Codex 与本程序无关的钩子逐条保留；OpenCode 插件升级时直接覆盖旧文件、不留备份。
 
-Pi 扩展落在 `${PI_CODING_AGENT_DIR:-~/.pi/agent}/extensions/quotahot-hook.ts`。安装与卸载只修改带 QuotaHot 标记的这一个文件；同名但没有标记的文件会被保留。扩展在 `before_agent_start` 检查当前模型对应账户的额度，且仅在 assistant 的 `message_end` 错误明确提示额度用尽时立即重试切换判断；成功切换后不自动重试本次失败请求，也不保证 Pi 会在当前进程里立即重读认证文件。
+Pi 扩展落在 `${PI_CODING_AGENT_DIR:-~/.pi/agent}/extensions/quotahot-hook.ts`。安装与卸载只修改带 QuotaHot 标记的这一个文件；同名但没有标记的文件会被保留。仅在 assistant 的 `message_end` 错误明确提示额度用尽时立即检查账户；没有可用账户时，按提供方每 30 分钟查询一次，额度恢复后切换并停止轮询。不自动重试失败请求，也不保证 Pi 会在当前进程里立即重读认证文件。
 
 卸载时按客户端分别识别自己的集成：Codex 只移除带 `quotahot-hook run codex` 的钩子条目；OpenCode 只删除带 `quotahot:start` 标记的插件文件；Pi 只删除带 `quotahot:pi-extension` 标记的扩展文件。Pi 安装和卸载会在扩展文件路径上加锁，锁内重新检查归属；等待期间若同路径被替换为非自有文件，不会覆盖或删除它。升级后执行 `quotahot-hook install` 并重启 OpenCode 或 Pi；Codex 换账户后要开新会话才生效。主程序 `quotahot` 不转发 hook 子命令。
 
@@ -125,8 +125,8 @@ Claude Code 用 `type: "claude"`。跟随某个客户端的账户可以把 `auto
 
 - 切换走 `switch.lock`；凭证刷新用的是按账户分的 SQLite 锁，与所有使用同一个账户目录的进程共享。
 - `--dry-run` 不写切换状态、缓存和凭证。已经过期、必须刷新才能判断的账户，在只读预览里评估不出来。
-- 默认切换阈值为已用 80%，额度查询结果按账户缓存 5 分钟。OpenCode 的 `chat.params` 只检查 OpenAI 模型，Pi 的 `before_agent_start` 只检查 Anthropic 与 openai-codex；未达到阈值时不会检查候选账户。达到阈值后按同一标准筛选候选账户；上游仍报告 `allowed: true` 不会阻止主动切换，而明确报告不可用的账户始终不能被选中。缓存到期后的下一次检查才会再向上游查询，不是后台每 5 分钟轮询。
-- OpenCode 和 Pi 遇到明确的额度错误时仍立即检查候选账户（不使用 5 分钟缓存，按已用 100% 处理）。上下文超长和过载错误不触发错误后的切换。请求前检查会等待 hook 命令返回，但客户端可能已为本次请求读取认证信息；因此凭证写入不保证本次模型调用立即换号，必要时重开会话或重载客户端。
+- OpenCode 和 Pi 不再在请求前按 5 分钟缓存检查额度。只有明确触限时才立即查询同提供方候选账户；全部不可用时，各进程内同一提供方共用一个 30 分钟轮询器。轮询每次实时查询额度，不沿用旧缓存；额度恢复后停止轮询。手动 `status` / `switch` 的默认阈值仍是已用 80%，与自动触限路径的 100% 判定独立。
+- OpenCode 仍在内部重试时不会重发任务；若额度恢复后原会话已因限额终止并空闲，且没有更新的用户消息、没有中止或删除，插件会自动发送一条新的“继续未完成任务”消息，每个失败轮次至多一次。这不是原请求的断点恢复，模型必须核对先前已完成的工具动作，避免重复执行。Pi 只自动切换账户，不重发失败请求。关闭或重载插件会取消进程内的等待，不跨重启持久化。上下文超长、网络错误和过载错误不会触发这条额度恢复流程。
 - 钩子出错一律 fail-open，事件路径返回退出码 0，不会把宿主的对话卡住。
 - Codex 切完必须开新会话。OpenCode 则是在重启/重载规则允许之后，下一个请求就用上新凭证。
 - 两个程序共享的是文件格式，不是 API，也不是运行时生命周期。并发写只在凭证刷新和切换这两件事上协调过；任一程序正在更新文件时，不要手动去编辑它们。

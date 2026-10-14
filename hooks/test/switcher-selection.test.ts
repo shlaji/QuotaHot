@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   availabilityByEmail,
+  accountsDir,
   codexAuthPath,
   nested,
   observations,
@@ -127,81 +129,16 @@ test('zero cache bypasses a stale candidate cooldown after a quota event', async
   assert.deepEqual(observations.queried, ['b@x.com']);
 });
 
-test('proactive mode switches when an active weekly window reaches 80 despite upstream availability', async () => {
+test('recovery observes the current account when it is the only account', async () => {
   reset();
-  usageByEmail.set('a@x.com', [usageWindow('primary', 10, 3_600_000), usageWindow('secondary', 80, 86_400_000)]);
-  usageByEmail.set('b@x.com', [usageWindow('primary', 20, 3_600_000)]);
-  availabilityByEmail.set('a@x.com', true);
-  availabilityByEmail.set('b@x.com', true);
-
-  const result = await switchWithUsage({ minIntervalMs: 0, proactive: true });
-
-  assert.equal(result.switched, true);
-  assert.equal(result.to, 'b@x.com');
-});
-
-test('proactive mode rejects a candidate at 80 even when upstream reports available', async () => {
-  reset();
-  usageByEmail.set('b@x.com', [usageWindow('primary', 79, 3_600_000), usageWindow('secondary', 80, 86_400_000)]);
-  availabilityByEmail.set('b@x.com', true);
-
-  const result = await switchWithUsage({ minIntervalMs: 0, exhausted: true, proactive: true });
-
-  assert.equal(result.switched, false);
-  assert.ok(result.waitUntil > Date.now());
-  assert.equal(nested(codexAuthPath, 'tokens', 'access_token'), 'token-a@x.com');
-});
-
-test('proactive mode respects explicit upstream exhaustion below 80', async () => {
-  reset();
-  usageByEmail.set('b@x.com', [usageWindow('primary', 10, 3_600_000)]);
-  availabilityByEmail.set('b@x.com', false);
-
-  const result = await switchWithUsage({ minIntervalMs: 0, exhausted: true, proactive: true });
-
-  assert.equal(result.switched, false);
-  assert.ok(result.waitUntil > Date.now());
-});
-
-test('proactive mode refreshes a fresh error-mode cache before choosing current account', async () => {
-  reset();
-  usageByEmail.set('a@x.com', [usageWindow('primary', 80, 3_600_000)]);
-  usageByEmail.set('b@x.com', [usageWindow('primary', 10, 3_600_000)]);
-  availabilityByEmail.set('a@x.com', true);
-  await switchWithUsage({ minIntervalMs: 0 });
-  observations.queried.length = 0;
-
-  const result = await switchWithUsage({ minIntervalMs: 0, proactive: true });
-
-  assert.equal(result.switched, true);
-  assert.deepEqual(observations.queried, ['a@x.com', 'b@x.com']);
-});
-
-test('proactive mode reuses its own five-minute cache', async () => {
-  reset();
-  usageByEmail.set('a@x.com', [usageWindow('primary', 20, 3_600_000)]);
-  await switchWithUsage({ minIntervalMs: 0, proactive: true });
-  observations.queried.length = 0;
-
-  const result = await switchWithUsage({ minIntervalMs: 0, proactive: true });
-
-  assert.equal(result.switched, false);
-  assert.deepEqual(observations.queried, []);
-});
-
-test('proactive mode refreshes a cached 80 percent block after five minutes', async () => {
-  reset();
-  const checkedAt = Date.now() - 5 * 60_000 - 1;
-  const resetAt = Date.now() + 3_600_000;
-  await import('node:fs/promises').then(({ writeFile }) => writeFile(statePath, JSON.stringify({
-    accounts: { 'codex:a@x.com': { usedPercent: 80, resetAt, checkedAt, blockedUntil: resetAt, proactive: true } },
-    clients: {},
-  })));
-  usageByEmail.set('a@x.com', [usageWindow('primary', 40, 3_600_000)]);
+  const { rmSync } = await import('node:fs');
+  rmSync(join(accountsDir, 'codex-b@x.com.json'));
+  usageByEmail.set('a@x.com', [usageWindow('primary', 10, 3_600_000)]);
   availabilityByEmail.set('a@x.com', true);
 
-  const result = await switchWithUsage({ minIntervalMs: 0, proactive: true });
+  const result = await switchWithUsage({ recover: true, cacheMs: 0, minIntervalMs: 0, threshold: 100 });
 
   assert.equal(result.switched, false);
+  assert.equal(result.checked[0]?.usable, true);
   assert.deepEqual(observations.queried, ['a@x.com']);
 });
