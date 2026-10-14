@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -35,19 +35,16 @@ test('standalone command exposes only hook operations', async () => {
   assert.doesNotMatch(stdout, /serve|Web service/i);
 });
 
-test('install print emits the standalone invocation without writing files', async () => {
-  // Given: an installation preview for Codex.
-  // When: the standalone installer renders the configuration.
-  const { stdout } = await cli(['install', 'codex', '--print']);
-  // Then: the generated command invokes this program's run subcommand.
-  assert.match(stdout, /quotahot-hook|index\.ts/);
-  assert.match(stdout, /run codex/);
-  assert.doesNotMatch(stdout, /legacy-hook(?:\.exe)?(?:['"])? hook codex/);
-
-  const opencode = await cli(['install', 'opencode', '--print']);
-  assert.match(opencode.stdout, /quotahot\.js/);
-  assert.match(opencode.stdout, /run.+opencode/);
-  assert.doesNotMatch(opencode.stdout, /hooks\.json/);
+test('install print emits only the OpenCode plugin without writing files', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-hook-preview-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const preview = await cli(['install', '--print'], home);
+  assert.equal(preview.code, 0);
+  assert.match(preview.stdout, /quotahot\.js/);
+  assert.match(preview.stdout, /run.*opencode/);
+  assert.doesNotMatch(preview.stdout, /hooks\.json|extensions\/quotahot-hook|run codex|run pi/);
+  await assert.rejects(access(join(home, '.codex', 'hooks.json')));
+  await assert.rejects(access(join(home, '.pi', 'agent', 'extensions', 'quotahot-hook.ts')));
 });
 
 test('subcommand help shows only the selected command options', async () => {
@@ -69,10 +66,11 @@ test('subcommand help shows only the selected command options', async () => {
   assert.match(installHelp.stdout, /quotahot-hook install/);
   assert.match(installHelp.stdout, /--print/);
   assert.doesNotMatch(installHelp.stdout, /--threshold/);
-  assert.match(runHelp.stdout, /quotahot-hook run <codex\|opencode\|pi>/);
+  assert.match(runHelp.stdout, /quotahot-hook run opencode/);
   assert.match(runHelp.stdout, /--threshold/);
   assert.doesNotMatch(runHelp.stdout, /--exhausted|--print/);
   assert.match(uninstallHelp.stdout, /quotahot-hook uninstall/);
+  assert.doesNotMatch(uninstallHelp.stdout, /codex|pi/);
   assert.doesNotMatch(uninstallHelp.stdout, /Options:/);
 });
 
@@ -98,25 +96,45 @@ test('invalid provider is rejected instead of silently selecting Codex', async (
   assert.equal(result.stdout, '');
 });
 
-test('Pi CLI target previews and installs without affecting other targets', async (context) => {
+test('only OpenCode is a supported install and run target', async (context) => {
   const home = await mkdtemp(join(tmpdir(), 'quotahot-hook-pi-cli-'));
   context.after(() => rm(home, { recursive: true, force: true }));
-  const preview = await cli(['install', 'pi', '--print'], home);
-  assert.equal(preview.code, 0);
-  assert.match(preview.stdout, /extensions\/quotahot-hook\.ts/);
-  assert.match(preview.stdout, /run.*pi/);
-  assert.doesNotMatch(preview.stdout, /hooks\.json|quotahot\.js/);
-  const installed = await cli(['install', 'pi'], home);
-  assert.equal(installed.code, 0);
-  await access(join(home, '.pi', 'agent', 'extensions', 'quotahot-hook.ts'));
-  await assert.rejects(access(join(home, '.codex', 'hooks.json')));
-  const uninstalled = await cli(['uninstall', 'pi'], home);
-  assert.equal(uninstalled.code, 0);
-  await assert.rejects(access(join(home, '.pi', 'agent', 'extensions', 'quotahot-hook.ts')));
-  const all = await cli(['install'], home);
-  assert.equal(all.code, 0);
-  await access(join(home, '.pi', 'agent', 'extensions', 'quotahot-hook.ts'));
-  const help = await cli(['help'], home);
-  assert.match(help.stdout, /codex\|opencode\|pi\|all/);
+  for (const args of [['install', 'codex'], ['install', 'pi'], ['install', 'all'], ['uninstall', 'codex'], ['uninstall', 'pi']]) {
+    const result = await cli(args, home);
+    assert.equal(result.code, 2, args.join(' '));
+  }
+  for (const client of ['codex', 'pi']) {
+    const result = await cli(['run', client], home);
+    assert.equal(result.code, 2, `run ${client}`);
+  }
   assert.equal((await cli(['install', 'wrong'], home)).code, 2);
+  await assert.rejects(access(join(home, '.codex', 'hooks.json')));
+  await assert.rejects(access(join(home, '.pi', 'agent', 'extensions', 'quotahot-hook.ts')));
+});
+
+test('default install removes owned legacy triggers but preserves other hooks and client auth', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-hook-migrate-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const codexDir = join(home, '.codex');
+  const piDir = join(home, '.pi', 'agent');
+  await Promise.all([
+    mkdir(codexDir, { recursive: true }), mkdir(join(piDir, 'extensions'), { recursive: true }),
+    writeFile(join(codexDir, 'hooks.json'), JSON.stringify({ hooks: {
+      SessionStart: [{ hooks: [
+        { type: 'command', command: 'quotahot-hook run codex' },
+        { type: 'command', command: 'keep-this-hook' },
+      ] }],
+    } })),
+  ]);
+  await writeFile(join(piDir, 'extensions', 'quotahot-hook.ts'), '// quotahot:pi-extension\nold integration');
+  await writeFile(join(piDir, 'auth.json'), '{"openai-codex":{"access":"keep-auth"}}');
+
+  const installed = await cli(['install'], home);
+
+  assert.equal(installed.code, 0);
+  assert.match(await readFile(join(home, '.config', 'opencode', 'plugin', 'quotahot.js'), 'utf8'), /run.*opencode/);
+  const hooks = JSON.parse(await readFile(join(codexDir, 'hooks.json'), 'utf8'));
+  assert.deepEqual(hooks.hooks.SessionStart[0].hooks.map((hook: { command: string }) => hook.command), ['keep-this-hook']);
+  await assert.rejects(access(join(piDir, 'extensions', 'quotahot-hook.ts')));
+  assert.equal(await readFile(join(piDir, 'auth.json'), 'utf8'), '{"openai-codex":{"access":"keep-auth"}}');
 });

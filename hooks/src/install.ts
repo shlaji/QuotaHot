@@ -1,17 +1,10 @@
 /**
- * 把钩子装进 codex 和 OpenCode 的配置里，以及把它摘出来。
+ * 安装和卸载 OpenCode 插件，并清理 Codex/Pi 的旧版 QuotaHot 触发器。
  *
  * 装的是别人的配置文件，因此只动自己那一块、改了什么逐条报出来；旧内容直接覆盖，不留备份。
- * 两边的做法不一样：
- *
- * - codex 读 `~/.codex/hooks.json`，格式与 Claude Code 的钩子配置同源（顶层 `hooks`，
- *   按事件名分组）。我们只往三个事件里各插一条命令，原有的钩子逐字保留，靠命令行里的
- *   `quotahot-hook run codex` 认出哪条是自己的，装第二遍不会插出两条。
- * - OpenCode 读插件目录里的 js/ts 文件，所以这边是**生成一个文件**，整份都是我们的。
- *   文件里写死了本可执行文件的绝对路径：钩子被拉起时的 PATH 未必包含它。
+ * OpenCode 读插件目录里的 js/ts 文件，插件中写入本可执行文件的绝对路径。
  */
 import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { isSea } from 'node:sea';
@@ -20,23 +13,17 @@ import { pathToFileURL } from 'node:url';
 import lockfile from 'proper-lockfile';
 import { opencodePlugin } from './opencode-plugin.js';
 import { piAuthPath } from './client-auth.js';
-import { PI_EXTENSION_MARKER, piExtensionSource } from './pi-extension.js';
+const PI_EXTENSION_MARKER = '// quotahot:pi-extension';
 
 export { opencodePlugin } from './opencode-plugin.js';
-export { piExtensionSource } from './pi-extension.js';
 
 function shellArg(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-/** codex 的钩子配置。事件名与 codex 0.153 的一致。 */
+/** 旧版 codex 钩子的配置路径。 */
 export const CODEX_HOOKS_PATH = join(homedir(), '.codex', 'hooks.json');
-/**
- * 挂这三个事件：
- * - SessionStart：开新会话前把该换的换掉，这是切换真正能立刻生效的唯一时机。
- * - UserPromptSubmit：每次提问前看一眼，用的是缓存，通常不出网。
- * - Stop：一轮答完，会话记录里刚写下这一轮的 rate_limits，此时判定最准。
- */
+/** 旧版集成使用的三个 Codex 事件。 */
 export const CODEX_EVENTS = ['SessionStart', 'UserPromptSubmit', 'Stop'] as const;
 
 /** OpenCode 的插件目录候选。不同版本用过两个名字，本机已经有哪个就用哪个。 */
@@ -103,31 +90,6 @@ function withoutOwnHooks(entries: CodexEntry[], command: string): { entries: Cod
     if (hooks.length > 0) kept.push(hooks.length === entry.hooks.length ? entry : { ...entry, hooks });
   }
   return { entries: kept, removed };
-}
-
-/** codex 钩子里我们自己那条。timeout 给 20 秒：最坏情况是逐个候选账户查一次额度。 */
-function codexEntry(command: string): CodexEntry {
-  return { hooks: [{ type: 'command', command, timeout: 20 }] };
-}
-
-export async function installCodex(command: string): Promise<InstallReport> {
-  const data = (await readJson(CODEX_HOOKS_PATH)) ?? {};
-  const hooks = (data.hooks && typeof data.hooks === 'object' ? data.hooks : {}) as Record<
-    string,
-    CodexEntry[]
-  >;
-  const changes: string[] = [];
-
-  for (const event of CODEX_EVENTS) {
-    const list = Array.isArray(hooks[event]) ? hooks[event] : [];
-    const cleaned = withoutOwnHooks(list, command);
-    hooks[event] = [...cleaned.entries, codexEntry(command)];
-    changes.push(`${cleaned.removed ? '更新' : '新增'} ${event} 钩子`);
-  }
-
-  data.hooks = hooks;
-  await writeAtomic(CODEX_HOOKS_PATH, `${JSON.stringify(data, null, 2)}\n`);
-  return { changes, paths: [CODEX_HOOKS_PATH] };
 }
 
 export async function uninstallCodex(): Promise<InstallReport> {
@@ -214,27 +176,6 @@ async function readPiExtension(path: string): Promise<string | null> {
   if (details === null) return null;
   if (!details.isFile()) return '';
   return readFile(path, 'utf8');
-}
-
-export async function installPi(command: readonly string[]): Promise<InstallReport> {
-  const path = piExtensionPath();
-  const source = piExtensionSource(command);
-  await mkdir(dirname(path), { recursive: true });
-  return withPiExtensionLock(path, async () => {
-    const previous = await readPiExtension(path);
-    if (previous !== null && !previous.startsWith(`${PI_EXTENSION_MARKER}\n`)) {
-      return { changes: [`${path} 不是本程序生成的，没有动它`], paths: [] };
-    }
-    if (previous === source) return { changes: [`Pi 扩展已是最新 ${path}`], paths: [] };
-    const temporary = `${path}.${randomUUID()}.quotahot-tmp`;
-    try {
-      await writeFile(temporary, source, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-      await rename(temporary, path);
-    } finally {
-      await rm(temporary, { force: true });
-    }
-    return { changes: [`${previous === null ? '新增' : '更新'} Pi 扩展 ${path}`], paths: [path] };
-  });
 }
 
 export async function uninstallPi(): Promise<InstallReport> {

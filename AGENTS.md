@@ -14,7 +14,7 @@
 ## 仓库结构
 
 - 根目录包是 Hono/React QuotaHot Web 服务，命令为 `quotahot`。`src/main.ts` 是 CLI 入口；`src/server/main.ts` 启动 HTTP/SSE 服务；`src/web/` 存放 React 界面；`src/shared/` 存放共享类型、调度逻辑和工具函数。
-- `hooks/` 是独立的 `quotahot-hook` 包，用于切换 Codex、OpenCode 或 Claude Code 账户，不会导入根应用，也不会启动 Web 服务。两者唯一的共享契约是 `QUOTAHOT_DATA_DIR` 下的磁盘数据，默认目录为 `~/.quotahot`。根包和 hook 的版本必须保持一致，`hooks/scripts/build.mjs` 会拒绝版本不匹配。
+- `hooks/` 是独立的 `quotahot-hook` 包，仅由 OpenCode 插件在 OpenAI（Codex）额度错误时自动触发账户切换；Claude 账户需手动执行 `quotahot-hook switch --provider claude`。切换时可同步写回 Codex CLI、OpenCode、Claude Code 及已存在的 Pi 凭证；Codex/Pi 旧插件安装入口已移除，仅保留自有旧集成清理。hook 不会导入根应用，也不会启动 Web 服务。两者唯一的共享契约是 `QUOTAHOT_DATA_DIR` 下的磁盘数据，默认目录为 `~/.quotahot`。根包和 hook 的版本必须保持一致，`hooks/scripts/build.mjs` 会拒绝版本不匹配。
 - QuotaHot 使用 `QUOTAHOT_*` 环境变量、`quotahot.service` 和 `quotahot.js` OpenCode 插件；用户可见品牌为 QuotaHot。
 - Node.js 需要 24 或更高版本，因为项目使用内置的 `node:sqlite`。两个包都使用原生 ESM 源码，并打包为可运行的 CommonJS 可执行文件。
 
@@ -30,4 +30,4 @@
 
 - 根目录 `tsconfig.json` 只包含 `src/**/*.ts`、`src/**/*.tsx` 和 `vite.config.ts`。Hook 代码由 `hooks/tsconfig.json` 检查，因此修改 `hooks/` 后必须单独执行 hook 的检查命令。
 - 应用会在自己的数据目录中持久化状态和账户副本。不要直接编辑或复用上游客户端的凭证文件；请使用 `README.md` 中说明的导入和同步流程。
-- `scripts/install.sh` 会在 Linux 上安装根服务为 systemd 用户服务，不需要 `sudo`；`hooks/scripts/install.sh` 会注册客户端集成。两个安装脚本都会修改用户配置且直接覆盖旧文件、不留备份，检查行为时优先使用 dry-run 或 help 模式。
+- `scripts/install.sh` 会在 Linux 上安装根服务为 systemd 用户服务，不需要 `sudo`；`hooks/scripts/install.sh` 会注册 OpenCode 插件并清理 QuotaHot 自有的旧 Codex/Pi 触发集成，不修改凭证文件。两个安装脚本都会修改用户配置且直接覆盖旧文件、不留备份，检查行为时优先使用 dry-run 或 help 模式。

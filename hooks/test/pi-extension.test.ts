@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { access, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import lockfile from 'proper-lockfile';
-import { installPi, piExtensionPath, piExtensionSource, uninstallPi } from '../src/install.js';
+import { piExtensionPath, uninstallPi } from '../src/install.js';
+
+const marker = '// quotahot:pi-extension\n';
 
 const entry = resolve('src/index.ts');
 
@@ -18,7 +20,7 @@ function invoke(args: readonly string[], env: NodeJS.ProcessEnv, input = ''): Pr
   });
 }
 
-test('Pi install respects the agent directory, ownership marker, and other extensions', async (context) => {
+test('Pi uninstall removes only the marked regular extension and leaves auth and other extensions intact', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'quotahot-pi-install-'));
   context.after(() => rm(root, { recursive: true, force: true }));
   const old = process.env.PI_CODING_AGENT_DIR;
@@ -29,27 +31,31 @@ test('Pi install respects the agent directory, ownership marker, and other exten
   await mkdir(join(root, 'pi-agent', 'extensions'), { recursive: true });
   const other = join(root, 'pi-agent', 'extensions', 'other.ts');
   await writeFile(other, 'keep');
-
-  // Given: an unowned file at the target path.
+  const auth = join(root, 'pi-agent', 'auth.json');
+  await writeFile(auth, '{"anthropic":{"access":"keep-auth"}}');
   await writeFile(path, 'unowned');
-  // When: install and uninstall are attempted.
-  assert.deepEqual((await installPi(['/tmp/hook'])).paths, []);
-  assert.deepEqual((await uninstallPi()).paths, []);
-  // Then: neither operation alters that file.
-  assert.equal(await readFile(path, 'utf8'), 'unowned');
 
+  assert.deepEqual((await uninstallPi()).paths, []);
+  assert.equal(await readFile(path, 'utf8'), 'unowned');
   await rm(path);
-  const installed = await installPi(['/tmp/hook']);
-  assert.deepEqual(installed.paths, [path]);
-  assert.equal(await readFile(path, 'utf8'), piExtensionSource(['/tmp/hook']));
-  await installPi(['/tmp/hook']);
-  assert.equal(await readFile(path, 'utf8'), piExtensionSource(['/tmp/hook']));
-  await installPi(['/tmp/new hook']);
-  assert.equal(await readFile(path, 'utf8'), piExtensionSource(['/tmp/new hook']));
-  assert.deepEqual(await readdir(join(root, 'pi-agent', 'extensions')), ['other.ts', 'quotahot-hook.ts']);
+  await writeFile(path, `${marker}old integration`);
   assert.deepEqual((await uninstallPi()).paths, [path]);
   await assert.rejects(access(path));
   assert.equal(await readFile(other, 'utf8'), 'keep');
+  assert.equal(await readFile(auth, 'utf8'), '{"anthropic":{"access":"keep-auth"}}');
+});
+
+test('Pi uninstall leaves an absent extensions directory absent', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'quotahot-pi-no-dir-'));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const previousAgent = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, 'agent');
+  context.after(() => { if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent; });
+  const path = piExtensionPath();
+
+  assert.deepEqual((await uninstallPi()).paths, []);
+  await assert.rejects(access(join(root, 'agent', 'extensions')));
+  await assert.rejects(access(path));
 });
 
 test('Pi path defaults to the user agent extensions directory', () => {
@@ -57,31 +63,6 @@ test('Pi path defaults to the user agent extensions directory', () => {
   delete process.env.PI_CODING_AGENT_DIR;
   try { assert.equal(piExtensionPath(), join(process.env.HOME ?? '', '.pi', 'agent', 'extensions', 'quotahot-hook.ts')); }
   finally { if (old === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = old; }
-});
-
-test('Pi install waits for path lock and preserves an unowned replacement', async (context) => {
-  // Given: an owned Pi extension while another operation holds its path lock.
-  const root = await mkdtemp(join(tmpdir(), 'quotahot-pi-install-lock-'));
-  context.after(() => rm(root, { recursive: true, force: true }));
-  const previousAgent = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = root;
-  context.after(() => { if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent; });
-  const path = piExtensionPath();
-  await mkdir(join(root, 'extensions'), { recursive: true });
-  await writeFile(path, piExtensionSource(['/old-hook']));
-  const release = await lockfile.lock(path, { realpath: false, stale: 30_000 });
-  // When: install begins while locked, then another writer replaces the file before unlock.
-  const installing = installPi(['/new-hook']);
-  try {
-    const completed = installing.then(() => true);
-    assert.equal(await Promise.race([completed, new Promise<boolean>((resolveWaiting) => setTimeout(() => resolveWaiting(false), 150))]), false);
-    await writeFile(path, 'unowned replacement');
-  } finally {
-    await release();
-  }
-  // Then: install rechecks ownership after acquiring the lock.
-  assert.deepEqual((await installing).paths, []);
-  assert.equal(await readFile(path, 'utf8'), 'unowned replacement');
 });
 
 test('Pi uninstall waits for path lock and preserves an unowned replacement', async (context) => {
@@ -93,7 +74,7 @@ test('Pi uninstall waits for path lock and preserves an unowned replacement', as
   context.after(() => { if (previousAgent === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previousAgent; });
   const path = piExtensionPath();
   await mkdir(join(root, 'extensions'), { recursive: true });
-  await writeFile(path, piExtensionSource(['/old-hook']));
+  await writeFile(path, `${marker}old integration`);
   const release = await lockfile.lock(path, { realpath: false, stale: 30_000 });
   // When: uninstall begins while locked, then another writer replaces the file before unlock.
   const uninstalling = uninstallPi();
@@ -109,7 +90,7 @@ test('Pi uninstall waits for path lock and preserves an unowned replacement', as
   assert.equal(await readFile(path, 'utf8'), 'unowned replacement');
 });
 
-test('Pi install and uninstall preserve a symlink even when its target has our marker', async (context) => {
+test('Pi uninstall preserves a symlink even when its target has our marker', async (context) => {
   // Given: a third-party symlink pointing at an otherwise owned-looking extension.
   const root = await mkdtemp(join(tmpdir(), 'quotahot-pi-symlink-'));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -119,88 +100,16 @@ test('Pi install and uninstall preserve a symlink even when its target has our m
   const path = piExtensionPath();
   const target = join(root, 'custom.ts');
   await mkdir(join(root, 'extensions'), { recursive: true });
-  await writeFile(target, piExtensionSource(['/old-hook']));
+  await writeFile(target, `${marker}old integration`);
   await symlink(target, path);
-  // When: both operations inspect the symlink.
-  assert.deepEqual((await installPi(['/new-hook'])).paths, []);
+  // When: uninstall inspects the symlink.
   assert.deepEqual((await uninstallPi()).paths, []);
-  // Then: neither operation replaces the link or alters its target.
+  // Then: it neither removes the link nor alters its target.
   assert.equal((await lstat(path)).isSymbolicLink(), true);
-  assert.equal(await readFile(target, 'utf8'), piExtensionSource(['/old-hook']));
+  assert.equal(await readFile(target, 'utf8'), `${marker}old integration`);
 });
 
-test('Pi quota errors share one recovery poll per provider and never replay the failed message', async (context) => {
-  const root = await mkdtemp(join(tmpdir(), 'quotahot-pi-recovery-'));
-  context.after(() => rm(root, { recursive: true, force: true }));
-  const hook = join(root, 'hook.mjs');
-  const calls = join(root, 'calls.jsonl');
-  await writeFile(hook, `import { appendFileSync, readFileSync } from 'node:fs';
-let text = ''; for await (const chunk of process.stdin) text += chunk;
-appendFileSync(process.env.PI_RECOVERY_CALLS, text + '\\n');
-const count = readFileSync(process.env.PI_RECOVERY_CALLS, 'utf8').trim().split('\\n').length;
-process.stdout.write(JSON.stringify({ switched: count > 2, outcome: count > 2 ? 'switched' : 'no_candidate' }));`);
-  const extension = join(root, 'extension.ts');
-  await writeFile(extension, piExtensionSource([process.execPath, hook]).replace('1800000', '80'));
-  const { default: install } = await import(extension);
-  const listeners = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
-  install({ on: (name: string, callback: (event: unknown, ctx: unknown) => Promise<void>) => listeners.set(name, callback) });
-  const onMessage = listeners.get('message_end');
-  assert.ok(onMessage);
-  const previous = process.env.PI_RECOVERY_CALLS;
-  process.env.PI_RECOVERY_CALLS = calls;
-  context.after(() => { if (previous === undefined) delete process.env.PI_RECOVERY_CALLS; else process.env.PI_RECOVERY_CALLS = previous; });
-  const message = { role: 'assistant', provider: 'openai-codex', stopReason: 'error', errorMessage: 'quota_exceeded' };
-  await onMessage({ message }, { ui: { notify: () => {} } });
-  await onMessage({ message }, { ui: { notify: () => {} } });
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  const recorded = (await readFile(calls, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-  assert.equal(recorded.length, 3);
-  assert.deepEqual(recorded[2], { source: 'pi', recover: true, provider: 'openai-codex' });
-  assert.equal(listeners.has('before_agent_start'), false);
-});
-
-test('Pi generated extension filters finalized quota errors and fails open on hook failure', async (context) => {
-  const root = await mkdtemp(join(tmpdir(), 'quotahot-pi-extension-'));
-  context.after(() => rm(root, { recursive: true, force: true }));
-  const hook = join(root, 'fake hook.mjs');
-  const calls = join(root, 'calls.jsonl');
-  await writeFile(hook, `import { appendFileSync } from 'node:fs';
-let body = ''; for await (const chunk of process.stdin) body += chunk;
-appendFileSync(process.env.CALLS, JSON.stringify({ args: process.argv.slice(2), body }) + '\\n');
-if (process.env.FAIL_HOOK === '1') process.exit(1);
-process.stdout.write(JSON.stringify({ switched: true, message: body, outcome: 'switched' }));`);
-  const path = join(root, 'extension.ts');
-  await writeFile(path, piExtensionSource([process.execPath, hook, 'run', 'pi']));
-  const generated = await import(path);
-  const notifications: string[] = [];
-  const listeners = new Map<string, (event: { message: unknown }, ctx: { ui: { notify: (message: string) => void } }) => Promise<void>>();
-  generated.default({ on: (name: string, handler: (event: { message: unknown }, ctx: { ui: { notify: (message: string) => void } }) => Promise<void>) => listeners.set(name, handler) });
-  const handle = listeners.get('message_end');
-  assert.ok(handle);
-  const ctx = { ui: { notify: (message: string) => notifications.push(message) } };
-  const oldCalls = process.env.CALLS;
-  const oldFail = process.env.FAIL_HOOK;
-  process.env.CALLS = calls;
-  context.after(() => { if (oldCalls === undefined) delete process.env.CALLS; else process.env.CALLS = oldCalls; if (oldFail === undefined) delete process.env.FAIL_HOOK; else process.env.FAIL_HOOK = oldFail; });
-  const message = { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: 'quota_exceeded secret-value' };
-  for (const ignored of [
-    { ...message, role: 'user' }, { ...message, stopReason: 'stop' },
-    { ...message, provider: 'other' }, { ...message, errorMessage: 'context limit exceeded' },
-    { ...message, errorMessage: 'overloaded' },
-  ]) await handle({ message: ignored }, ctx);
-  await assert.rejects(access(calls));
-  await handle({ message }, ctx);
-  assert.equal(notifications.length, 1);
-  assert.doesNotMatch(notifications[0] ?? '', /secret-value/);
-  const recorded = (await readFile(calls, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
-  assert.deepEqual(recorded[0].args, ['run', 'pi']);
-  assert.deepEqual(JSON.parse(recorded[0].body), message);
-  process.env.FAIL_HOOK = '1';
-  await assert.doesNotReject(handle({ message: { ...message, provider: 'openai-codex' } }, ctx));
-  assert.equal(notifications.length, 1);
-});
-
-test('Pi quota event runs actual CLI and synchronizes same-provider clients', async (context) => {
+test('default install removes the Pi trigger and manual Pi events cannot switch credentials', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'quotahot-pi-real-'));
   context.after(() => rm(root, { recursive: true, force: true }));
   const agent = join(root, 'pi-agent');
@@ -215,34 +124,14 @@ test('Pi quota event runs actual CLI and synchronizes same-provider clients', as
     refresh_token: `refresh-${name}`, expired: new Date(Date.now() + 86_400_000).toISOString(), auto_refresh: true,
   }));
   const env = { ...process.env, HOME: root, PI_CODING_AGENT_DIR: agent, QUOTAHOT_DATA_DIR: data, XDG_CONFIG_HOME: join(root, 'config'), XDG_DATA_HOME: join(root, 'client-data') };
-  const installed = await invoke(['install', 'pi'], env);
+  const installed = await invoke(['install'], env);
   assert.equal(installed.code, 0, installed.stderr);
   const direct = await invoke(['run', 'pi', '--no-check'], env);
-  assert.equal(direct.code, 0, direct.stderr);
-  assert.equal(direct.stdout.trim(), '{}');
-  const extension = await readFile(join(agent, 'extensions', 'quotahot-hook.ts'), 'utf8');
-  assert.doesNotMatch(extension, /\.\.\/src\//);
-  const e2eExtension = join(root, 'e2e-extension.ts');
-  await writeFile(e2eExtension, piExtensionSource([process.execPath, '--import', import.meta.resolve('tsx'), entry, 'run', 'pi', '--no-check', '--min-interval-seconds', '0']));
-  const generated = await import(e2eExtension);
-  const listeners = new Map<string, (event: { message: unknown }, ctx: { ui: { notify: (message: string) => void } }) => Promise<void>>();
-  generated.default({ on: (name: string, handler: (event: { message: unknown }, ctx: { ui: { notify: (message: string) => void } }) => Promise<void>) => listeners.set(name, handler) });
-  const handle = listeners.get('message_end');
-  assert.ok(handle);
-  const notifications: string[] = [];
-  const saved = { HOME: process.env.HOME, PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR, QUOTAHOT_DATA_DIR: process.env.QUOTAHOT_DATA_DIR, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, XDG_DATA_HOME: process.env.XDG_DATA_HOME };
-  Object.assign(process.env, env);
-  try {
-    await handle({ message: { role: 'assistant', provider: 'openai-codex', stopReason: 'error', errorMessage: 'quota_exceeded' } }, { ui: { notify: (message: string) => notifications.push(message) } });
-  } finally {
-    for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
-  }
+  assert.equal(direct.code, 2, direct.stderr);
+  await assert.rejects(access(join(agent, 'extensions', 'quotahot-hook.ts')));
   const result = JSON.parse(await readFile(auth, 'utf8'));
-  assert.equal(result['openai-codex'].access, 'token-b');
+  assert.equal(result['openai-codex'].access, 'token-a');
   assert.deepEqual(result.anthropic, unchanged);
-  assert.equal(notifications.length, 1);
-  assert.doesNotMatch(notifications[0] ?? '', /a@x\.com|b@x\.com|token/);
-  const codex = JSON.parse(await readFile(join(root, '.codex', 'auth.json'), 'utf8'));
-  assert.equal(codex.tokens.access_token, 'token-b');
+  await assert.rejects(access(join(root, '.codex', 'auth.json')));
   await assert.rejects(access(join(root, 'client-data', 'opencode', 'auth.json')));
 });

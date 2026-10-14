@@ -38,7 +38,7 @@ esac
   if (originalArgv === undefined) delete process.argv[1];
   else process.argv[1] = originalArgv;
   const environment = { ...process.env, HOME: root, XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: dataHome, QUOTAHOT_DATA_DIR: dataHome };
-  await exec(process.execPath, ['--import', import.meta.resolve('tsx'), resolve('src/index.ts'), 'install', 'opencode'], { cwd: process.cwd(), env: environment });
+  await exec(process.execPath, ['--import', import.meta.resolve('tsx'), resolve('src/index.ts'), 'install'], { cwd: process.cwd(), env: environment });
   const installedPath = join(configHome, 'opencode', 'plugin', 'quotahot.js');
   assert.equal(await readFile(installedPath, 'utf8'), opencodePlugin([...invocation, 'run', 'opencode']));
 
@@ -117,4 +117,61 @@ exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.r
     } } });
     assert.equal(JSON.parse(await readFile(authPath, 'utf8')).openai.access, 'token-b@x.com');
   }
+});
+
+test('OpenCode quota event switches Codex CLI and existing Pi Codex without changing Pi Anthropic', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'quotahot-plugin-client-sync-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'quotahot-data');
+  const dataHome = join(root, 'client-data');
+  const piDir = join(root, 'pi-agent');
+  const accountsDir = join(dataDir, 'accounts');
+  const opencodePath = join(dataHome, 'opencode', 'auth.json');
+  const codexPath = join(root, '.codex', 'auth.json');
+  const piPath = join(piDir, 'auth.json');
+  await mkdir(accountsDir, { recursive: true });
+  await mkdir(join(dataHome, 'opencode'), { recursive: true });
+  await mkdir(join(root, '.codex'), { recursive: true });
+  await mkdir(piDir, { recursive: true });
+  for (const email of ['a@x.com', 'b@x.com']) {
+    await writeFile(join(accountsDir, `codex-${email}.json`), JSON.stringify({
+      type: 'codex', email, account_id: `acct-${email}`, access_token: `token-${email}`,
+      refresh_token: `refresh-${email}`, expired: new Date(Date.now() + 86_400_000).toISOString(),
+      source: 'codex-cli', sync_source: 'codex-cli', auto_refresh: true,
+    }));
+  }
+  const anthropic = { type: 'oauth', access: 'anthropic-token', refresh: 'anthropic-refresh', expires: 123 };
+  await writeFile(opencodePath, JSON.stringify({ openai: { type: 'oauth', access: 'token-a@x.com' } }));
+  await writeFile(codexPath, JSON.stringify({ tokens: { access_token: 'token-a@x.com', account_id: 'acct-a@x.com' } }));
+  await writeFile(piPath, JSON.stringify({
+    'openai-codex': { type: 'oauth', access: 'token-a@x.com', refresh: 'refresh-a@x.com', expires: 123, accountId: 'acct-a@x.com' },
+    anthropic,
+  }));
+
+  const wrapper = join(root, 'real-hook');
+  await writeFile(wrapper, `#!/bin/sh
+export HOME=${JSON.stringify(root)}
+export XDG_DATA_HOME=${JSON.stringify(dataHome)}
+export QUOTAHOT_DATA_DIR=${JSON.stringify(dataDir)}
+export PI_CODING_AGENT_DIR=${JSON.stringify(piDir)}
+exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.resolve('tsx'))} ${JSON.stringify(resolve('src/index.ts'))} run opencode --no-check --min-interval-seconds 0
+`);
+  await chmod(wrapper, 0o700);
+  const pluginPath = join(root, 'plugin.mjs');
+  await writeFile(pluginPath, opencodePlugin(wrapper));
+  const { QuotaHot } = await import(pluginPath);
+  const plugin = await QuotaHot({ client: {} });
+
+  await plugin.event({ event: { type: 'message.updated', properties: { info: {
+    id: 'quota-message', sessionID: 'quota-session', role: 'assistant', providerID: 'openai', time: { created: 1 },
+  } } } });
+  await plugin.event({ event: { type: 'session.status', properties: {
+    sessionID: 'quota-session', status: { type: 'retry', message: 'quota_exhausted' },
+  } } });
+
+  assert.equal(JSON.parse(await readFile(opencodePath, 'utf8')).openai.access, 'token-b@x.com');
+  assert.equal(JSON.parse(await readFile(codexPath, 'utf8')).tokens.access_token, 'token-b@x.com');
+  const piAuth = JSON.parse(await readFile(piPath, 'utf8'));
+  assert.equal(piAuth['openai-codex'].access, 'token-b@x.com');
+  assert.deepEqual(piAuth.anthropic, anthropic);
 });

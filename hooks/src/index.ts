@@ -11,16 +11,9 @@ import {
 } from './switcher.js';
 import { runHook } from './runtime.js';
 import {
-  CODEX_EVENTS,
-  CODEX_HOOKS_PATH,
-  installCodex,
   installOpencode,
-  installPi,
   opencodePlugin,
   opencodePluginPath,
-  piExtensionPath,
-  piExtensionSource,
-  selfCommand,
   selfInvocation,
   uninstallCodex,
   uninstallOpencode,
@@ -35,9 +28,9 @@ const HELP = `QuotaHot Hook - standalone account switching hooks
 Usage:
   quotahot-hook status [options]
   quotahot-hook switch [options]
-  quotahot-hook run <codex|opencode|pi> [options]
-  quotahot-hook install [codex|opencode|pi|all] [--print]
-  quotahot-hook uninstall [codex|opencode|pi|all]
+  quotahot-hook run opencode [options]
+  quotahot-hook install [--print]
+  quotahot-hook uninstall
   quotahot-hook help
   quotahot-hook version
   quotahot-hook --version
@@ -67,7 +60,7 @@ Options:
   --dry-run
   --json
 `,
-  run: `Usage: quotahot-hook run <codex|opencode|pi> [options]
+  run: `Usage: quotahot-hook run opencode [options]
 
 Options:
   --provider <codex|claude>
@@ -80,12 +73,12 @@ Options:
   --dry-run
   --json
 `,
-  install: `Usage: quotahot-hook install [codex|opencode|pi|all] [--print]
+  install: `Usage: quotahot-hook install [--print]
 
 Options:
   --print
 `,
-  uninstall: 'Usage: quotahot-hook uninstall [codex|opencode|pi|all]\n',
+  uninstall: 'Usage: quotahot-hook uninstall\n',
 };
 
 class UsageError extends Error {}
@@ -168,45 +161,27 @@ async function readStdin(): Promise<string> {
 }
 
 async function runEvent(client: string | undefined, flags: Flags): Promise<number> {
-  if (client !== 'codex' && client !== 'opencode' && client !== 'pi') return 2;
+  if (client !== 'opencode' || flags.positional.length !== 1) return 2;
   try {
     const output = await runHook(client, await readStdin(), switchOptions(flags));
     console.log(output.stdout);
     if (flags.bools.has('json')) console.error(JSON.stringify({ outcome: output.outcome }));
   } catch {
     console.error('quotahot-hook outcome: unknown');
-    console.log(client === 'codex' ? '{"outcome":"unknown"}' : client === 'pi' ? '{}' : '{"switched":false,"outcome":"unknown"}');
+    console.log('{"switched":false,"outcome":"unknown"}');
   }
   return 0;
 }
 
-function validTarget(target: string): target is 'all' | 'codex' | 'opencode' | 'pi' {
-  return target === 'all' || target === 'codex' || target === 'opencode' || target === 'pi';
-}
-
 async function install(flags: Flags, remove: boolean): Promise<number> {
-  const target = flags.positional[0] ?? 'all';
-  if (!validTarget(target)) throw new UsageError(`Invalid target: ${target}`);
-  const command = selfCommand();
+  if (flags.positional.length > 0) throw new UsageError(`Unexpected target: ${flags.positional[0]}`);
   if (flags.bools.has('print')) {
-    const parts: string[] = [];
-    if (target === 'all' || target === 'codex') {
-      const entry = [{ hooks: [{ type: 'command', command: `${command} run codex`, timeout: 20 }] }];
-      parts.push(`# ${CODEX_HOOKS_PATH}\n${JSON.stringify({ hooks: Object.fromEntries(CODEX_EVENTS.map((event) => [event, entry])) }, null, 2)}`);
-    }
-    if (target === 'all' || target === 'opencode') {
-      parts.push(`# ${await opencodePluginPath()}\n${opencodePlugin([...selfInvocation(), 'run', 'opencode'])}`);
-    }
-    if (target === 'all' || target === 'pi') {
-      parts.push(`# ${piExtensionPath()}\n${piExtensionSource([...selfInvocation(), 'run', 'pi'])}`);
-    }
-    console.log(parts.join('\n\n'));
+    console.log(`# ${await opencodePluginPath()}\n${opencodePlugin([...selfInvocation(), 'run', 'opencode'])}`);
     return 0;
   }
-  const reports: InstallReport[] = [];
-  if (target === 'all' || target === 'codex') reports.push(remove ? await uninstallCodex() : await installCodex(`${command} run codex`));
-  if (target === 'all' || target === 'opencode') reports.push(remove ? await uninstallOpencode() : await installOpencode([...selfInvocation(), 'run', 'opencode']));
-  if (target === 'all' || target === 'pi') reports.push(remove ? await uninstallPi() : await installPi([...selfInvocation(), 'run', 'pi']));
+  const reports: InstallReport[] = remove
+    ? await Promise.all([uninstallOpencode(), uninstallCodex(), uninstallPi()])
+    : [await installOpencode([...selfInvocation(), 'run', 'opencode']), await uninstallCodex(), await uninstallPi()];
   for (const report of reports) for (const change of report.changes) console.log(change);
   return 0;
 }

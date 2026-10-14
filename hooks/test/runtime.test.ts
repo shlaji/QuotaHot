@@ -1,16 +1,6 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { SwitchOptions, SwitchResult } from '../src/switcher.js';
-
-/**
- * 钩子这一层只做一件事：把 codex / OpenCode 各自的载荷翻译成「撞没撞上限额」。
- * 所以真正的切换被替换掉了，断言集中在两处容易出错的地方——从会话记录尾部认限额数字，
- * 以及别把上下文超长、服务端过载这些跟限额无关的报错也当成限额。
- */
-  const dir = mkdtempSync(join(tmpdir(), 'quotahot-hook-'));
 
 /** 每次调用 switchAccount 时收到的选项，用来断言钩子传下去的 exhausted / reason。 */
 let calls: Array<Partial<SwitchOptions> & { usageTransport?: string }> = [];
@@ -26,7 +16,7 @@ let reply: SwitchResult = {
 };
 
 const real = await import('../src/switcher.js');
-  mock.module('../src/switcher.js', {
+mock.module('../src/switcher.js', {
   exports: {
     ...real,
     switchAccount: async (opts: Partial<SwitchOptions>): Promise<SwitchResult> => {
@@ -36,101 +26,7 @@ const real = await import('../src/switcher.js');
   },
 });
 
-const { runHook, codexWindows, opencodeSignal } = await import('../src/runtime.js');
-
-/** 造一份 codex 的会话记录：每行一条 JSON，限额信息藏在中间那条。 */
-function rollout(lines: string[], prefix = ''): string {
-  const path = join(dir, `rollout-${Math.random().toString(36).slice(2)}.jsonl`);
-  writeFileSync(path, prefix + lines.join('\n'), 'utf8');
-  return path;
-}
-
-function turn(primaryPercent: number, resetSeconds: number): string {
-  return JSON.stringify({
-    type: 'event_msg',
-    payload: {
-      rate_limits: {
-        primary: {
-          used_percent: primaryPercent,
-          window_minutes: 300,
-          resets_at: Math.floor(Date.now() / 1000) + resetSeconds,
-        },
-      },
-    },
-  });
-}
-
-test('从会话记录尾部读出最近一轮的限额数字', async () => {
-  const path = rollout([
-    turn(10, 3600),
-    turn(88, 3600),
-    JSON.stringify({ type: 'function_call', name: 'shell' }),
-  ]);
-  const windows = await codexWindows(path);
-
-  assert.equal(windows.length, 1);
-  // 取的是最后一条带 rate_limits 的，不是第一条
-  assert.equal(Math.round(windows[0].usedPercent ?? 0), 88);
-});
-
-test('开头那行被截断也照样能读后面的', async () => {
-  // 只读末尾若干字节意味着第一行几乎总是半截 JSON，解析失败必须跳过而不是放弃整份文件
-  const path = rollout([turn(77, 3600)], '{"type":"session_meta","payl\n');
-  const windows = await codexWindows(path);
-
-  assert.equal(Math.round(windows[0]?.usedPercent ?? 0), 77);
-});
-
-test('没有会话记录时不报错，只是没有本地证据', async () => {
-  assert.deepEqual(await codexWindows(''), []);
-  assert.deepEqual(await codexWindows(join(dir, '并不存在.jsonl')), []);
-  assert.deepEqual(await codexWindows(rollout([JSON.stringify({ type: 'response_item' })])), []);
-});
-
-test('与额度无关的 codex 事件直接放过，不去碰账户', async () => {
-  calls = [];
-  const out = await runHook('codex', JSON.stringify({ hook_event_name: 'PreToolUse' }));
-
-  assert.equal(out.stdout, '{}');
-  assert.equal(out.result, null);
-  assert.deepEqual(calls, []);
-});
-
-test('会话记录显示用尽时，带着 exhausted 交给切换', async () => {
-  calls = [];
-  const path = rollout([turn(99, 3600)]);
-  const out = await runHook('codex', JSON.stringify({ hook_event_name: 'Stop', transcript_path: path }));
-
-  assert.equal(calls[0].exhausted, true);
-  assert.equal(calls[0].usageTransport, undefined);
-  assert.equal(calls[0].usageQuery, undefined);
-  assert.equal(calls[0].triggerClient, 'codex-cli');
-  assert.match(calls[0].reason ?? '', /99%/);
-  // 换完必须提醒重开会话：codex 会话中途不会重载 auth.json
-  const stdout = JSON.parse(out.stdout);
-  assert.match(stdout.systemMessage, /新会话/);
-});
-
-test('额度还够时也走一遍例行检查，但不声称已用尽', async () => {
-  calls = [];
-  reply = { ...reply, switched: false, message: 'a@x.com 仍有额度（已用 30%），不切换', to: '' };
-  const path = rollout([turn(30, 3600)]);
-  const out = await runHook('codex', JSON.stringify({ hook_event_name: 'UserPromptSubmit', transcript_path: path }));
-
-  assert.equal(calls[0].exhausted, false);
-  // 没撞上限额又没换成：不该往用户屏幕上弹任何东西
-  assert.equal(out.stdout, '{}');
-});
-
-test('撞上限额却没换成时，把原因告诉用户', async () => {
-  calls = [];
-  reply = { ...reply, switched: false, message: '所有 codex 账户都已用尽', to: '' };
-  const path = rollout([turn(100, 3600)]);
-  const out = await runHook('codex', JSON.stringify({ hook_event_name: 'Stop', transcript_path: path }));
-
-  const stdout = JSON.parse(out.stdout);
-  assert.match(stdout.systemMessage, /都已用尽/);
-});
+const { runHook, opencodeSignal } = await import('../src/runtime.js');
 
 test('认得出 OpenCode 事件里的限额', () => {
   assert.equal(opencodeSignal({ event: { properties: { error: { status: 429 } } } }).hit, true);
@@ -210,42 +106,16 @@ test('OpenCode recovery reports available while the current account is usable', 
   assert.deepEqual(JSON.parse(out.stdout), { switched: false, outcome: 'available' });
 });
 
-for (const [provider, accountProvider, triggerClient] of [
-  ['anthropic', 'claude', 'pi-claude'],
-  ['openai-codex', 'codex', 'pi-codex'],
-] as const) {
-  test(`Pi ${provider} recovery polls the mapped account pool`, async () => {
-    calls = [];
-    reply = { ...reply, switched: true, checked: [], written: [], to: 'private@example.invalid' };
-    const out = await runHook('pi', JSON.stringify({ source: 'pi', recover: true, provider }));
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].provider, accountProvider);
-    assert.equal(calls[0].triggerClient, triggerClient);
-    assert.equal(calls[0].recover, true);
-    assert.equal(calls[0].threshold, 100);
-    assert.equal(calls[0].cacheMs, 0);
-    assert.equal(calls[0].minIntervalMs, 0);
-    assert.equal(calls[0].exhausted, false);
-    assert.equal(out.outcome, 'switched');
-    assert.equal(JSON.parse(out.stdout).switched, true);
-    assert.doesNotMatch(out.stdout, /private@example/);
-  });
-}
-
-test('recovery requires exact source, provider, and recover flag', async () => {
+test('OpenCode recovery requires exact source, provider, and recover flag', async () => {
   calls = [];
   const inputs = [
-    ['opencode', { source: 'pi', recover: true, provider: 'openai' }],
-    ['opencode', { source: 'opencode', recover: true, provider: 'anthropic' }],
-    ['opencode', { source: 'opencode', recover: 'true', provider: 'openai' }],
-    ['opencode', { source: 'opencode', check: true, provider: 'openai' }],
-    ['pi', { source: 'opencode', recover: true, provider: 'anthropic' }],
-    ['pi', { source: 'pi', recover: true, provider: 'openai' }],
-    ['pi', { source: 'pi', recover: 1, provider: 'openai-codex' }],
-    ['pi', { source: 'pi', check: true, provider: 'anthropic' }],
+    { source: 'pi', recover: true, provider: 'openai' },
+    { source: 'opencode', recover: true, provider: 'anthropic' },
+    { source: 'opencode', recover: 'true', provider: 'openai' },
+    { source: 'opencode', check: true, provider: 'openai' },
   ] as const;
-  for (const [client, payload] of inputs) {
-    const out = await runHook(client, JSON.stringify(payload));
+  for (const payload of inputs) {
+    const out = await runHook('opencode', JSON.stringify(payload));
     assert.equal(out.result, null);
     assert.equal(out.outcome, 'skipped_no_signal');
     assert.equal(JSON.parse(out.stdout).switched ?? false, false);
@@ -262,39 +132,24 @@ test('explicit quota error wins over a recovery-shaped OpenCode payload', async 
   assert.equal(calls[0].cacheMs, 0);
 });
 
-test('finalized Pi quota error wins over a recovery-shaped payload', async () => {
+test('OpenCode recovery returns safe check failure outcome', async () => {
   calls = [];
-  reply = { ...reply, switched: false, checked: [], written: [] };
-  await runHook('pi', JSON.stringify({ source: 'pi', recover: true, provider: 'anthropic', role: 'assistant', stopReason: 'error', errorMessage: 'usage limit reached' }));
-  assert.equal(calls[0].exhausted, true);
-  assert.equal(calls[0].threshold, 100);
-  assert.equal(calls[0].cacheMs, 0);
+  reply = { ...reply, switched: false, checked: [{ id: 'private', email: 'private@example.invalid', usable: false, usedPercent: null, resetAt: 0, source: 'error', error: 'private-token' }], written: [] };
+  const out = await runHook('opencode', JSON.stringify({ source: 'opencode', recover: true, provider: 'openai' }));
+  assert.equal(out.outcome, 'check_failed');
+  assert.equal(JSON.parse(out.stdout).outcome, 'check_failed');
+  assert.doesNotMatch(out.stdout, /private|token/);
+  reply = { ...reply, checked: [] };
 });
 
-for (const client of ['opencode', 'pi'] as const) {
-  test(`${client} recovery returns safe check failure outcome`, async () => {
-    calls = [];
-    reply = { ...reply, switched: false, checked: [{ id: 'private', email: 'private@example.invalid', usable: false, usedPercent: null, resetAt: 0, source: 'error', error: 'private-token' }], written: [] };
-    const out = await runHook(client, JSON.stringify(client === 'pi'
-      ? { source: 'pi', recover: true, provider: 'anthropic' }
-      : { source: 'opencode', recover: true, provider: 'openai' }));
-    assert.equal(out.outcome, 'check_failed');
-    assert.equal(JSON.parse(out.stdout).outcome, 'check_failed');
-    assert.doesNotMatch(out.stdout, /private|token/);
-    reply = { ...reply, checked: [] };
-  });
-
-  test(`${client} recovery exposes safe wait time when all accounts are exhausted`, async () => {
-    calls = [];
-    const waitUntil = Date.now() + 60_000;
-    reply = { ...reply, switched: false, checked: [], written: [], waitUntil };
-    const out = await runHook(client, JSON.stringify(client === 'pi'
-      ? { source: 'pi', recover: true, provider: 'anthropic' }
-      : { source: 'opencode', recover: true, provider: 'openai' }));
-    assert.deepEqual(JSON.parse(out.stdout), { switched: false, outcome: 'no_candidate', waitUntil });
-    reply = { ...reply, waitUntil: 0 };
-  });
-}
+test('OpenCode recovery exposes safe wait time when all accounts are exhausted', async () => {
+  calls = [];
+  const waitUntil = Date.now() + 60_000;
+  reply = { ...reply, switched: false, checked: [], written: [], waitUntil };
+  const out = await runHook('opencode', JSON.stringify({ source: 'opencode', recover: true, provider: 'openai' }));
+  assert.deepEqual(JSON.parse(out.stdout), { switched: false, outcome: 'no_candidate', waitUntil });
+  reply = { ...reply, waitUntil: 0 };
+});
 
 test('OpenCode 撞上 429 时切换，结果按插件认得的形状返回', async () => {
   calls = [];
@@ -369,88 +224,23 @@ test('OpenCode 输出不回显子进程或切换结果中的敏感文本', async
   assert.doesNotMatch(out.stdout, /secret@example|sentinel|secret-body/);
 });
 
-for (const [provider, accountProvider, client] of [
-  ['anthropic', 'claude', 'pi-claude'],
-  ['openai-codex', 'codex', 'pi-codex'],
-] as const) {
-  test(`Pi ${provider} finalized quota error triggers same-provider synchronization`, async () => {
-    // Given: a finalized assistant quota failure with a sensitive error body.
-    calls = [];
-    reply = { ...reply, switched: true, message: 'private@example.invalid token=secret-token', from: 'private@example.invalid', to: 'other@example.invalid', checked: [], written: [] };
-    // When: Pi supplies the raw assistant message.
-    const out = await runHook('pi', JSON.stringify({ role: 'assistant', provider, stopReason: 'error', errorMessage: 'usage limit reached secret-error' }));
-    // Then: the shared switcher uses the Pi trigger with default same-provider targets and output is safe.
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].provider, accountProvider);
-    assert.equal(calls[0].clients, undefined);
-    assert.equal(calls[0].triggerClient, client);
-    assert.equal(calls[0].exhausted, true);
-    assert.equal(calls[0].cacheMs, 0);
-    assert.equal(calls[0].threshold, 100);
-    assert.equal(typeof calls[0].usageQuery, 'function');
-    assert.equal(out.outcome, 'switched');
-    assert.match(out.stdout, /不会自动重试/);
-    assert.match(out.stdout, /重新加载|重新解析/);
-    assert.doesNotMatch(out.stdout, /secret-error|secret-token|private@example|other@example/);
-  });
-}
-
-test('Pi ignores non-quota, unfinished, unknown-provider and malformed assistant messages', async () => {
-  // Given: none of these messages proves a finalized supported-provider quota failure.
-  const messages: readonly unknown[] = [
-    { role: 'user', provider: 'anthropic', stopReason: 'error', errorMessage: 'usage limit reached' },
-    { role: 'assistant', provider: 'anthropic', stopReason: 'stop', errorMessage: 'usage limit reached' },
-    { role: 'assistant', provider: 'other', stopReason: 'error', errorMessage: 'usage limit reached' },
-    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: 'context length limit exceeded' },
-    { role: 'assistant', provider: 'openai-codex', stopReason: 'error', errorMessage: 'server overloaded' },
-    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: '401 unauthorized' },
-    { role: 'assistant', provider: 'openai-codex', stopReason: 'error', errorMessage: '403 forbidden' },
-    { role: 'assistant', provider: 'openai-codex', stopReason: 'error', errorMessage: 'upstream failed' },
-    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: 'HTTP 429' },
-    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: 'resets at 10pm' },
-    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: "you've hit your network connection" },
-    { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: 429 },
-    { role: 'assistant', provider: 'anthropic', stopReason: 'error', status: 429 },
-    { role: 'assistant', provider: 'anthropic', stopReason: 'error', message: 'usage limit reached' },
-    [], null,
-  ];
+test('载荷不是 JSON 也不会把用户的会话弄停', async () => {
   calls = [];
-  // When: Pi sends each message, including malformed JSON.
-  for (const input of [...messages.map((message) => JSON.stringify(message)), '{broken']) {
-    const out = await runHook('pi', input);
-    // Then: no switcher call or sensitive output is produced.
-    assert.equal(out.result, null);
-    assert.equal(out.outcome, 'skipped_no_signal');
-    assert.doesNotMatch(out.stdout, /usage limit reached|HTTP 429|upstream failed/);
-  }
+  const opencode = await runHook('opencode', '这不是 json');
+  assert.equal(JSON.parse(opencode.stdout).switched, false);
   assert.deepEqual(calls, []);
 });
 
-test('Pi reports failed candidate checks and writes without leaking account details', async () => {
-  // Given: a valid quota signal, but a failed candidate check and write.
+test('OpenCode 不会把 Pi 消息或 Codex 会话记录当成额度事件', async () => {
   calls = [];
-  reply = { ...reply, switched: false, message: 'private@example.invalid secret-token', checked: [{ id: 'secret-id', email: 'private@example.invalid', usable: false, usedPercent: null, resetAt: 0, source: 'error', error: 'secret-error' }], written: [{ path: '/private/auth.json', source: 'pi-codex', label: 'Pi Codex', created: false, backupPath: '', changes: [], warning: '', error: 'secret-write' }] };
-  // When: the error triggers a Pi switch attempt.
-  const out = await runHook('pi', JSON.stringify({ role: 'assistant', provider: 'openai-codex', stopReason: 'error', errorMessage: 'quota exceeded secret-body' }));
-  // Then: only a stable outcome and safe diagnostic reach stdout.
-  assert.equal(out.outcome, 'check_failed');
-  assert.doesNotMatch(out.stdout, /private|secret|quota exceeded/);
-  reply = { ...reply, checked: [], written: [] };
-});
-
-test('Codex 输出不回显切换结果中的邮箱或账户文本', async () => {
-  reply = { ...reply, switched: true, message: 'secret@example.invalid account-secret', to: 'secret@example.invalid' };
-  const path = rollout([turn(100, 3600)]);
-  const out = await runHook('codex', JSON.stringify({ hook_event_name: 'Stop', transcript_path: path }));
-  assert.doesNotMatch(out.stdout, /secret@example|account-secret/);
-});
-
-test('载荷不是 JSON 也不会把用户的会话弄停', async () => {
-  calls = [];
-  const codex = await runHook('codex', '这不是 json');
-  assert.equal(codex.stdout, '{}');
-
-  const opencode = await runHook('opencode', '');
-  assert.equal(JSON.parse(opencode.stdout).switched, false);
+  const payloads = [
+    { source: 'pi', role: 'assistant', provider: 'openai-codex', stopReason: 'error', errorMessage: 'usage limit reached' },
+    { hook_event_name: 'Stop', transcript_path: '/not/read', rate_limits: { primary: { used_percent: 100 } } },
+  ];
+  for (const payload of payloads) {
+    const out = await runHook('opencode', JSON.stringify(payload));
+    assert.equal(out.outcome, 'skipped_no_signal');
+    assert.equal(JSON.parse(out.stdout).switched, false);
+  }
   assert.deepEqual(calls, []);
 });

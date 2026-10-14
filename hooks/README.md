@@ -1,41 +1,28 @@
 # QuotaHot Hook
 
-`quotahot-hook` 是一条独立的命令，遇到明确额度限制时把 Codex CLI、OpenCode、Pi 或 Claude Code 切到另一个账户。它不会启动也不会调用 QuotaHot 的 Web 服务，两个程序谁也不 import 谁的源码。
+`quotahot-hook` 是独立账户切换命令。自动触发入口只有 **OpenCode 插件**：OpenCode 的 OpenAI（Codex）请求出现明确额度用尽信号时，hook 会选择可用的 Codex 账户并同步本机客户端凭证。OpenCode 的 Anthropic/Claude 额度错误不会触发自动切换；要切换 Claude 账户，请手动运行 `quotahot-hook switch --provider claude`。hook 不启动也不调用 QuotaHot Web 服务；与主程序共享的只有 `QUOTAHOT_DATA_DIR` 下的配置和账户文件。
 
-它们之间唯一的关联是磁盘上的文件约定：两边都可能读 `QUOTAHOT_DATA_DIR`（默认 `~/.quotahot`）下的 `config.json` 和账户 JSON，但构建、安装、运行各走各的。
+一次 Codex 切换会同步 Codex CLI、OpenCode，以及已经存在的 Pi Codex 凭证；手动切换 Claude 会同步 Claude Code 和已经存在的 Pi Claude 凭证。Codex CLI 和 Pi 不再安装 QuotaHot hook 或插件，也不会独立触发切换；安装时仅保留对可识别为 QuotaHot 自有的旧 Codex hook 条目和 Pi 扩展的清理。缺少 Pi `auth.json` 时不会创建该文件，清理也不会删除账户凭证或其他工具的 hook。
 
 ## 构建与安装
 
-需要 Node.js 24 或更高版本：凭证锁用的是 `node:sqlite`。
+需要 Node.js 24 或更高版本：凭证锁使用 `node:sqlite`。
 
 ### 从分发包安装（Linux / macOS）
-
-用 **`quotahot-hook-1.0.0.tar.gz`**，不是主程序那个 `quotahot` 包。目标机不需要签出源码、不需要 npm install，也不需要跑着 Web 服务，只要事先装好 Node.js 24+。
 
 ```bash
 tar -xzf quotahot-hook-1.0.0.tar.gz
 cd quotahot-hook-1.0.0
-sh install.sh                       # 安装命令，并注册 Codex、OpenCode 和 Pi
+sh install.sh
 export PATH="$HOME/.local/bin:$PATH"
 quotahot-hook help
 ```
 
-只注册一个客户端就用 `sh install.sh codex`、`sh install.sh opencode` 或 `sh install.sh pi`。安装脚本不需要
-`sudo`：它把 bundle 直接拷到 `~/.local/bin/quotahot-hook`，再跑一遍钩子注册命令。
-已装过的命令和客户端里的注册项都是直接覆盖，不留 `.quotahot-bak` 备份。
-上面那行 PATH 导出建议写进 shell 启动文件，换个终端也还在。
-解压出来的目录装完就能删。
+安装命令会把 bundle 放到 `~/.local/bin/quotahot-hook`，注册 OpenCode 插件，并清除旧版本中属于 QuotaHot 的 Codex/Pi 触发集成。安装前会拒绝客户端目标参数。旧集成清理不会碰 Codex/Pi `auth.json`。
 
-装完请重启 OpenCode、Pi 或开一个新的 Codex 会话。注册钩子并不会凭空生出账户，得先按下文
-准备好账户文件。想摘掉客户端集成（账户文件不动）：
+完成后重启或重新加载 OpenCode。卸载时运行 `quotahot-hook uninstall`；它会移除 QuotaHot OpenCode 插件及可识别的旧 Codex/Pi 集成，不会修改账户文件。
 
-```bash
-"$HOME/.local/bin/quotahot-hook" uninstall
-```
-
-Windows 上解压同一个压缩包，在一个固定目录里执行 `node quotahot-hook help` 或
-`node quotahot-hook install`，并把 `package.json` 和 bundle 放在一起；那个 shell
-安装脚本只管 Linux/macOS。
+Windows 可解压同一压缩包，在固定目录运行 `node quotahot-hook help` 或 `node quotahot-hook install`，并将 `package.json` 与 bundle 放在一起；shell 安装脚本仅支持 Linux/macOS。
 
 ### 从源码构建
 
@@ -50,60 +37,30 @@ export PATH="$HOME/.local/bin:$PATH"
 quotahot-hook help
 ```
 
-构建产物是 `hooks/dist/quotahot-hook`，一个自带全部依赖的 bundle，可以直接拷进 `PATH` 上的某个目录，不需要主程序的源码或构建产物。
-
-`npm run build` 还会打出 `hooks/release/quotahot-hook-1.0.0.tar.gz`，里面是 bundle、
-标记 CommonJS 的 package.json、安装脚本和这份 README；打包需要系统装了 `tar`。把压缩包
-拷到目标机，按上面「从分发包安装」那一节走。主程序的构建不会产出这个独立的 Hook 包。
+构建产物 `hooks/dist/quotahot-hook` 是包含依赖的独立 bundle。`npm run build` 还会生成 `hooks/release/quotahot-hook-1.0.0.tar.gz`；打包需要系统安装 `tar`。
 
 ## 命令
 
 ```bash
 quotahot-hook version
-quotahot-hook install                    # Codex、OpenCode 和 Pi
-quotahot-hook install codex              # 只装 Codex
-quotahot-hook install pi                 # 只装 Pi
-quotahot-hook install opencode --print   # 只预览，不写文件
-quotahot-hook uninstall                  # 三边的集成都摘掉
+quotahot-hook install                 # 安装 OpenCode 插件并清理旧的 QuotaHot Codex/Pi 触发集成
+quotahot-hook install --print         # 只预览 OpenCode 插件，不修改文件
+quotahot-hook uninstall               # 移除 QuotaHot 拥有的所有触发集成
 quotahot-hook status --provider codex
 quotahot-hook switch --dry-run
 quotahot-hook switch --no-check
-quotahot-hook run codex                   # 事件 JSON 从 stdin 进
-quotahot-hook run opencode                # 事件 JSON 从 stdin 进
-quotahot-hook run pi                      # Pi assistant 错误消息 JSON 从 stdin 进
-quotahot-hook install --help              # 只打印该命令的用法，绝不动手安装
+quotahot-hook switch --provider claude # 手动切换 Claude 并同步 Claude Code/Pi 凭证
+quotahot-hook run opencode             # OpenCode 插件使用的事件入口
+quotahot-hook install --help           # 仅打印帮助，不写文件
 ```
 
-`--provider` 只认 `codex` 和 `claude`，给别的值直接报错，不会悄悄退回到另一个 provider。
+`install` 不接收 `codex`、`pi`、`all` 等客户端目标；`run` 只接受 `opencode`。Codex/Pi 插件安装入口已移除，仅保留旧 QuotaHot 集成的归属识别与清理；凭证写回仍可使用。OpenCode 插件写入 `$XDG_CONFIG_HOME/opencode/plugin/quotahot.js`（若已有 `plugins/` 目录则使用它），文件由 QuotaHot 标记以便安全更新和卸载。
 
-安装时写进去的是 `quotahot-hook` 的绝对路径调用。Codex 那几条进 `~/.codex/hooks.json`；OpenCode 插件落在 `$XDG_CONFIG_HOME/opencode/plugin` 或 `plugins` 下。Codex 与本程序无关的钩子逐条保留；OpenCode 插件升级时直接覆盖旧文件、不留备份。
+额度错误后的自动切换仅响应 OpenCode 的 OpenAI（Codex）明确配额信号。OpenCode 仍在内部重试时不会重放任务；若请求因额度终止、会话进入空闲，且没有新用户消息或取消，插件会在额度恢复后至多自动续跑一次。该续跑不是原请求的断点恢复，模型必须核对先前完成的工具动作，避免重复执行。关闭或重载插件会取消进程内等待，不跨重启持久化；Claude 额度错误、上下文超长、网络错误和过载错误不会触发额度恢复流程。
 
-Pi 扩展落在 `${PI_CODING_AGENT_DIR:-~/.pi/agent}/extensions/quotahot-hook.ts`。安装与卸载只修改带 QuotaHot 标记的这一个文件；同名但没有标记的文件会被保留。仅在 assistant 的 `message_end` 错误明确提示额度用尽时立即检查账户；没有可用账户时，按提供方每 30 分钟查询一次，额度恢复后切换并停止轮询。不自动重试失败请求，也不保证 Pi 会在当前进程里立即重读认证文件。
+## 账户与凭证同步
 
-卸载时按客户端分别识别自己的集成：Codex 只移除带 `quotahot-hook run codex` 的钩子条目；OpenCode 只删除带 `quotahot:start` 标记的插件文件；Pi 只删除带 `quotahot:pi-extension` 标记的扩展文件。Pi 安装和卸载会在扩展文件路径上加锁，锁内重新检查归属；等待期间若同路径被替换为非自有文件，不会覆盖或删除它。升级后执行 `quotahot-hook install` 并重启 OpenCode 或 Pi；Codex 换账户后要开新会话才生效。主程序 `quotahot` 不转发 hook 子命令。
-
-为避免重复加载，OpenCode 插件文件名为 `quotahot.js`，生成标记 `quotahot:start/end`，并只导出 `QuotaHot` 与默认描述符；重新安装会更新原文件，而不是生成第二份插件。
-
-## 账户与配置文件
-
-想换数据目录就设 `QUOTAHOT_DATA_DIR`。钩子会读这些文件：
-
-- `$QUOTAHOT_DATA_DIR/config.json`
-- `$QUOTAHOT_DATA_DIR/accounts/*.json`
-- `$QUOTAHOT_DATA_DIR/switch-state.json`
-- `$QUOTAHOT_DATA_DIR/switch.lock`
-- `<账户文件>.refresh-lock.db`
-
-`config.json` 里只取 `proxy` 和 `noProxy` 两项：
-
-```json
-{
-  "proxy": "http://127.0.0.1:7897",
-  "noProxy": ["localhost", "127.0.0.1", "::1"]
-}
-```
-
-每个账户文件都得写明 provider、身份、令牌和过期时间。不装主程序、不跑主服务也能直接把账户放进来：
+账户文件位于 `$QUOTAHOT_DATA_DIR/accounts/*.json`（默认 `~/.quotahot/accounts/`）。独立使用 hook 时也可以手动把账户 JSON 放入该目录：
 
 ```json
 {
@@ -119,21 +76,25 @@ Pi 扩展落在 `${PI_CODING_AGENT_DIR:-~/.pi/agent}/extensions/quotahot-hook.ts
 }
 ```
 
-Claude Code 用 `type: "claude"`。跟随某个客户端的账户可以把 `auto_refresh` 设成 `false`，再给出 `sync_path` 和 `sync_source`。这些文件应当只有属主可读；钩子刷新自己那份账户副本时，无关字段逐字保留。
+配置文件 `$QUOTAHOT_DATA_DIR/config.json` 中只读取 `proxy` 和 `noProxy`：
 
-## 边界与限制
+```json
+{
+  "proxy": "http://127.0.0.1:7897",
+  "noProxy": ["localhost", "127.0.0.1", "::1"]
+}
+```
 
-- 切换走 `switch.lock`；凭证刷新用的是按账户分的 SQLite 锁，与所有使用同一个账户目录的进程共享。
-- `--dry-run` 不写切换状态、缓存和凭证。已经过期、必须刷新才能判断的账户，在只读预览里评估不出来。
-- OpenCode 和 Pi 不再在请求前按 5 分钟缓存检查额度。只有明确触限时才立即查询同提供方候选账户；全部不可用时，各进程内同一提供方共用一个 30 分钟轮询器。轮询每次实时查询额度，不沿用旧缓存；额度恢复后停止轮询。手动 `status` / `switch` 的默认阈值仍是已用 80%，与自动触限路径的 100% 判定独立。
-- OpenCode 仍在内部重试时不会重发任务；若额度恢复后原会话已因限额终止并空闲，且没有更新的用户消息、没有中止或删除，插件会自动发送一条新的“继续未完成任务”消息，每个失败轮次至多一次。这不是原请求的断点恢复，模型必须核对先前已完成的工具动作，避免重复执行。Pi 只自动切换账户，不重发失败请求。关闭或重载插件会取消进程内的等待，不跨重启持久化。上下文超长、网络错误和过载错误不会触发这条额度恢复流程。
-- 钩子出错一律 fail-open，事件路径返回退出码 0，不会把宿主的对话卡住。
-- Codex 切完必须开新会话。OpenCode 则是在重启/重载规则允许之后，下一个请求就用上新凭证。
-- 两个程序共享的是文件格式，不是 API，也不是运行时生命周期。并发写只在凭证刷新和切换这两件事上协调过；任一程序正在更新文件时，不要手动去编辑它们。
+切换目标由 provider 决定。Codex 账户会写入 `~/.codex/auth.json`、OpenCode 的 `auth.json`（仅在目标文件存在时）和 Pi `auth.json` 中的 `openai-codex` 项（仅在目标文件存在时）；Claude 账户会写 Claude Code 凭证与 Pi 的 `anthropic` 项（Pi 文件存在时）。切换仅更新对应账户和 provider 字段，Pi 的其他 provider 登录信息保留。目标文件会按现有同步逻辑备份并记录令牌字段的脱敏变更。
 
-## 开发
+同步是覆盖本机客户端当前 provider 登录状态的操作。Codex CLI、OpenCode 或 Pi 可能需要重新加载或重启后才使用新凭证。hook 不编辑上游原始账户目录，也不替代客户端自身的登录流程。
 
-实现与接口模块都在 `src/` 下，回归测试在 `test/` 下。
+## 边界与验证
+
+- 切换走 `switch.lock`；凭证刷新使用按账户分的 SQLite 锁。
+- `--dry-run` 不写切换状态、缓存或凭证；已过期且必须刷新才能判断的账户，无法在只读预览里评估。
+- hook 出错时 fail-open，不会阻塞 OpenCode 的对话流程。
+- hook 仅将 OpenCode 的 OpenAI（Codex）额度错误作为自动触发源；Claude 只支持手动切换并同步凭证，Codex CLI 与 Pi 不作为自动触发源。
 
 ```bash
 cd hooks
@@ -141,5 +102,3 @@ npm run typecheck
 npm test
 npm run build
 ```
-
-`dist/meta.json` 记着 esbuild 的每一个输入。隔离测试会断言其中没有任何一项来自 `../src`，主包那边也单独把 `hooks/` 排除在 TypeScript 与 bundle 的输入之外。

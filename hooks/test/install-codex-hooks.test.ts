@@ -26,7 +26,7 @@ interface HooksFile {
 }
 
 async function runCli(home: string, command: 'install' | 'uninstall'): Promise<void> {
-  await exec(process.execPath, ['--import', loader, main, command, 'codex'], {
+  await exec(process.execPath, ['--import', loader, main, command], {
     cwd: process.cwd(),
     env: { ...process.env, HOME: home, QUOTAHOT_DATA_DIR: join(home, '.quotahot') },
   });
@@ -56,48 +56,45 @@ for (const operation of ['install', 'uninstall'] as const) {
     const result = await readHooks(path);
     const remaining = result.hooks.SessionStart?.flatMap((entry) => entry.hooks.map((hook) => hook.command));
     assert.ok(remaining);
-    assert.equal(remaining.length, operation === 'install' ? 2 : 1);
+    assert.equal(remaining.length, 1);
     assert.equal(remaining.includes('foreign-quotahot-hook run codex'), true);
     for (const command of commands.slice(0, -1)) assert.equal(remaining.includes(command), false);
   });
 }
 
-test('Codex reinstall and uninstall preserve grouped sibling hooks and foreign similar commands', async (t) => {
+test('Codex cleanup preserves grouped sibling hooks and foreign similar commands across known events', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'quotahot-install-codex-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const path = join(home, '.codex', 'hooks.json');
-  await runCli(home, 'install');
-  const installed = await readHooks(path);
-  const ownCommand = installed.hooks.SessionStart?.[0]?.hooks[0]?.command;
-  assert.ok(ownCommand);
-
-  const grouped: HooksFile = {
-    hooks: Object.fromEntries(Object.keys(installed.hooks).map((event) => [event, [
-      {
-        matcher: 'keep-matcher',
-        hooks: [
-          { type: 'command', command: ownCommand, timeout: 20 },
-          { type: 'command', command: 'sibling-tool --keep', timeout: 3 },
-        ],
-      },
-      { hooks: [{ type: 'command', command: '/other/tool hook codex' }] },
-    ]]))
-  };
+  const ownCommand = "'/tmp/quotahot-hook' run codex";
+  const entries: readonly HookEntry[] = [{ matcher: 'keep-matcher', hooks: [
+      { type: 'command', command: ownCommand, timeout: 20 },
+      { type: 'command', command: 'sibling-tool --keep', timeout: 3 },
+    ] }, { hooks: [{ type: 'command', command: '/other/tool hook codex' }] }];
+  const grouped: HooksFile = { hooks: {
+    SessionStart: entries, UserPromptSubmit: entries, Stop: entries,
+    ForeignEvent: [{ hooks: [{ type: 'command', command: ownCommand }] }],
+  } };
+  await mkdir(join(home, '.codex'), { recursive: true });
   await writeFile(path, `${JSON.stringify(grouped, null, 2)}\n`);
 
   await runCli(home, 'install');
   const reinstalled = await readHooks(path);
-  for (const entries of Object.values(reinstalled.hooks)) {
-    assert.equal(entries.filter((entry) => entry.hooks.some((hook) => hook.command === ownCommand)).length, 1);
-    assert.equal(entries.some((entry) => entry.matcher === 'keep-matcher' && entry.hooks.some((hook) => hook.command === 'sibling-tool --keep')), true);
-    assert.equal(entries.some((entry) => entry.hooks.some((hook) => hook.command === '/other/tool hook codex')), true);
+  for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop']) {
+    const remaining = reinstalled.hooks[event];
+    assert.equal(remaining?.some((entry) => entry.hooks.some((hook) => hook.command === ownCommand)), false);
+    assert.equal(remaining?.some((entry) => entry.matcher === 'keep-matcher' && entry.hooks.some((hook) => hook.command === 'sibling-tool --keep')), true);
+    assert.equal(remaining?.some((entry) => entry.hooks.some((hook) => hook.command === '/other/tool hook codex')), true);
   }
+  assert.deepEqual(reinstalled.hooks.ForeignEvent, grouped.hooks.ForeignEvent);
 
   await runCli(home, 'uninstall');
   const uninstalled = await readHooks(path);
-  for (const entries of Object.values(uninstalled.hooks)) {
-    assert.equal(entries.some((entry) => entry.hooks.some((hook) => hook.command === ownCommand)), false);
-    assert.equal(entries.some((entry) => entry.matcher === 'keep-matcher' && entry.hooks.some((hook) => hook.command === 'sibling-tool --keep')), true);
-    assert.equal(entries.some((entry) => entry.hooks.some((hook) => hook.command === '/other/tool hook codex')), true);
+  for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop']) {
+    const remaining = uninstalled.hooks[event];
+    assert.equal(remaining?.some((entry) => entry.hooks.some((hook) => hook.command === ownCommand)), false);
+    assert.equal(remaining?.some((entry) => entry.matcher === 'keep-matcher' && entry.hooks.some((hook) => hook.command === 'sibling-tool --keep')), true);
+    assert.equal(remaining?.some((entry) => entry.hooks.some((hook) => hook.command === '/other/tool hook codex')), true);
   }
+  assert.deepEqual(uninstalled.hooks.ForeignEvent, grouped.hooks.ForeignEvent);
 });

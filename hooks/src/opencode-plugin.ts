@@ -3,7 +3,7 @@ import { opencodeRecoverySource } from './opencode-recovery.js';
 
 export function opencodePlugin(command: string | readonly string[]): string {
   return `// quotahot:start
-// 由 \`quotahot-hook install opencode\` 生成；重新安装会整份覆盖。
+// 由 \`quotahot-hook install\` 生成；重新安装会整份覆盖。
 // 作用：明确触限时切换账户，额度恢复后续跑仍处于失败空闲状态的会话。
 import { spawn } from "node:child_process";
 
