@@ -24,67 +24,67 @@ import type { Provider } from './types.js';
 import { readRecoveryStatus } from './recovery-status.js';
 import { APP_VERSION } from './version.js';
 
-const HELP = `QuotaHot Hook - standalone account switching hooks
+const HELP = `QuotaHot Hook - 独立的账户额度检查与切换命令，不启动 Web 服务。
 
-Usage:
-  quotahot-hook status [options]
-  quotahot-hook recovery-status [--json]
-  quotahot-hook switch [options]
-  quotahot-hook run opencode [options]
-  quotahot-hook install [--print]
-  quotahot-hook uninstall
-  quotahot-hook help
-  quotahot-hook version
-  quotahot-hook --version
+用法：
+  quotahot-hook status [选项]          查看账户额度和本机当前登录账户
+  quotahot-hook switch [选项]          手动切换账户并同步客户端凭证
+  quotahot-hook run opencode [选项]    OpenCode 插件的事件入口
+  quotahot-hook recovery-status [--json]  查看本地额度恢复等待状态
+  quotahot-hook install [--print]      安装 OpenCode 插件，清理旧触发器
+  quotahot-hook uninstall              移除 QuotaHot 的触发集成
+  quotahot-hook help [命令]             查看全局或命令帮助
+  quotahot-hook version | --version    查看版本号
+
+各命令可用 --help 查看参数；账户数据默认在 ~/.quotahot，可设置 QUOTAHOT_DATA_DIR。
 `;
 
 const COMMAND_HELP: Readonly<Record<string, string>> = {
-  'recovery-status': `Usage: quotahot-hook recovery-status [--json]
+  'recovery-status': `用法：quotahot-hook recovery-status [--json]
 
-Reads local OpenCode recovery snapshots; never queries upstream quota.
+只读取本地 OpenCode 额度恢复快照，不查询上游、不切换账户；过期快照会标为 stale。
+  --json  输出含等待会话和插件实例的结构化状态，便于诊断。
 `,
-  status: `Usage: quotahot-hook status [options]
+  status: `用法：quotahot-hook status [选项]
 
-Options:
-  --provider <codex|claude>
-  --threshold <percent>
-  --cache-seconds <seconds>
-  --no-check
-  --json
+查询账户额度与本机客户端在用账户，默认查询 Codex；可能更新本地额度缓存。
+  --provider <codex|claude>  选择账户类型（默认 codex）。
+  --threshold <percent>     上游未明确给出可用结论时，用于判断额度用尽的已用百分比（0–100，默认 80）。
+  --cache-seconds <seconds> 优先使用指定秒数内的额度缓存（默认 300）。
+  --no-check               不请求上游，仅使用本地缓存；未知用量会标为 skipped。
+  --json                   输出完整的账户状态和客户端登录映射。
 `,
-  switch: `Usage: quotahot-hook switch [options]
+  switch: `用法：quotahot-hook switch [选项]
 
-Options:
-  --provider <codex|claude>
-  --client <codex-cli|opencode|claude-cli|pi-claude|pi-codex>
-  --threshold <percent>
-  --cache-seconds <seconds>
-  --min-interval-seconds <seconds>
-  --reason <text>
-  --exhausted
-  --no-check
-  --dry-run
-  --json
+手动选择可用账户并覆盖目标客户端的当前登录凭证；切换前可用 --dry-run 预览。
+  --provider <codex|claude>  选择账户类型（默认 codex）。
+  --client <名称列表>       指定逗号分隔的写回目标：codex-cli、opencode、claude-cli、pi-claude、pi-codex；
+                            默认按 provider 同步对应客户端（Pi 仅在已有凭证时写入）。覆盖登录有风险。
+  --threshold <percent>     上游未明确给出可用结论时，用于判断额度用尽的已用百分比（0–100，默认 80）。
+  --cache-seconds <seconds> 使用额度缓存的秒数（默认 300）。
+  --min-interval-seconds <seconds> 两次切换间的最短秒数（默认 60）。
+  --reason <text>           设置切换原因（默认“手动触发”）。
+  --exhausted              将当前账户直接标为额度用尽并冷却；无需额度证据，请谨慎使用。
+  --no-check               不请求上游额度，可能按旧缓存或未知用量选错账户。
+  --dry-run                只预览，不写状态、缓存或凭证；过期令牌无法只读刷新。
+  --json                   输出完整切换结果（可能包含账户邮箱）。
 `,
-  run: `Usage: quotahot-hook run opencode [options]
+  run: `用法：quotahot-hook run opencode [选项]
 
-Options:
-  --provider <codex|claude>
-  --client <codex-cli|opencode|claude-cli|pi-claude|pi-codex>
-  --threshold <percent>
-  --cache-seconds <seconds>
-  --min-interval-seconds <seconds>
-  --reason <text>
-  --no-check
-  --dry-run
-  --json
+从标准输入读取 OpenCode 事件；只对 OpenAI/Codex 明确额度信号尝试切换，运行故障时不阻断插件。
+额度事件固定按 OpenCode 的来源、原因及额度阈值处理，不接受手动切换参数。
+  --min-interval-seconds <seconds> 切换间隔（默认 60）；设为 0 会绕过间隔保护。
+  --no-check               不查询上游额度，可能按旧缓存或未知用量选错账户。
+  --dry-run                只预览，不写切换状态或客户端凭证。
+  --json                   标准输出仍是插件 JSON；诊断结果另写标准错误。
 `,
-  install: `Usage: quotahot-hook install [--print]
+  install: `用法：quotahot-hook install [--print]
 
-Options:
-  --print
+安装 QuotaHot OpenCode 插件并清理自有的旧 Codex/Pi 触发器，不修改账户凭证。
+  --print  只打印插件路径及内容，不安装、不清理、不写文件。
 `,
-  uninstall: 'Usage: quotahot-hook uninstall\n',
+  uninstall: '用法：quotahot-hook uninstall\n\n移除 QuotaHot 自有的 OpenCode 插件和旧触发器，不删除账户凭证。\n',
+  version: '用法：quotahot-hook version\n\n打印当前独立 hook 程序的版本号，不启动服务。\n',
 };
 
 class UsageError extends Error {}
@@ -113,6 +113,10 @@ function parseFlags(argv: readonly string[]): Flags {
     const separator = argument.indexOf('=');
     if (separator >= 0) {
       values[argument.slice(2, separator)] = argument.slice(separator + 1);
+      continue;
+    }
+    if (['help', 'json', 'no-check', 'dry-run', 'exhausted', 'print'].includes(argument.slice(2))) {
+      bools.add(argument.slice(2));
       continue;
     }
     const next = argv[index + 1];
@@ -167,12 +171,13 @@ async function readStdin(): Promise<string> {
 }
 
 async function runEvent(client: string | undefined, flags: Flags): Promise<number> {
-  if (client !== 'opencode' || flags.positional.length !== 1) return 2;
+  if (client !== 'opencode' || flags.positional.length !== 1) throw new UsageError('run 只接受 opencode 作为事件来源');
   try {
     const output = await runHook(client, await readStdin(), switchOptions(flags));
     console.log(output.stdout);
     if (flags.bools.has('json')) console.error(JSON.stringify({ outcome: output.outcome }));
-  } catch {
+  } catch (error) {
+    if (error instanceof UsageError) throw error;
     console.error('quotahot-hook outcome: unknown');
     console.log('{"switched":false,"outcome":"unknown"}');
   }
@@ -196,6 +201,37 @@ export async function run(argv: readonly string[]): Promise<number> {
   const [command, ...rest] = argv;
   const flags = parseFlags(rest);
   try {
+    const supported: Readonly<Record<string, readonly string[]>> = {
+      status: ['help', 'provider', 'threshold', 'cache-seconds', 'no-check', 'json'],
+      switch: ['help', 'provider', 'client', 'threshold', 'cache-seconds', 'min-interval-seconds', 'reason', 'exhausted', 'no-check', 'dry-run', 'json'],
+      run: ['help', 'json', 'no-check', 'dry-run', 'min-interval-seconds'],
+      install: ['help', 'print'],
+      uninstall: ['help'],
+      'recovery-status': ['help', 'json'],
+      version: ['help'], '--version': ['help'],
+    };
+    const allowed = command === undefined ? undefined : supported[command];
+    if (allowed) {
+      for (const argument of rest) {
+        if (argument.startsWith('--')) {
+          const option = argument.slice(2).split('=', 1)[0];
+          if (!allowed.includes(option)) throw new UsageError(`${command} 不支持选项 --${option}`);
+        } else if (argument === '-h') continue;
+        else if (argument.startsWith('-')) throw new UsageError(`${command} 不支持选项 ${argument}`);
+      }
+      for (const option of ['help', 'json', 'no-check', 'dry-run', 'exhausted', 'print']) {
+        if (flags.values[option] !== undefined) throw new UsageError(`${command} 的 --${option} 不接受参数`);
+      }
+      for (const option of ['threshold', 'cache-seconds', 'min-interval-seconds']) {
+        const value = flags.values[option];
+        if (flags.bools.has(option) || (value !== undefined && (value.trim() === '' || !Number.isFinite(Number(value)) || Number(value) < 0 || (option === 'threshold' && Number(value) > 100)))) {
+          throw new UsageError(`${command} 的 --${option} 需要${option === 'threshold' ? ' 0 到 100 的百分比' : '非负秒数'}`);
+        }
+      }
+      if (command !== 'run' && command !== 'switch' && flags.positional.length > 0) throw new UsageError(`${command} 不接受额外参数`);
+    }
+    if (command === 'run') {
+    }
     if (command === 'version' || command === '--version') {
       console.log(APP_VERSION);
       return 0;
@@ -245,7 +281,7 @@ export async function run(argv: readonly string[]): Promise<number> {
         console.log(flags.bools.has('json') ? JSON.stringify(result, null, 2) : result.message);
         return 0;
       }
-      case 'run': return runEvent(flags.positional[0], flags);
+      case 'run': return await runEvent(flags.positional[0], flags);
       case 'install': return await install(flags, false);
       case 'uninstall': return await install(flags, true);
       case 'help':

@@ -11,7 +11,7 @@ type CliResult = { readonly code: number; readonly stdout: string; readonly stde
 
 async function cli(args: readonly string[], home?: string): Promise<CliResult> {
   return new Promise((resolveResult) => {
-    execFile(process.execPath, ['--import', import.meta.resolve('tsx'), entry, ...args], {
+    const child = execFile(process.execPath, ['--import', import.meta.resolve('tsx'), entry, ...args], {
       cwd: process.cwd(),
     env: home === undefined ? process.env : {
       ...process.env, HOME: home, QUOTAHOT_DATA_DIR: join(home, '.quotahot'),
@@ -22,6 +22,7 @@ async function cli(args: readonly string[], home?: string): Promise<CliResult> {
     }, (error, stdout, stderr) => {
       resolveResult({ code: error?.code === undefined ? 0 : Number(error.code), stdout, stderr });
     });
+    child.stdin?.end();
   });
 }
 
@@ -56,22 +57,104 @@ test('subcommand help shows only the selected command options', async () => {
   const runHelp = await cli(['run', '--help']);
   const uninstallHelp = await cli(['uninstall', '--help']);
   // Then: help is scoped and never falls through to command execution.
-  assert.match(switchHelp.stdout, /quotahot-hook switch \[options\]/);
+  assert.match(switchHelp.stdout, /quotahot-hook switch \[选项\]/);
   assert.match(switchHelp.stdout, /--threshold/);
   assert.match(switchHelp.stdout, /--dry-run/);
   assert.doesNotMatch(switchHelp.stdout, /--print/);
-  assert.match(statusHelp.stdout, /quotahot-hook status \[options\]/);
+  assert.match(statusHelp.stdout, /quotahot-hook status \[选项\]/);
   assert.match(statusHelp.stdout, /--no-check/);
   assert.doesNotMatch(statusHelp.stdout, /--dry-run|--min-interval-seconds/);
   assert.match(installHelp.stdout, /quotahot-hook install/);
   assert.match(installHelp.stdout, /--print/);
   assert.doesNotMatch(installHelp.stdout, /--threshold/);
   assert.match(runHelp.stdout, /quotahot-hook run opencode/);
-  assert.match(runHelp.stdout, /--threshold/);
-  assert.doesNotMatch(runHelp.stdout, /--exhausted|--print/);
+  assert.match(runHelp.stdout, /--min-interval-seconds/);
+  assert.doesNotMatch(runHelp.stdout, /--provider|--client|--threshold|--cache-seconds|--reason|--exhausted|--print/);
   assert.match(uninstallHelp.stdout, /quotahot-hook uninstall/);
   assert.doesNotMatch(uninstallHelp.stdout, /codex|pi/);
   assert.doesNotMatch(uninstallHelp.stdout, /Options:/);
+});
+
+test('global and subcommand help explain behavior in Chinese', async () => {
+  // Given: the documented public commands and their standalone help entrypoints.
+  // When: a user requests help rather than executing the command.
+  for (const args of [[], ['help'], ['--help'], ['status', '--help'], ['switch', '--help'], ['run', '--help', 'opencode'], ['install', '--help'], ['uninstall', '--help'], ['recovery-status', '--help']]) {
+    const result = await cli(args);
+    // Then: each help path succeeds and offers Chinese guidance.
+    assert.equal(result.code, 0, args.join(' '));
+    assert.match(result.stdout, /[\u4e00-\u9fff]{2,}/, args.join(' '));
+  }
+  const status = await cli(['help', 'status']);
+  assert.match(status.stdout, /--threshold|--cache-seconds|--no-check|--json/);
+  const selected = await cli(['help', 'switch']);
+  assert.match(selected.stdout, /默认|覆盖|风险/);
+  const run = await cli(['help', 'run']);
+  assert.match(run.stdout, /标准输出|标准错误/);
+  assert.doesNotMatch(run.stdout, /--provider|--client|--threshold|--cache-seconds|--reason|--exhausted/);
+  const version = await cli(['version']);
+  assert.equal(version.code, 0);
+  assert.match(version.stdout.trim(), /^(?:\d+\.\d+\.\d+|dev)$/);
+  assert.equal((await cli(['--version'])).stdout, version.stdout);
+});
+
+test('run rejects unsupported options before reading event or writing state', async (context) => {
+  // Given: an isolated data directory and options that cannot affect OpenCode's event contract.
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-hook-invalid-run-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  // When: each unsupported option is passed before or after the target.
+  for (const option of ['--provider', '--client', '--threshold', '--cache-seconds', '--reason', '--exhausted', '--unknown']) {
+    for (const args of [['run', 'opencode', option, 'value'], ['run', option, 'value', 'opencode']]) {
+      const result = await cli(args, home);
+      // Then: usage fails without emitting hook JSON or creating data files.
+      assert.equal(result.code, 2, args.join(' '));
+      assert.equal(result.stdout, '', args.join(' '));
+      assert.match(result.stderr, new RegExp(option), args.join(' '));
+    }
+  }
+  await assert.rejects(access(join(home, '.quotahot', 'switch-state.json')));
+});
+
+test('other commands reject flags that their help does not support', async () => {
+  for (const args of [
+    ['status', '--dry-run'], ['status', '--client', 'opencode'],
+    ['switch', '--print'], ['install', '--threshold', '20'],
+    ['uninstall', '--print'], ['recovery-status', '--no-check'],
+    ['version', '--json'],
+  ]) {
+    const result = await cli(args);
+    assert.equal(result.code, 2, args.join(' '));
+    assert.equal(result.stdout, '', args.join(' '));
+  }
+});
+
+test('numeric quota options reject missing or invalid values instead of silently using defaults', async () => {
+  for (const args of [
+    ['status', '--threshold'], ['status', '--threshold', 'foo'],
+    ['switch', '--threshold', '101'], ['switch', '--cache-seconds', '-1'],
+    ['switch', '--min-interval-seconds', 'nope'],
+  ]) {
+    const result = await cli(args);
+    assert.equal(result.code, 2, args.join(' '));
+    assert.equal(result.stdout, '', args.join(' '));
+  }
+});
+
+test('run accepts only meaningful options on either side of opencode', async (context) => {
+  // Given: an empty event in a temporary home, so no account can be switched.
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-hook-valid-run-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  // When: options precede or follow the positional event target.
+  for (const args of [
+    ['run', '--json', 'opencode'], ['run', 'opencode', '--json'],
+    ['run', '--no-check', 'opencode'], ['run', '--dry-run', 'opencode'],
+    ['run', '--min-interval-seconds', '0', 'opencode'],
+  ]) {
+    const result = await cli(args, home);
+    // Then: stdout remains the hook protocol; diagnostics for --json use stderr.
+    assert.equal(result.code, 0, args.join(' '));
+    assert.equal(JSON.parse(result.stdout).outcome, 'skipped_no_signal', args.join(' '));
+    if (args.includes('--json')) assert.equal(JSON.parse(result.stderr).outcome, 'skipped_no_signal');
+  }
 });
 
 test('install help never writes host integration files', async (context) => {
