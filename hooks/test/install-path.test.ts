@@ -19,7 +19,7 @@ test('含空格的插件执行路径不会拆坏', async (t) => {
   const binary = join(dir, 'fake hook');
   await writeFile(binary, '#!/bin/sh\ncat >/dev/null\nprintf \'{"switched":true,"message":"ok"}\'\n', { mode: 0o700 });
   const plugin = join(dir, 'plugin.mjs');
-  await writeFile(plugin, opencodePlugin(binary));
+  await writeFile(plugin, opencodePlugin(binary).replaceAll('process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), ".quotahot")', JSON.stringify(dir)));
   const driver = join(dir, 'driver.mjs');
   await writeFile(driver, `import {QuotaHot} from './plugin.mjs';
 const plugin = await QuotaHot({client:{tui:{showToast:({body})=>console.log(body.message)}}});

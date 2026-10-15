@@ -1,16 +1,21 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
 import { opencodePlugin } from '../src/install.js';
+import { readRecoveryStatus } from '../src/recovery-status.js';
+
+function isolatedPlugin(command: string, directory: string): string {
+  return opencodePlugin(command).replaceAll('process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), ".quotahot")', JSON.stringify(directory));
+}
 
 test('session.status retry with a confirmed OpenAI quota signal dispatches once', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'quotahot-plugin-events-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
   const counter = join(directory, 'spawns');
   const command = join(directory, 'quotahot command');
   await writeFile(command, `#!/bin/sh
@@ -20,7 +25,7 @@ printf '%s' '{"switched":true,"message":"safe"}'
 `);
   await chmod(command, 0o700);
   const pluginPath = join(directory, 'plugin.mjs');
-  await writeFile(pluginPath, opencodePlugin(command));
+  await writeFile(pluginPath, isolatedPlugin(command, directory));
   const { QuotaHot } = await import(pluginPath);
   const plugin = await QuotaHot({
     client: {
@@ -40,6 +45,7 @@ printf '%s' '{"switched":true,"message":"safe"}'
       },
     },
   });
+  t.after(async () => { await plugin.dispose(); await rm(directory, { recursive: true, force: true }); });
 
   await plugin.event({
     event: {
@@ -62,7 +68,6 @@ test('OpenCode only checks quota after a limit event', async (t) => {
 
 async function fixture(t: TestContext, messages: readonly object[], delay = 0, mode = 'success', response = '{"switched":true,"message":"safe"}') {
   const directory = await mkdtemp(join(tmpdir(), 'quotahot-plugin-events-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
   const counter = join(directory, 'spawns');
   const payloadPath = join(directory, 'payload');
   const command = join(directory, 'quotahot-hook');
@@ -75,7 +80,7 @@ ${commandBody}
 `);
   await chmod(command, 0o700);
   const pluginPath = join(directory, 'plugin.mjs');
-  const generated = mode === 'hung' ? opencodePlugin(command).replace('120000', '20').replace('1000', '5') : mode === 'stderr' ? opencodePlugin(command).replace('120000', '100').replace('1000', '5') : mode === 'late-lookup' ? opencodePlugin(command).replace('2000', '20') : opencodePlugin(commandPath);
+  const generated = mode === 'hung' ? isolatedPlugin(command, directory).replace('120000', '20').replace('1000', '5') : mode === 'stderr' ? isolatedPlugin(command, directory).replace('120000', '100').replace('1000', '5') : mode === 'late-lookup' ? isolatedPlugin(command, directory).replace('2000', '20') : isolatedPlugin(commandPath, directory);
   await writeFile(pluginPath, generated);
   const { QuotaHot } = await import(pluginPath);
   let lookups = 0;
@@ -99,6 +104,7 @@ ${commandBody}
       },
     },
   });
+  t.after(async () => { await plugin.dispose(); await rm(directory, { recursive: true, force: true }); });
   return { plugin, counter, payloadPath, notifications, logs, get lookups() { return lookups; } };
 }
 
@@ -279,10 +285,27 @@ const terminal = (sessionID: string) => ({ event: { type: 'session.error', prope
 const idle = (sessionID: string) => ({ event: { type: 'session.status', properties: { sessionID, status: { type: 'idle' } } } });
 
 async function recoveryFixture(t: TestContext) {
+  const directory = await mkdtemp(join(tmpdir(), 'quotahot-recovery-state-'));
+  t.after(async () => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try { await rm(directory, { recursive: true, force: true }); return; }
+      catch (error) {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOTEMPTY') {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          continue;
+        }
+        throw error;
+      }
+    }
+    await rm(directory, { recursive: true, force: true });
+  });
   let now = 100;
   const timers = new Map<object, { at: number; callback: () => void }>();
   const payloads: Array<{ source: string; recover?: boolean; provider?: string; event?: { properties: { sessionID: string } } }> = [];
-  const children: Array<{ finish(outcome: string): void }> = [];
+  const children: Array<{ finish(outcome: string, waitUntil?: number): void }> = [];
+  const watcherEvents: Array<(event: string, filename: string) => void> = [];
+  let stateAccounts: Record<string, { resetAt: number; blockedUntil: number; checkedAt?: number }> = {};
+  let readState = async () => JSON.stringify({ accounts: stateAccounts });
   const prompts: Prompt[] = [];
   const histories = new Map<string, object[]>();
   const statuses: Record<string, { type: string }> = {};
@@ -292,10 +315,17 @@ async function recoveryFixture(t: TestContext) {
     status: async (): Promise<unknown> => ({ data: statuses }),
     promptAsync: async (request: Prompt): Promise<unknown> => { prompts.push(request); return { data: undefined }; },
   };
-  const source = opencodePlugin('fake-hook').replace('import { spawn } from "node:child_process";', '')
-    .replace('export const QuotaHot', 'const QuotaHot').replace('export default { id: "QuotaHot", server: QuotaHot };', 'QuotaHot;');
-  const factory: (input: object) => Promise<Plugin> = runInNewContext(source, {
-    Buffer, console, Date: { now: () => now },
+  const source = opencodePlugin('fake-hook').replace(/^import .* from "node:(?:child_process|crypto|fs|fs\/promises|path|os)";\n/gm, '')
+    .replace('export const QuotaHot', 'const QuotaHot').replace('export default { id: "QuotaHot", server: QuotaHot };', '({ QuotaHot, settledStatus: () => statusWrites });');
+  const { QuotaHot: factory, settledStatus }: { QuotaHot: (input: object) => Promise<Plugin>; settledStatus: () => Promise<void> } = runInNewContext(source, {
+    Buffer, console, Date: { now: () => now }, process: { pid: process.pid, env: { QUOTAHOT_DATA_DIR: directory } }, randomUUID,
+    homedir: () => '/test', join: (...parts: string[]) => parts.join('/'), dirname: (path: string) => path.slice(0, path.lastIndexOf('/')),
+    readFile: (path: string) => path.endsWith('switch-state.json') ? readState() : readFile(path, 'utf8'),
+    mkdir, writeFile, rename, unlink,
+    watch: (_directory: string, callback: (event: string, filename: string) => void) => {
+      watcherEvents.push(callback);
+      return { close: () => { const index = watcherEvents.indexOf(callback); if (index >= 0) watcherEvents.splice(index, 1); }, unref() {} };
+    },
     setTimeout: (callback: () => void, delay: number) => {
       const timer = { unref() {} }; timers.set(timer, { at: now + delay, callback }); return timer;
     },
@@ -306,7 +336,7 @@ async function recoveryFixture(t: TestContext) {
         stdin: Object.assign(new EventEmitter(), { end: (input: string) => payloads.push(JSON.parse(input)) }),
         kill: () => true,
       });
-      children.push({ finish: (outcome) => { child.stdout.emit('data', Buffer.from(JSON.stringify({ outcome }))); child.emit('close', 0); } });
+      children.push({ finish: (outcome, waitUntil) => { child.stdout.emit('data', Buffer.from(JSON.stringify({ outcome, waitUntil }))); child.emit('close', 0); } });
       return child;
     },
   });
@@ -333,9 +363,228 @@ async function recoveryFixture(t: TestContext) {
     children.at(-1)?.finish(outcome); await pending;
     await plugin.event(idle(sessionID));
   };
-  return { plugin, sdk, histories, statuses, notifications, prompts, payloads, children, timers, advance, flush, seed, fail,
+  return { plugin, directory, sdk, histories, statuses, notifications, prompts, payloads, children, timers, advance, flush, seed, fail, settledStatus,
+    setAccounts: (accounts: Record<string, { resetAt: number; blockedUntil: number; checkedAt?: number }>) => { stateAccounts = accounts; },
+    setReadState: (reader: () => Promise<string>) => { readState = reader; },
+    emitState: () => { for (const callback of [...watcherEvents]) callback('rename', 'switch-state.json'); },
+    get watchers() { return watcherEvents.length; },
     second: () => factory(input) };
 }
+
+async function snapshot(directory: string, matches: (value: Record<string, unknown>) => boolean = () => true): Promise<{ path: string; value: Record<string, unknown> }> {
+  const location = join(directory, 'recovery-status');
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const files = await readdir(location).catch(() => []);
+    const name = files.find((file) => file.endsWith('.json'));
+    if (name) {
+      const path = join(location, name);
+      const value: Record<string, unknown> = JSON.parse(await readFile(path, 'utf8'));
+      if (matches(value)) return { path, value };
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error('recovery snapshot was not published');
+}
+
+test('shared recovery publishes aggregate waiting sessions and real scheduled deadline', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.fail('one'); await state.fail('two');
+  const second = await state.second(); t.after(() => second.dispose());
+  const { path, value } = await snapshot(state.directory, (item) => item.queuedCount === 2);
+  assert.equal(value.waitingCount, 2);
+  assert.equal(value.queuedCount, 2);
+  assert.deepEqual(JSON.parse(JSON.stringify(value.sessions)), [
+    { sessionID: 'one', phase: 'waiting' }, { sessionID: 'two', phase: 'waiting' },
+  ]);
+  assert.equal(value.nextCheckAt, 100 + pollInterval);
+  assert.equal((await stat(state.directory)).isDirectory(), true);
+  assert.equal((await stat(join(state.directory, 'recovery-status'))).mode & 0o777, 0o700);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.doesNotMatch(await readFile(path, 'utf8'), /secret-token|Continue the interrupted task|Bearer/);
+});
+
+test('recovery snapshot records check transition, heartbeat, result and removes last waiter', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('pending');
+  const original = (await snapshot(state.directory)).value.updatedAt;
+  await state.advance(60_000);
+  assert.equal((await snapshot(state.directory, (item) => item.updatedAt === 60_100)).value.updatedAt, 60_100);
+  assert.notEqual(original, 60_100);
+  await state.advance(pollInterval - 60_000);
+  assert.equal((await snapshot(state.directory, (item) => item.checking === true)).value.checking, true);
+  state.children.at(-1)?.finish('no_candidate'); await state.flush();
+  await state.settledStatus();
+  const after = (await snapshot(state.directory, (item) => item.checking === false && item.lastOutcome === 'no_candidate')).value;
+  assert.equal(after.checking, false);
+  assert.equal(after.lastOutcome, 'no_candidate');
+  assert.equal(after.lastCheckedAt, 100 + pollInterval);
+  assert.equal(after.nextCheckAt, 100 + pollInterval * 3);
+  await state.plugin.dispose();
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if ((await readdir(join(state.directory, 'recovery-status'))).length === 0) break;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(await readdir(join(state.directory, 'recovery-status')), []);
+});
+
+test('disposing one owner retains the other waiting session in its module snapshot', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('first');
+  const second = await state.second(); t.after(() => second.dispose());
+  await state.seed('second');
+  const pending = second.event(terminal('second')); await state.flush();
+  state.children.at(-1)?.finish('no_candidate'); await pending;
+  await snapshot(state.directory, (value) => value.queuedCount === 2);
+  await state.plugin.dispose();
+  const remaining = (await snapshot(state.directory, (value) => value.waitingCount === 1)).value;
+  assert.deepEqual(JSON.parse(JSON.stringify(remaining.sessions)), [{ sessionID: 'second', phase: 'waiting' }]);
+});
+
+test('separately loaded generated plugins publish isolated status files without secrets', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'quotahot-status-modules-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const previousDir = process.env.QUOTAHOT_DATA_DIR;
+  const previousHome = process.env.HOME;
+  process.env.QUOTAHOT_DATA_DIR = directory;
+  process.env.HOME = directory;
+  t.after(() => {
+    if (previousDir === undefined) delete process.env.QUOTAHOT_DATA_DIR; else process.env.QUOTAHOT_DATA_DIR = previousDir;
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+  });
+  const command = join(directory, 'hook');
+  await writeFile(command, '#!/bin/sh\ncat >/dev/null\nprintf \'%s\' \'{"outcome":"no_candidate","message":"secret-token"}\'\n', { mode: 0o700 });
+  const source = opencodePlugin(command);
+  const firstPath = join(directory, 'first.mjs'); const secondPath = join(directory, 'second.mjs');
+  await writeFile(firstPath, source); await writeFile(secondPath, source);
+  const firstModule = await import(firstPath); const secondModule = await import(secondPath);
+  const client = { session: { messages: async () => ({ data: [{ info: {
+    id: 'failed', role: 'assistant', providerID: 'openai', error: { statusCode: 429 }, time: { created: 10, completed: 20 },
+  } }] }) } };
+  const first: Plugin = await firstModule.QuotaHot({ client });
+  const second: Plugin = await secondModule.QuotaHot({ client });
+  t.after(() => first.dispose()); t.after(() => second.dispose());
+  await first.event(assistant('left', 'failed', 'openai', 10));
+  await second.event(assistant('right', 'failed', 'openai', 10));
+  await first.event(terminal('left')); await second.event(terminal('right'));
+  const location = join(directory, 'recovery-status');
+  for (let index = 0; index < 100; index += 1) {
+    if ((await readdir(location).catch(() => [])).filter((file) => file.endsWith('.json')).length === 2) break;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const files = (await readdir(location)).filter((file) => file.endsWith('.json'));
+  assert.equal(files.length, 2);
+  const contents = await Promise.all(files.map((file) => readFile(join(location, file), 'utf8')));
+  assert.deepEqual(contents.map((text) => (JSON.parse(text) as { sessions: { sessionID: string }[] }).sessions[0]?.sessionID).sort(), ['left', 'right']);
+  assert.equal(readRecoveryStatus(directory).totalWaiting, 2);
+  assert.doesNotMatch(contents.join(' '), /secret-token|Continue the interrupted task/);
+  assert.equal((await stat(location)).mode & 0o777, 0o700);
+  for (const file of files) assert.equal((await stat(join(location, file))).mode & 0o777, 0o600);
+  await first.dispose();
+  for (let index = 0; index < 100; index += 1) {
+    if ((await readdir(location)).length === 1) break;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal((await readdir(location)).length, 1);
+});
+
+test('recovery checks at earliest future reset plus one minute even when initial result omits waitUntil', async (t) => {
+  const state = await recoveryFixture(t);
+  state.setAccounts({ later: { resetAt: 180_100, blockedUntil: 180_100 }, sooner: { resetAt: 120_100, blockedUntil: 120_100 } });
+  await state.fail('deadline');
+  await state.advance(180_000 - 1);
+  assert.equal(state.payloads.length, 1);
+  await state.advance(1);
+  assert.equal(state.payloads.length, 2);
+  state.children.at(-1)?.finish('available'); await state.flush();
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['deadline']);
+});
+
+test('unknown reset at low clock waits for low-frequency backoff instead of a one-minute timer', async (t) => {
+  const state = await recoveryFixture(t);
+  let releaseRead: (contents: string) => void = () => {};
+  state.setReadState(() => new Promise<string>((resolve) => { releaseRead = resolve; }));
+  await state.seed('first');
+  const first = state.plugin.event(terminal('first')); await state.flush();
+  state.children.at(-1)?.finish('no_candidate'); await state.flush();
+  await state.seed('second');
+  const second = state.plugin.event(terminal('second')); await state.flush();
+  state.children.at(-1)?.finish('no_candidate'); await second;
+  await state.advance(60_000);
+  assert.equal(state.payloads.length, 2);
+  releaseRead('{"accounts":{}}'); await first;
+});
+
+test('external quota update during a recovery child runs one follow-up check without reacting to its own write', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('in-flight');
+  await state.advance();
+  assert.equal(state.payloads.length, 2);
+  state.setAccounts({ external: { resetAt: 240_100, blockedUntil: 240_100 } });
+  state.emitState(); await state.flush();
+  state.children.at(-1)?.finish('no_candidate'); await state.flush();
+  await state.advance(0);
+  assert.equal(state.payloads.length, 3);
+  state.setAccounts({ external: { resetAt: 240_100, blockedUntil: 240_100, checkedAt: 100 + pollInterval } });
+  state.emitState(); await state.flush();
+  state.children.at(-1)?.finish('no_candidate'); await state.flush();
+  await state.advance(0);
+  assert.equal(state.payloads.length, 3);
+});
+
+test('external quota update during an earlier state read is not discarded', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('read-race');
+  let releaseRead: (contents: string) => void = () => {};
+  const firstRead = new Promise<string>((resolve) => { releaseRead = resolve; });
+  let reads = 0;
+  state.setReadState(() => ++reads === 1 ? firstRead : Promise.resolve(JSON.stringify({ accounts: {
+    updated: { resetAt: 240_100, blockedUntil: 240_100 },
+  } })));
+  state.emitState(); await state.flush();
+  state.emitState();
+  releaseRead('{"accounts":{}}'); await state.flush();
+  await state.advance(0);
+  assert.equal(state.payloads.length, 2);
+  assert.equal(reads, 2);
+  state.children.at(-1)?.finish('available'); await state.flush();
+});
+
+test('initial no_candidate waitUntil schedules recovery at reset plus one minute', async (t) => {
+  const state = await recoveryFixture(t); await state.seed('wait-until');
+  const pending = state.plugin.event(terminal('wait-until')); await state.flush();
+  state.children.at(-1)?.finish('no_candidate', 120_100); await pending;
+  await state.plugin.event(idle('wait-until'));
+  await state.advance(180_000 - 1); assert.equal(state.payloads.length, 1);
+  await state.advance(1); assert.equal(state.payloads.length, 2);
+  state.children.at(-1)?.finish('available'); await state.flush();
+  assert.equal(state.prompts.length, 1);
+});
+
+test('reset deadline remains scheduled when reset has passed but its buffer has not', async (t) => {
+  const state = await recoveryFixture(t);
+  state.setAccounts({ candidate: { resetAt: 120_100, blockedUntil: 120_100 } });
+  await state.fail('buffer');
+  await state.advance(120_001);
+  state.setAccounts({ candidate: { resetAt: 120_100, blockedUntil: 120_100 }, changed: { resetAt: 0, blockedUntil: 0 } });
+  state.emitState(); await state.flush(); await state.advance(0);
+  state.children.at(-1)?.finish('no_candidate'); await state.flush();
+  await state.advance(59_998); assert.equal(state.payloads.length, 2);
+  await state.advance(1); assert.equal(state.payloads.length, 3);
+  state.children.at(-1)?.finish('available'); await state.flush();
+});
+
+test('external quota state change wakes shared recovery once and unchanged writes do not loop', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('external');
+  const second = await state.second(); t.after(() => second.dispose());
+  assert.equal(state.watchers, 1);
+  state.emitState(); await state.flush();
+  assert.equal(state.payloads.length, 1);
+  state.setAccounts({ external: { resetAt: 240_100, blockedUntil: 240_100 } });
+  state.emitState(); state.emitState(); await state.flush();
+  await state.advance(0);
+  assert.equal(state.payloads.length, 2);
+  state.children.at(-1)?.finish('no_candidate'); await state.flush();
+  state.emitState(); await state.flush();
+  assert.equal(state.payloads.length, 2);
+  await second.dispose(); await state.plugin.dispose();
+  assert.equal(state.watchers, 0);
+});
 
 test('recovery shares one provider poll and continues each failed idle session only once', async (t) => {
   const state = await recoveryFixture(t);
@@ -358,9 +607,11 @@ test('recovery shares one provider poll and continues each failed idle session o
 test('recovery retains candidates across no_candidate and backs off check_failed', async (t) => {
   const state = await recoveryFixture(t); await state.fail('pending');
   await state.advance(); state.children.at(-1)?.finish('no_candidate'); await state.flush();
+  await state.advance(); assert.equal(state.payloads.length, 2);
   await state.advance(); state.children.at(-1)?.finish('check_failed'); await state.flush();
   const before = state.payloads.length;
-  await state.advance(); assert.equal(state.payloads.length, before);
+  for (let index = 0; index < 3; index += 1) await state.advance();
+  assert.equal(state.payloads.length, before);
   await state.advance(); state.children.at(-1)?.finish('switched'); await state.flush();
   assert.equal(state.prompts.length, 1);
 });
@@ -540,7 +791,22 @@ test('an old user update does not cancel the failed request recovery', async (t)
 
 test('generated ESM plugin recovers through a real child and sends one SDK continuation', { timeout: 5000 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'quotahot-recovery-esm-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  t.after(async () => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try { await rm(directory, { recursive: true, force: true }); return; }
+      catch (error) {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOTEMPTY') {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          continue;
+        }
+        throw error;
+      }
+    }
+    await rm(directory, { recursive: true, force: true });
+  });
+  const previous = process.env.QUOTAHOT_DATA_DIR;
+  process.env.QUOTAHOT_DATA_DIR = directory;
+  t.after(() => { if (previous === undefined) delete process.env.QUOTAHOT_DATA_DIR; else process.env.QUOTAHOT_DATA_DIR = previous; });
   const child = join(directory, 'hook with spaces');
   await writeFile(child, `#!/bin/sh
 body=$(cat)
@@ -569,4 +835,49 @@ esac
 
   assert.deepEqual(prompts.map((prompt) => prompt.path.id), ['real']);
   await plugin.event(idle('real')); assert.equal(prompts.length, 1);
+});
+
+test('generated ESM plugin observes an atomic external quota state rename', { timeout: 5000 }, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'quotahot-recovery-watch-'));
+  t.after(async () => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try { await rm(directory, { recursive: true, force: true }); return; }
+      catch (error) {
+        if (error instanceof Error && 'code' in error && error.code === 'ENOTEMPTY') {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          continue;
+        }
+        throw error;
+      }
+    }
+    await rm(directory, { recursive: true, force: true });
+  });
+  const previous = process.env.QUOTAHOT_DATA_DIR;
+  process.env.QUOTAHOT_DATA_DIR = directory;
+  t.after(() => { if (previous === undefined) delete process.env.QUOTAHOT_DATA_DIR; else process.env.QUOTAHOT_DATA_DIR = previous; });
+  const command = join(directory, 'hook');
+  await writeFile(command, `#!/bin/sh
+case "$(cat)" in
+  *'"recover":true'*) printf '%s' '{"outcome":"available"}' ;;
+  *) printf '%s' '{"outcome":"no_candidate"}' ;;
+esac
+`, { mode: 0o700 });
+  const pluginPath = join(directory, 'plugin.mjs'); await writeFile(pluginPath, opencodePlugin(command));
+  const { QuotaHot } = await import(pluginPath);
+  let resolvePrompt: () => void = () => {};
+  const continued = new Promise<void>((resolve) => { resolvePrompt = resolve; });
+  const plugin = await QuotaHot({ client: { session: {
+    messages: async () => ({ data: [{ info: { id: 'failed', sessionID: 'atomic', role: 'assistant', providerID: 'openai',
+      error: { statusCode: 429 }, time: { created: 10, completed: 20 } } }] }),
+    status: async () => ({ data: {} }),
+    promptAsync: async () => { resolvePrompt(); return { data: undefined }; },
+  } } });
+  t.after(() => plugin.dispose());
+  await plugin.event(assistant('atomic', 'failed', 'openai', 10));
+  await plugin.event(terminal('atomic')); await plugin.event(idle('atomic'));
+  await writeFile(join(directory, 'switch-state.json.tmp'), JSON.stringify({ accounts: { external: {
+    usedPercent: 100, resetAt: Date.now() + 120_000, blockedUntil: Date.now() + 120_000,
+  } } }));
+  await rename(join(directory, 'switch-state.json.tmp'), join(directory, 'switch-state.json'));
+  await continued;
 });

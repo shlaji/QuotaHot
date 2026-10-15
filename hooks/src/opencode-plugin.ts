@@ -6,6 +6,11 @@ export function opencodePlugin(command: string | readonly string[]): string {
 // 由 \`quotahot-hook install\` 生成；重新安装会整份覆盖。
 // 作用：明确触限时切换账户，额度恢复后续跑仍处于失败空闲状态的会话。
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { watch } from "node:fs";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 const COMMAND = ${JSON.stringify(typeof command === 'string' ? [command] : command)};
 const classifyQuotaSignal = ${classifyQuotaSignal.toString()};

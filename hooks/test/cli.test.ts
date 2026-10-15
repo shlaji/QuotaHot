@@ -96,6 +96,49 @@ test('invalid provider is rejected instead of silently selecting Codex', async (
   assert.equal(result.stdout, '');
 });
 
+test('recovery-status reports multiple local polling instances without querying accounts', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-recovery-cli-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const statusDir = join(home, '.quotahot', 'recovery-status');
+  await mkdir(statusDir, { recursive: true });
+  const snapshot = (id: string, sessionID: string) => ({
+    version: 1, id, pid: process.pid, updatedAt: Date.now(), phase: 'waiting',
+    waitingCount: 1, sessions: [{ sessionID, phase: 'waiting' }],
+    nextCheckAt: Date.now() + 30_000, lastCheckedAt: null, lastOutcome: null,
+  });
+  await writeFile(join(statusDir, 'first.json'), JSON.stringify(snapshot('first', 'session-a')));
+  await writeFile(join(statusDir, 'second.json'), JSON.stringify(snapshot('second', 'session-b')));
+
+  const json = await cli(['recovery-status', '--json'], home);
+  assert.equal(json.code, 0, json.stderr);
+  const status = JSON.parse(json.stdout);
+  assert.equal(status.totalWaiting, 2);
+  assert.deepEqual(status.instances.map((item: { id: string }) => item.id).sort(), ['first', 'second']);
+  const text = await cli(['recovery-status'], home);
+  assert.equal(text.code, 0, text.stderr);
+  assert.match(text.stdout, /session-a/);
+  assert.match(text.stdout, /session-b/);
+});
+
+test('recovery-status separates expired snapshots from active polling instances', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-recovery-stale-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const directory = join(home, '.quotahot', 'recovery-status');
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, 'old.json'), JSON.stringify({
+    version: 1, id: 'old', pid: process.pid, updatedAt: Date.now() - 200_000,
+    phase: 'waiting', waitingCount: 2, sessions: [{ sessionID: 'old-session', phase: 'waiting' }],
+    nextCheckAt: null, lastCheckedAt: null, lastOutcome: null,
+  }));
+  const output = await cli(['recovery-status'], home);
+  assert.equal(output.code, 0);
+  assert.match(output.stdout, /没有正在等待/);
+  assert.doesNotMatch(output.stdout, /old-session:/);
+  const json = JSON.parse((await cli(['recovery-status', '--json'], home)).stdout);
+  assert.equal(json.totalWaiting, 0);
+  assert.equal(json.instances[0].stale, true);
+});
+
 test('only OpenCode is a supported install and run target', async (context) => {
   const home = await mkdtemp(join(tmpdir(), 'quotahot-hook-pi-cli-'));
   context.after(() => rm(home, { recursive: true, force: true }));

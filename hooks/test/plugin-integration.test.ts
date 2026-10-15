@@ -11,7 +11,6 @@ const exec = promisify(execFile);
 
 test('isolated install-hook activation matches generator and adopts eligible auth', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'quotahot-plugin-integration-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
   const configHome = join(root, 'config');
   const dataHome = join(root, 'data');
   const authPath = join(dataHome, 'opencode-auth.json');
@@ -43,13 +42,14 @@ esac
   assert.equal(await readFile(installedPath, 'utf8'), opencodePlugin([...invocation, 'run', 'opencode']));
 
   const pluginPath = join(root, 'installed-plugin.mjs');
-  await writeFile(pluginPath, opencodePlugin(child));
+  await writeFile(pluginPath, opencodePlugin(child).replaceAll('process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), ".quotahot")', JSON.stringify(dataHome)));
   const generated = await import(pluginPath);
   const { QuotaHot } = generated;
   assert.deepEqual(Object.keys(generated).sort(), ['QuotaHot', 'default']);
   assert.equal(generated.default.id, 'QuotaHot');
   assert.equal(generated.default.server, QuotaHot);
   const plugin = await generated.default.server({ client: { session: { messages: async () => [] } } });
+  t.after(async () => { await plugin.dispose(); await rm(root, { recursive: true, force: true }); });
   await plugin.event({ event: { type: 'message.updated', properties: { info: { id: 'a', sessionID: 'eligible', role: 'assistant', providerID: 'openai', time: { created: 1 } } } } });
   await plugin.event({ event: { type: 'session.status', properties: { sessionID: 'eligible', status: { type: 'retry', message: 'quota_exhausted' } } } });
   assert.equal(await readFile(authPath, 'utf8'), '{"access":"new"}\n');
@@ -67,6 +67,36 @@ esac
   await plugin.event({ event: { type: 'message.updated', properties: { info: { id: 'c', sessionID: 'unusable', role: 'assistant', providerID: 'openai', time: { created: 3 } } } } });
   await plugin.event({ event: { type: 'session.status', properties: { sessionID: 'unusable', status: { type: 'retry', message: 'all-unusable quota_exhausted' } } } });
   assert.equal(await readFile(authPath, 'utf8'), '{"access":"stable"}\n');
+});
+
+test('recovery-status command reads a waiting session published by the generated plugin', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'quotahot-recovery-status-e2e-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataDir = join(root, 'quotahot-data');
+  const child = join(root, 'no-candidate');
+  await writeFile(child, '#!/bin/sh\ncat >/dev/null\nprintf \'{"outcome":"no_candidate"}\'\n', { mode: 0o700 });
+  const pluginPath = join(root, 'plugin.mjs');
+  await writeFile(pluginPath, opencodePlugin(child));
+  const oldDataDir = process.env.QUOTAHOT_DATA_DIR;
+  process.env.QUOTAHOT_DATA_DIR = dataDir;
+  t.after(() => { if (oldDataDir === undefined) delete process.env.QUOTAHOT_DATA_DIR; else process.env.QUOTAHOT_DATA_DIR = oldDataDir; });
+  const { QuotaHot } = await import(pluginPath);
+  const plugin = await QuotaHot({ client: { session: { messages: async () => ({ data: [{ info: {
+    id: 'assistant-1', sessionID: 'waiting-1', role: 'assistant', providerID: 'openai', time: { created: 1 },
+  } }] }) } } });
+  t.after(() => plugin.dispose());
+  await plugin.event({ event: { type: 'message.updated', properties: { info: {
+    id: 'assistant-1', sessionID: 'waiting-1', role: 'assistant', providerID: 'openai', time: { created: 1 },
+  } } } });
+  await plugin.event({ event: { type: 'session.error', properties: { sessionID: 'waiting-1', error: { status: 429 } } } });
+  const stdout = await new Promise<string>((resolveOutput, rejectOutput) => {
+    execFile(process.execPath, ['--import', import.meta.resolve('tsx'), resolve('src/index.ts'), 'recovery-status', '--json'], {
+      cwd: process.cwd(), env: { ...process.env, QUOTAHOT_DATA_DIR: dataDir },
+    }, (error, output) => error ? rejectOutput(error) : resolveOutput(output));
+  });
+  const status = JSON.parse(stdout);
+  assert.equal(status.totalWaiting, 1);
+  assert.deepEqual(status.instances[0].sessions, [{ sessionID: 'waiting-1', phase: 'waiting' }]);
 });
 
 test('generated plugin quota phrases drive the real OpenCode hook switch path', async (t) => {
@@ -101,7 +131,7 @@ exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.r
 `);
   await chmod(wrapper, 0o700);
   const pluginPath = join(root, 'plugin.mjs');
-  await writeFile(pluginPath, opencodePlugin(wrapper));
+  await writeFile(pluginPath, opencodePlugin(wrapper).replaceAll('process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), ".quotahot")', JSON.stringify(dataDir)));
   const { QuotaHot } = await import(pluginPath);
   const plugin = await QuotaHot({ client: {} });
 
@@ -158,7 +188,7 @@ exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.r
 `);
   await chmod(wrapper, 0o700);
   const pluginPath = join(root, 'plugin.mjs');
-  await writeFile(pluginPath, opencodePlugin(wrapper));
+  await writeFile(pluginPath, opencodePlugin(wrapper).replaceAll('process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), ".quotahot")', JSON.stringify(dataDir)));
   const { QuotaHot } = await import(pluginPath);
   const plugin = await QuotaHot({ client: {} });
 

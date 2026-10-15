@@ -21,12 +21,14 @@ import {
   type InstallReport,
 } from './install.js';
 import type { Provider } from './types.js';
+import { readRecoveryStatus } from './recovery-status.js';
 import { APP_VERSION } from './version.js';
 
 const HELP = `QuotaHot Hook - standalone account switching hooks
 
 Usage:
   quotahot-hook status [options]
+  quotahot-hook recovery-status [--json]
   quotahot-hook switch [options]
   quotahot-hook run opencode [options]
   quotahot-hook install [--print]
@@ -37,6 +39,10 @@ Usage:
 `;
 
 const COMMAND_HELP: Readonly<Record<string, string>> = {
+  'recovery-status': `Usage: quotahot-hook recovery-status [--json]
+
+Reads local OpenCode recovery snapshots; never queries upstream quota.
+`,
   status: `Usage: quotahot-hook status [options]
 
 Options:
@@ -207,6 +213,22 @@ export async function run(argv: readonly string[]): Promise<number> {
       return 0;
     }
     switch (command) {
+      case 'recovery-status': {
+        if (flags.positional.length > 0 || flags.values.provider !== undefined) throw new UsageError('recovery-status accepts only --json');
+        const state = readRecoveryStatus();
+        if (flags.bools.has('json')) console.log(JSON.stringify(state, null, 2));
+        else if (state.totalWaiting === 0) console.log('没有正在等待的 OpenCode 额度恢复任务');
+        else {
+          const active = state.instances.filter((instance) => !instance.stale);
+          console.log(`等待恢复的会话: ${state.totalWaiting} · 插件实例: ${active.length}`);
+          for (const instance of active) {
+            const next = instance.nextCheckAt === null ? '未安排' : new Date(instance.nextCheckAt).toLocaleString();
+            console.log(`进程 ${instance.pid} · ${instance.stale ? '状态可能过期' : instance.phase} · 下次检查: ${next}`);
+            for (const session of instance.sessions) console.log(`  ${session.sessionID}: ${session.phase}`);
+          }
+        }
+        return 0;
+      }
       case 'status': {
         const options = switchOptions(flags);
         const survey = await surveyAccounts(options.provider ?? 'codex', {
