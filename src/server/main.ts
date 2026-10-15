@@ -51,6 +51,11 @@ import { qoderRoutes } from './qoder-routes.js';
 import { GatewayPool } from './gateway/pool.js';
 import { gatewayAdminRoutes, gatewayRoutes, gatewayStatus } from './gateway/routes.js';
 import type { GatewayDeps } from './gateway/service.js';
+import { TaskStore } from './task-store.js';
+import { TaskScheduler } from './task-scheduler.js';
+import { taskQuotaSource } from './task-quota.js';
+import { taskRoutes } from './task-routes.js';
+import { listTaskModels } from './task-models.js';
 
 const PORT = Number(process.env.PORT ?? 8686);
 const HOST = process.env.QUOTAHOT_HOST || '127.0.0.1';
@@ -80,6 +85,16 @@ try {
   console.error(`代理配置无效，已忽略: ${(err as Error).message}`);
 }
 const scheduler = new Scheduler(store, config);
+const taskStore = new TaskStore(join(cfgMod.DATA_DIR, 'tasks.db'));
+const taskScheduler = new TaskScheduler(taskStore, {
+  quota: taskQuotaSource({
+    store,
+    accountsDir: cfgMod.ACCOUNTS_DIR,
+    config: () => scheduler.getConfig(),
+  }),
+  proxy: getProxy,
+  noProxy: getBypass,
+});
 
 /**
  * 转发用的账号池。
@@ -175,6 +190,7 @@ api.route('/', qoderRoutes({ accountsDir: cfgMod.ACCOUNTS_DIR, changed: async ()
   await checkClients(false);
   await pushAccounts();
 } }));
+api.route('/', taskRoutes(taskScheduler, Date.now, listTaskModels));
 
 api.get('/state', async (c) => {
   const body: StateResponse = {
@@ -863,6 +879,7 @@ const server = serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) =>
   );
   void refreshLoop();
   void clientLoop();
+  taskScheduler.start();
   void autoStartScheduler().catch((err) => {
     // 自动启动失败不该把整个服务拖下水：界面还得能打开，好让用户看见发生了什么
     console.error(`自动启动调度失败: ${(err as Error).message}`);
@@ -874,8 +891,9 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     console.log(`\n收到 ${sig}，正在停止…`);
     if (refreshTimer) clearTimeout(refreshTimer);
     if (clientTimer) clearTimeout(clientTimer);
-    void scheduler.stop().finally(() => {
+    void Promise.all([scheduler.stop(), taskScheduler.stop()]).finally(() => {
       server.close();
+      taskStore.close();
       store.close();
       process.exit(0);
     });

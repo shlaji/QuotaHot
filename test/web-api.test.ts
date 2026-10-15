@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { api } from '../src/web/api.js';
+import { taskApi } from '../src/web/task-api.js';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +10,32 @@ import { buildAccountViews } from '../src/server/accounts-view.js';
 import { syncTargetsOf } from '../src/server/clientsync.js';
 import { setClientPaths } from '../src/server/clientpaths.js';
 import { DEFAULT_ACCOUNT_SETTING, EMPTY_STAT } from '../src/shared/gateway.js';
+
+test('task model discovery uses the current directory and omits a blank fallback', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    requests.push(String(input));
+    return new Response(JSON.stringify({ models: ['openai/test-model'] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+
+  try {
+    const scoped = await taskApi.models('/work/project name');
+    const fallback = await taskApi.models('   ');
+
+    assert.deepEqual(scoped.models, ['openai/test-model']);
+    assert.deepEqual(fallback.models, ['openai/test-model']);
+    assert.deepEqual(requests, [
+      '/api/tasks/models?directory=%2Fwork%2Fproject+name',
+      '/api/tasks/models',
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('imports token files as repeated multipart fields', async () => {
   const first = new File(['first'], 'first.json', { type: 'application/json' });

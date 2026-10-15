@@ -28,6 +28,7 @@
 
 ## 工作约束
 
+- 新增或修改的项目文档统一使用中文；命令、路径、代码标识符、API 名称、品牌名称及原始错误或日志引文保持原文。
 - 根目录 `tsconfig.json` 只包含 `src/**/*.ts`、`src/**/*.tsx` 和 `vite.config.ts`。Hook 代码由 `hooks/tsconfig.json` 检查，因此修改 `hooks/` 后必须单独执行 hook 的检查命令。
 - 应用会在自己的数据目录中持久化状态和账户副本。不要直接编辑或复用上游客户端的凭证文件；请使用 `README.md` 中说明的导入和同步流程。
 - `scripts/install.sh` 会在 Linux 上安装根服务为 systemd 用户服务，不需要 `sudo`；`hooks/scripts/install.sh` 会注册 OpenCode 插件并清理 QuotaHot 自有的旧 Codex/Pi 触发集成，不修改凭证文件。两个安装脚本都会修改用户配置且直接覆盖旧文件、不留备份，检查行为时优先使用 dry-run 或 help 模式。

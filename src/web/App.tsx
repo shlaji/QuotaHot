@@ -17,6 +17,7 @@ import { ControlPanel } from './components/ControlPanel.js';
 import { LogPane } from './components/LogPane.js';
 import { RunBar } from './components/RunBar.js';
 import { SchedulePane } from './components/SchedulePane.js';
+import { TaskPane } from './components/TaskPane.js';
 import { RequestLogDialog } from './components/RequestLogDialog.js';
 import { UsageDialog } from './components/UsageDialog.js';
 
@@ -34,12 +35,12 @@ const PROVIDER_GROUPS: { provider: string; label: string; note?: string }[] = [
 ];
 
 /**
- * 页面分成三页：账户（卡片和作用在卡片上的操作）、调度任务（起停、谁在跑、下次/上次发送）、
- * 配置（所有参数）。
+ * 页面分成四页：账户（卡片和作用在卡片上的操作）、调度任务（起停、谁在跑、下次/上次发送）、
+ * 任务管理（一次性 OpenCode 任务）、配置（所有参数）。
  */
-type Tab = 'accounts' | 'schedule' | 'config';
+type Tab = 'accounts' | 'schedule' | 'tasks' | 'config';
 const TAB_KEY = 'quotahot.tab';
-const TABS: Tab[] = ['accounts', 'schedule', 'config'];
+const TABS: Tab[] = ['accounts', 'schedule', 'tasks', 'config'];
 
 type ActiveDrag = {
   id: string;
@@ -568,6 +569,14 @@ export function App() {
         </button>
         <button
           role="tab"
+          aria-selected={tab === 'tasks'}
+          className={tab === 'tasks' ? 'tab on' : 'tab'}
+          onClick={() => openTab('tasks')}
+        >
+          任务管理
+        </button>
+        <button
+          role="tab"
           aria-selected={tab === 'config'}
           className={tab === 'config' ? 'tab on' : 'tab'}
           onClick={() => openTab('config')}
@@ -726,6 +735,10 @@ export function App() {
           onStop={handleStop}
         />
         <LogPane logs={logs} />
+      </div>
+
+      <div className="tab-panel" hidden={tab !== 'tasks'}>
+        <TaskPane active={tab === 'tasks'} />
       </div>
 
       <div className="tab-panel" hidden={tab !== 'config'}>

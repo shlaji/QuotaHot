@@ -1,0 +1,253 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type {
+  CreateTaskInput,
+  ManagedTask,
+  TaskListResponse,
+  TaskModelsResponse,
+} from '../../shared/tasks.js';
+import { taskApi } from '../task-api.js';
+import '../task-styles.css';
+import { TaskCard, type TaskAction } from './TaskCard.js';
+import { TaskForm } from './TaskForm.js';
+
+interface Props {
+  readonly active?: boolean;
+}
+
+const POLL_INTERVAL_MS = 2000;
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function upsertTask(current: TaskListResponse, task: ManagedTask): TaskListResponse {
+  const exists = current.tasks.some((item) => item.id === task.id);
+  return {
+    ...current,
+    tasks: exists
+      ? current.tasks.map((item) => (item.id === task.id ? task : item))
+      : [task, ...current.tasks],
+  };
+}
+
+function withoutKey<T>(record: Readonly<Record<string, T>>, id: string): Record<string, T> {
+  return Object.fromEntries(Object.entries(record).filter(([key]) => key !== id));
+}
+
+export function TaskPane({ active = true }: Props) {
+  const [snapshot, setSnapshot] = useState<TaskListResponse | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [retryGeneration, setRetryGeneration] = useState(0);
+  const [directory, setDirectory] = useState('');
+  const [modelResponse, setModelResponse] = useState<TaskModelsResponse | null>(null);
+  const [modelLoading, setModelLoading] = useState(false);
+  const [modelError, setModelError] = useState('');
+  const [busyById, setBusyById] = useState<Record<string, TaskAction>>({});
+  const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const mutationVersionRef = useRef(0);
+  const mutationCountRef = useRef(0);
+  const pollControllerRef = useRef<AbortController | null>(null);
+  const directoryRef = useRef('');
+  const modelRequestRef = useRef(0);
+
+  const loadModels = useCallback(async (): Promise<void> => {
+    const request = modelRequestRef.current + 1;
+    modelRequestRef.current = request;
+    setModelLoading(true);
+    setModelError('');
+    try {
+      const response = await taskApi.models(directoryRef.current);
+      if (request === modelRequestRef.current) setModelResponse(response);
+    } catch (error) {
+      if (request === modelRequestRef.current) setModelError(messageOf(error));
+    } finally {
+      if (request === modelRequestRef.current) setModelLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!active) {
+      setModelLoading(false);
+      return;
+    }
+    void loadModels();
+    return () => {
+      modelRequestRef.current += 1;
+    };
+  }, [active, loadModels]);
+
+  useEffect(() => {
+    if (!active) return;
+    let disposed = false;
+    let timer: number | null = null;
+
+    const schedule = () => {
+      timer = window.setTimeout(() => void poll(), POLL_INTERVAL_MS);
+    };
+
+    // Recursive scheduling means a slow request delays the next tick instead of overlapping it.
+    const poll = async (): Promise<void> => {
+      if (disposed) return;
+      if (mutationCountRef.current > 0) {
+        schedule();
+        return;
+      }
+
+      const controller = new AbortController();
+      const version = mutationVersionRef.current;
+      pollControllerRef.current = controller;
+      try {
+        const response = await taskApi.list(controller.signal);
+        if (!disposed && version === mutationVersionRef.current) {
+          setSnapshot(response);
+          setLoadError('');
+        }
+      } catch (error) {
+        const aborted = error instanceof DOMException && error.name === 'AbortError';
+        if (!aborted && !disposed && version === mutationVersionRef.current) {
+          setLoadError(messageOf(error));
+        }
+      } finally {
+        if (pollControllerRef.current === controller) pollControllerRef.current = null;
+        if (!disposed) schedule();
+      }
+    };
+
+    setLoadError('');
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+      pollControllerRef.current?.abort();
+      pollControllerRef.current = null;
+    };
+  }, [active, retryGeneration]);
+
+  const beginMutation = () => {
+    mutationVersionRef.current += 1;
+    mutationCountRef.current += 1;
+    pollControllerRef.current?.abort();
+  };
+
+  const finishMutation = () => {
+    mutationCountRef.current -= 1;
+  };
+
+  const createTask = async (input: CreateTaskInput): Promise<void> => {
+    beginMutation();
+    try {
+      const created = await taskApi.create(input);
+      setSnapshot((current) =>
+        current === null
+          ? { tasks: [created], defaultDirectory: '' }
+          : upsertTask(current, created),
+      );
+      setNotice('任务已创建，正在等待触发。');
+    } finally {
+      finishMutation();
+    }
+  };
+
+  const cancelTask = async (task: ManagedTask) => {
+    setBusyById((current) => ({ ...current, [task.id]: 'cancel' }));
+    setActionErrors((current) => withoutKey(current, task.id));
+    beginMutation();
+    try {
+      const cancelled = await taskApi.cancel(task.id);
+      setSnapshot((current) => (current === null ? current : upsertTask(current, cancelled)));
+      setNotice(`已取消任务：${task.description}`);
+    } catch (error) {
+      setActionErrors((current) => ({ ...current, [task.id]: messageOf(error) }));
+    } finally {
+      finishMutation();
+      setBusyById((current) => withoutKey(current, task.id));
+    }
+  };
+
+  const deleteTask = async (task: ManagedTask) => {
+    if (!confirm(`删除后任务和输出记录都会消失。确定删除“${task.description}”吗？`)) return;
+    setBusyById((current) => ({ ...current, [task.id]: 'delete' }));
+    setActionErrors((current) => withoutKey(current, task.id));
+    beginMutation();
+    try {
+      await taskApi.remove(task.id);
+      setSnapshot((current) =>
+        current === null
+          ? current
+          : { ...current, tasks: current.tasks.filter((item) => item.id !== task.id) },
+      );
+      setNotice(`已删除任务：${task.description}`);
+    } catch (error) {
+      setActionErrors((current) => ({ ...current, [task.id]: messageOf(error) }));
+    } finally {
+      finishMutation();
+      setBusyById((current) => withoutKey(current, task.id));
+    }
+  };
+
+  const retry = () => {
+    setLoadError('');
+    setRetryGeneration((current) => current + 1);
+  };
+
+  const changeDirectory = (value: string) => {
+    directoryRef.current = value;
+    setDirectory(value);
+  };
+
+  return (
+    <main className="task-pane">
+      <TaskForm
+        defaultDirectory={snapshot?.defaultDirectory ?? ''}
+        directory={directory}
+        modelDiscovery={{
+          response: modelResponse,
+          loading: modelLoading,
+          error: modelError,
+          refresh: () => void loadModels(),
+        }}
+        onDirectoryChange={changeDirectory}
+        onCreate={createTask}
+      />
+
+      <section className="task-list-section" aria-labelledby="task-list-title" aria-busy={snapshot === null && loadError === ''}>
+        <header className="task-section-head task-list-head">
+          <div>
+            <h2 id="task-list-title">任务列表</h2>
+            <p>{active ? '每 2 秒刷新一次状态。' : '切回本页后继续刷新状态。'}</p>
+          </div>
+          {snapshot !== null && <span className="task-count">{snapshot.tasks.length}</span>}
+        </header>
+
+        {notice !== '' && <p className="task-feedback task-feedback-notice" role="status">{notice}</p>}
+
+        {loadError !== '' && (
+          <div className="task-feedback task-feedback-error task-retry" role="alert">
+            <span>任务列表加载失败：{loadError}</span>
+            <button className="link" type="button" onClick={retry}>重试</button>
+          </div>
+        )}
+
+        {snapshot === null && loadError === '' && <p className="empty big">正在加载任务…</p>}
+        {snapshot !== null && snapshot.tasks.length === 0 && (
+          <p className="empty big">还没有任务。填写上方表单创建第一个任务。</p>
+        )}
+        {snapshot !== null && snapshot.tasks.length > 0 && (
+          <div className="task-grid">
+            {snapshot.tasks.map((task) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                busyAction={busyById[task.id] ?? null}
+                actionError={actionErrors[task.id] ?? ''}
+                onCancel={() => void cancelTask(task)}
+                onDelete={() => void deleteTask(task)}
+              />
+            ))}
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
