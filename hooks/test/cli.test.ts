@@ -48,6 +48,33 @@ test('install print emits only the OpenCode plugin without writing files', async
   await assert.rejects(access(join(home, '.pi', 'agent', 'extensions', 'quotahot-hook.ts')));
 });
 
+test('print and install render identical owned plugin while uninstall preserves foreign files', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-hook-lifecycle-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const pluginDir = join(home, '.config', 'opencode', 'plugins');
+  await mkdir(pluginDir, { recursive: true });
+  const pluginPath = join(pluginDir, 'quotahot.js');
+  const preview = await cli(['install', '--print'], home);
+  assert.equal(preview.code, 0, preview.stderr);
+  assert.equal(preview.stdout.slice(0, preview.stdout.indexOf('\n')), `# ${pluginPath}`);
+  await assert.rejects(access(pluginPath));
+
+  const installed = await cli(['install'], home);
+  assert.equal(installed.code, 0, installed.stderr);
+  const rendered = preview.stdout.slice(preview.stdout.indexOf('\n') + 1, -1);
+  assert.equal(await readFile(pluginPath, 'utf8'), rendered);
+  assert.match(rendered, /quotahot:start/);
+  assert.doesNotMatch(rendered, /__QUOTAHOT_COMMAND_ARGS__/);
+
+  const removed = await cli(['uninstall'], home);
+  assert.equal(removed.code, 0, removed.stderr);
+  await assert.rejects(access(pluginPath));
+  await writeFile(pluginPath, 'export default { id: "other" };\n');
+  const foreign = await cli(['uninstall'], home);
+  assert.equal(foreign.code, 0, foreign.stderr);
+  assert.equal(await readFile(pluginPath, 'utf8'), 'export default { id: "other" };\n');
+});
+
 test('subcommand help shows only the selected command options', async () => {
   // Given: each standalone command owns a distinct option surface.
   // When: help is requested through both accepted forms.

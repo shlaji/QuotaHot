@@ -7,6 +7,7 @@
   },
   "files": [
     "dist/quotahot-hook",
+    "dist/opencode-plugin-template.js",
     "dist/package.json",
     "README.md"
   ],

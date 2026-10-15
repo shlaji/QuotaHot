@@ -18,11 +18,11 @@ export PATH="$HOME/.local/bin:$PATH"
 quotahot-hook help
 ```
 
-安装命令会把 bundle 放到 `~/.local/bin/quotahot-hook`，注册 OpenCode 插件，并清除旧版本中属于 QuotaHot 的 Codex/Pi 触发集成。安装前会拒绝客户端目标参数。旧集成清理不会碰 Codex/Pi `auth.json`。
+安装命令会把 bundle 和 `opencode-plugin-template.js` 一起放到 `~/.local/bin/`，注册 OpenCode 插件，并清除旧版本中属于 QuotaHot 的 Codex/Pi 触发集成。模板必须与可执行文件保持同目录，`install` 与 `install --print` 都会读取它并填入当前可执行文件的完整命令参数。安装前会拒绝客户端目标参数。旧集成清理不会碰 Codex/Pi `auth.json`。
 
 完成后重启或重新加载 OpenCode。卸载时运行 `quotahot-hook uninstall`；它会移除 QuotaHot OpenCode 插件及可识别的旧 Codex/Pi 集成，不会修改账户文件。
 
-Windows 可解压同一压缩包，在固定目录运行 `node quotahot-hook help` 或 `node quotahot-hook install`，并将 `package.json` 与 bundle 放在一起；shell 安装脚本仅支持 Linux/macOS。
+Windows 可解压同一压缩包，在固定目录运行 `node quotahot-hook help` 或 `node quotahot-hook install`，并将 `package.json`、`opencode-plugin-template.js` 与 bundle 放在一起；shell 安装脚本仅支持 Linux/macOS。
 
 ### 从源码构建
 
@@ -37,7 +37,7 @@ export PATH="$HOME/.local/bin:$PATH"
 quotahot-hook help
 ```
 
-构建产物 `hooks/dist/quotahot-hook` 是包含依赖的独立 bundle。`npm run build` 还会生成 `hooks/release/quotahot-hook-1.0.0.tar.gz`；打包需要系统安装 `tar`。
+构建产物 `hooks/dist/quotahot-hook` 是包含依赖的 bundle，`hooks/dist/opencode-plugin-template.js` 是独立维护的插件运行时模板；两者须一起分发。`npm run build` 还会生成 `hooks/release/quotahot-hook-1.0.0.tar.gz`；打包需要系统安装 `tar`。
 
 ## 命令
 

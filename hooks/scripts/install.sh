@@ -26,7 +26,7 @@ if [ -f "$source_dir/quotahot-hook" ]; then
 else
   bundle_dir=$(CDPATH= cd -- "$source_dir/.." && pwd)/dist
 fi
-if [ ! -f "$bundle_dir/quotahot-hook" ]; then
+if [ ! -f "$bundle_dir/quotahot-hook" ] || [ ! -f "$bundle_dir/opencode-plugin-template.js" ]; then
   printf '%s\n' "Build output missing in $bundle_dir." \
     'Run npm run build in hooks/ or extract the install package.' >&2
   exit 1
@@ -35,6 +35,7 @@ printf 'Build output directory: %s\n' "$bundle_dir"
 
 bin_dir=$HOME/.local/bin
 target_binary=$bin_dir/quotahot-hook
+target_template=$bin_dir/opencode-plugin-template.js
 mkdir -p "$bin_dir"
 binary_tmp=$(mktemp "$bin_dir/.quotahot-hook.XXXXXX")
 if ! install -m 0755 "$bundle_dir/quotahot-hook" "$binary_tmp"; then
@@ -42,6 +43,13 @@ if ! install -m 0755 "$bundle_dir/quotahot-hook" "$binary_tmp"; then
   printf '%s\n' 'Failed to copy quotahot-hook.' >&2
   exit 1
 fi
+template_tmp=$(mktemp "$bin_dir/.opencode-plugin-template.XXXXXX")
+if ! install -m 0644 "$bundle_dir/opencode-plugin-template.js" "$template_tmp"; then
+  rm -f "$binary_tmp" "$template_tmp"
+  printf '%s\n' 'Failed to copy OpenCode plugin template.' >&2
+  exit 1
+fi
+mv -f "$template_tmp" "$target_template"
 mv -f "$binary_tmp" "$target_binary"
 node "$target_binary" install
 printf '\n%s\n' 'Installed. Add the command directory to your shell PATH:' \

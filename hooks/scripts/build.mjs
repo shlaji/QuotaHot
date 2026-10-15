@@ -22,6 +22,7 @@ const result = await build({
     define: { __QUOTAHOT_VERSION__: JSON.stringify(hookPackage.version) },
 });
 await chmod('dist/quotahot-hook', 0o755);
+await copyFile('src/opencode-plugin-template.js', 'dist/opencode-plugin-template.js');
 await writeFile('dist/package.json', '{"type":"commonjs"}\n');
 await writeFile('dist/meta.json', `${JSON.stringify(result.metafile, null, 2)}\n`);
 
@@ -33,6 +34,7 @@ await mkdir(stage, { recursive: true });
 try {
   for (const [source, destination] of [
     ['dist/quotahot-hook', 'quotahot-hook'],
+    ['dist/opencode-plugin-template.js', 'opencode-plugin-template.js'],
     ['dist/package.json', 'package.json'],
     ['scripts/install.sh', 'install.sh'],
     ['README.md', 'README.md'],
@@ -42,7 +44,7 @@ try {
   await chmod(`${stage}/quotahot-hook`, 0o755);
   await chmod(`${stage}/install.sh`, 0o755);
   execFileSync('tar', ['-czf', `release/${name}.tar.gz`, '-C', 'release',
-    `${name}/quotahot-hook`, `${name}/package.json`, `${name}/install.sh`, `${name}/README.md`]);
+    `${name}/quotahot-hook`, `${name}/opencode-plugin-template.js`, `${name}/package.json`, `${name}/install.sh`, `${name}/README.md`]);
   console.log(`Install package: release/${name}.tar.gz`);
 } finally {
   await rm(stage, { recursive: true, force: true });

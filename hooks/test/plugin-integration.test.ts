@@ -127,7 +127,7 @@ test('generated plugin quota phrases drive the real OpenCode hook switch path', 
 export HOME=${JSON.stringify(root)}
 export XDG_DATA_HOME=${JSON.stringify(dataHome)}
 export QUOTAHOT_DATA_DIR=${JSON.stringify(dataDir)}
-exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.resolve('tsx'))} ${JSON.stringify(resolve('src/index.ts'))} run opencode --no-check --min-interval-seconds 0 --client opencode
+exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.resolve('tsx'))} ${JSON.stringify(resolve('src/index.ts'))} run opencode --no-check --min-interval-seconds 0
 `);
   await chmod(wrapper, 0o700);
   const pluginPath = join(root, 'plugin.mjs');
@@ -145,7 +145,7 @@ exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.r
     await plugin.event({ event: { type: 'session.status', properties: {
       sessionID, status: { type: 'retry', message: phrase },
     } } });
-    assert.equal(JSON.parse(await readFile(authPath, 'utf8')).openai.access, 'token-b@x.com');
+    assert.equal(JSON.parse(await readFile(authPath, 'utf8')).openai.access, 'token-b@x.com', phrase);
   }
 });
 
