@@ -31,6 +31,7 @@ function decode(row: Record<string, SQLOutputValue>): ManagedTask {
   return {
     id: text(row.id), description: text(row.description), model: text(row.model),
     directory: text(row.directory), trigger, status,
+    sessionId: row.session_id === null ? null : text(row.session_id),
     createdAt: Date.parse(text(row.created_at)), startedAt: date(row.started_at),
     finishedAt: date(row.finished_at), output: text(row.output), error: text(row.error),
   };
@@ -54,12 +55,22 @@ export class TaskStore {
       );
       CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);
     `);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      if (!this.db.prepare('PRAGMA table_info(tasks)').all().some((column) => column.name === 'session_id')) {
+        this.db.exec('ALTER TABLE tasks ADD COLUMN session_id TEXT');
+      }
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   create(input: CreateTaskInput, now: number): ManagedTask {
     const task: ManagedTask = {
       ...input, id: randomUUID(), status: 'pending', createdAt: now,
-      startedAt: null, finishedAt: null, output: '', error: '',
+      startedAt: null, finishedAt: null, sessionId: null, output: '', error: '',
     };
     this.db.prepare(`INSERT INTO tasks
       (id, description, model, directory, trigger_type, trigger_at, status, created_at)
@@ -90,6 +101,20 @@ export class TaskStore {
   updateOutput(id: string, output: string): void {
     this.db.prepare(`UPDATE tasks SET output = ? WHERE id = ? AND status IN ('running','cancelled')`)
       .run(boundedText(output), id);
+  }
+
+  setSession(id: string, sessionId: string): void {
+    this.db.prepare(`UPDATE tasks SET session_id = ? WHERE id = ? AND session_id IS NULL
+      AND status IN ('running','cancelled')`).run(sessionId, id);
+  }
+
+  claimContinuation(id: string, now: number): ManagedTask | null {
+    const row = this.db.prepare(`UPDATE tasks SET status = 'running', started_at = ?,
+      finished_at = NULL, output = '', error = ''
+      WHERE id = ? AND status = 'succeeded' AND session_id IS NOT NULL AND session_id != ''
+      AND NOT EXISTS (SELECT 1 FROM tasks WHERE status = 'running') RETURNING *`)
+      .get(new Date(now).toISOString(), id);
+    return row ? decode(row) : null;
   }
 
   finish(id: string, result: TaskOutcome, now: number): void {

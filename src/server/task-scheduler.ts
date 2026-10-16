@@ -2,14 +2,14 @@ import { homedir } from 'node:os';
 import type { CreateTaskInput, ManagedTask, TaskListResponse } from '../shared/tasks.js';
 import type { UsageResult } from '../shared/types.js';
 import { TaskStore, type TaskOutcome } from './task-store.js';
-import { runTask, type TaskOutputCallback } from './task-runner.js';
+import { runTask, type TaskRunnerOptions } from './task-runner.js';
 import { hasTaskQuota } from './task-quota.js';
 import { TaskError } from './task-error.js';
 
 interface TaskSchedulerOptions {
   readonly now?: () => number;
   readonly quota: () => Promise<readonly UsageResult[]>;
-  readonly run?: (task: CreateTaskInput, signal: AbortSignal, onOutput?: TaskOutputCallback) => Promise<TaskOutcome>;
+  readonly run?: (task: CreateTaskInput, signal: AbortSignal, options: TaskRunnerOptions) => Promise<TaskOutcome>;
   readonly proxy?: () => string;
   readonly noProxy?: () => readonly string[];
 }
@@ -27,8 +27,8 @@ export class TaskScheduler {
 
   constructor(private readonly store: TaskStore, private readonly options: TaskSchedulerOptions) {
     this.now = options.now ?? Date.now;
-    this.run = options.run ?? ((task, signal, onOutput) => runTask(task, signal, {
-      onOutput, proxy: options.proxy?.(), noProxy: options.noProxy?.(),
+    this.run = options.run ?? ((task, signal, execution) => runTask(task, signal, {
+      ...execution, proxy: options.proxy?.(), noProxy: options.noProxy?.(),
     }));
     this.store.recoverInterrupted(this.now());
   }
@@ -64,6 +64,15 @@ export class TaskScheduler {
     return cancelled;
   }
 
+  continueTask(id: string, message: string): ManagedTask {
+    if (!this.store.get(id)) throw new TaskError('Task not found', 404);
+    if (this.stopped || this.active) throw new TaskError('Task service is busy or stopping', 409);
+    const task = this.store.claimContinuation(id, this.now());
+    if (!task || task.sessionId === null) throw new TaskError('Only succeeded tasks with a session can continue while idle', 409);
+    this.launch(task, { sessionId: task.sessionId, prompt: message });
+    return task;
+  }
+
   remove(id: string): void {
     if (!this.store.get(id)) throw new TaskError('Task not found', 404);
     if (this.active?.id === id || !this.store.remove(id)) throw new TaskError('Running tasks cannot be deleted', 409);
@@ -88,9 +97,13 @@ export class TaskScheduler {
     if (!ready) return;
     const claimed = this.store.claim(ready.id, now);
     if (!claimed) return;
+    this.launch(claimed);
+  }
+
+  private launch(task: ManagedTask, options: TaskRunnerOptions = {}): void {
     const controller = new AbortController();
-    const promise = this.execute(claimed, controller.signal).finally(() => { this.active = null; });
-    this.active = { id: claimed.id, controller, promise };
+    const promise = this.execute(task, controller.signal, options).finally(() => { this.active = null; });
+    this.active = { id: task.id, controller, promise };
   }
 
   private async checkQuota(startedAt: number): Promise<void> {
@@ -106,13 +119,17 @@ export class TaskScheduler {
     }
   }
 
-  private async execute(task: ManagedTask, signal: AbortSignal): Promise<void> {
+  private async execute(task: ManagedTask, signal: AbortSignal, options: TaskRunnerOptions): Promise<void> {
     let result: TaskOutcome;
     let output = '';
     try {
-      result = await this.run(task, signal, (captured) => {
-        output = captured;
-        this.store.updateOutput(task.id, captured);
+      result = await this.run(task, signal, {
+        ...options,
+        onSession: (sessionId) => this.store.setSession(task.id, sessionId),
+        onOutput: (captured) => {
+          output = captured;
+          this.store.updateOutput(task.id, captured);
+        },
       });
     } catch (error) {
       result = { status: 'failed', output, error: error instanceof Error ? error.message : String(error) };

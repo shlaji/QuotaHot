@@ -45,11 +45,14 @@ export function TaskPane({ active = true }: Props) {
   const [modelError, setModelError] = useState('');
   const [busyById, setBusyById] = useState<Record<string, TaskAction>>({});
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
+  const sendingMessageRef = useRef(false);
   const mutationVersionRef = useRef(0);
   const mutationCountRef = useRef(0);
   const pollControllerRef = useRef<AbortController | null>(null);
   const directoryRef = useRef('');
   const modelRequestRef = useRef(0);
+  const hasRunningTask = snapshot?.tasks.some((task) => task.status === 'running') ?? false;
+  const messageBlocked = hasRunningTask || Object.values(busyById).includes('message');
 
   const loadModels = useCallback(async (): Promise<void> => {
     const request = modelRequestRef.current + 1;
@@ -130,10 +133,6 @@ export function TaskPane({ active = true }: Props) {
     pollControllerRef.current?.abort();
   };
 
-  const finishMutation = () => {
-    mutationCountRef.current -= 1;
-  };
-
   const createTask = async (input: CreateTaskInput): Promise<void> => {
     beginMutation();
     try {
@@ -145,7 +144,7 @@ export function TaskPane({ active = true }: Props) {
       );
       setNotice('任务已创建，正在等待触发。');
     } finally {
-      finishMutation();
+      mutationCountRef.current -= 1;
     }
   };
 
@@ -160,7 +159,7 @@ export function TaskPane({ active = true }: Props) {
     } catch (error) {
       setActionErrors((current) => ({ ...current, [task.id]: messageOf(error) }));
     } finally {
-      finishMutation();
+      mutationCountRef.current -= 1;
       setBusyById((current) => withoutKey(current, task.id));
     }
   };
@@ -181,8 +180,29 @@ export function TaskPane({ active = true }: Props) {
     } catch (error) {
       setActionErrors((current) => ({ ...current, [task.id]: messageOf(error) }));
     } finally {
-      finishMutation();
+      mutationCountRef.current -= 1;
       setBusyById((current) => withoutKey(current, task.id));
+    }
+  };
+
+  const sendMessage = async (task: ManagedTask, message: string): Promise<boolean> => {
+    if (sendingMessageRef.current || hasRunningTask || busyById[task.id] !== undefined) return false;
+    sendingMessageRef.current = true;
+    setBusyById((current) => ({ ...current, [task.id]: 'message' }));
+    setActionErrors((current) => withoutKey(current, task.id));
+    beginMutation();
+    try {
+      const updated = await taskApi.sendMessage(task.id, message);
+      setSnapshot((current) => (current === null ? current : upsertTask(current, updated)));
+      setNotice(`消息已发送，任务继续执行：${task.description}`);
+      return true;
+    } catch (error) {
+      setActionErrors((current) => ({ ...current, [task.id]: messageOf(error) }));
+      return false;
+    } finally {
+      mutationCountRef.current -= 1;
+      setBusyById((current) => withoutKey(current, task.id));
+      sendingMessageRef.current = false;
     }
   };
 
@@ -241,6 +261,8 @@ export function TaskPane({ active = true }: Props) {
                 task={task}
                 busyAction={busyById[task.id] ?? null}
                 actionError={actionErrors[task.id] ?? ''}
+                messageBlocked={messageBlocked}
+                onSendMessage={(message) => sendMessage(task, message)}
                 onCancel={() => void cancelTask(task)}
                 onDelete={() => void deleteTask(task)}
               />

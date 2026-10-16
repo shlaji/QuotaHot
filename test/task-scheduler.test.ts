@@ -156,7 +156,7 @@ test('retains live and late output when success arrives after cancellation', asy
   let now = 2000;
   const scheduler = new TaskScheduler(store, {
     now: () => now, quota: async () => [],
-    run: async (_task, signal, onOutput) => {
+    run: async (_task, signal, { onOutput }) => {
       onOutput?.('live');
       signal.addEventListener('abort', () => onOutput?.('live\nstopping'));
       return finished.promise;

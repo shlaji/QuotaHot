@@ -85,3 +85,52 @@ test('bounds progress and final output without splitting UTF-8 characters', (t) 
   store.finish(task.id, { status: 'succeeded', output, error: '' }, now + 100);
   assert.equal(store.get(task.id)?.output, expected);
 });
+
+test('migrates a legacy database additively and persists discovered sessions across reopen', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'task-migration-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, 'tasks.db');
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`CREATE TABLE tasks (
+    id TEXT PRIMARY KEY, description TEXT, model TEXT, directory TEXT, trigger_type TEXT,
+    trigger_at TEXT, status TEXT, created_at TEXT, started_at TEXT, finished_at TEXT,
+    output TEXT DEFAULT '', error TEXT DEFAULT '');
+    INSERT INTO tasks (id, description, model, directory, trigger_type, status, created_at)
+    VALUES ('legacy', 'old task', 'openai/test', '/tmp', 'quota', 'succeeded', '2026-10-16T12:00:00.000Z');`);
+  legacy.close();
+
+  const migrated = new TaskStore(path);
+  assert.equal(migrated.get('legacy')?.description, 'old task');
+  assert.equal(migrated.get('legacy')?.sessionId, null);
+  assert.equal(migrated.claimContinuation('legacy', now), null);
+  const task = migrated.create(input, now);
+  migrated.claim(task.id, now);
+  migrated.setSession(task.id, 'session-root');
+  migrated.setSession(task.id, 'unrelated-child');
+  migrated.close();
+  const reopened = new TaskStore(path);
+  t.after(() => reopened.close());
+  assert.equal(reopened.get(task.id)?.sessionId, 'session-root');
+});
+
+test('claims a successful session once across connections and clears only turn state', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'task-resume-claim-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, 'tasks.db');
+  const first = new TaskStore(path);
+  const second = new TaskStore(path);
+  t.after(() => { first.close(); second.close(); });
+  const task = first.create(input, now);
+  first.claim(task.id, now);
+  first.setSession(task.id, 'root');
+  first.finish(task.id, { status: 'succeeded', output: 'old output', error: '' }, now + 1);
+  const pending = first.create(input, now);
+
+  const continued = second.claimContinuation(task.id, now + 2);
+
+  assert.deepEqual(continued, { ...task, sessionId: 'root', status: 'running', startedAt: now + 2 });
+  assert.equal(first.claimContinuation(task.id, now + 3), null);
+  assert.equal(first.claim(pending.id, now + 3), null);
+  second.cancel(task.id, now + 4);
+  assert.equal(first.claimContinuation(task.id, now + 5), null);
+});

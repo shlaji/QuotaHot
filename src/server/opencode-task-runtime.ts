@@ -28,6 +28,9 @@ export interface TaskRunnerOptions extends RuntimeDependencies {
   readonly env?: NodeJS.ProcessEnv;
   readonly killGraceMs?: number;
   readonly onOutput?: TaskOutputCallback;
+  readonly onSession?: (sessionId: string) => void;
+  readonly sessionId?: string;
+  readonly prompt?: string;
   readonly proxy?: string;
   readonly noProxy?: readonly string[];
 }
@@ -51,6 +54,7 @@ export class OpenCodeTaskRuntime {
   private rootExitCode: number | null = null;
   private rootExitSignal: NodeJS.Signals | null = null;
   private rootId: string | null = null;
+  private sessionReported = false;
   private base = '';
   private rootOutputLine = '';
 
@@ -58,6 +62,7 @@ export class OpenCodeTaskRuntime {
     this.fetcher = options.fetch ?? fetch;
     this.spawnProcess = options.spawn ?? spawn;
     this.sleep = options.sleep ?? waitFor;
+    this.rootId = options.sessionId ?? null;
     this.env = createEnvironment(task, options.env, options.proxy?.trim() ?? '', options.noProxy ?? []);
   }
 
@@ -69,9 +74,13 @@ export class OpenCodeTaskRuntime {
       this.base = `http://127.0.0.1:${port}`;
       this.start(['serve', '--hostname', '127.0.0.1', '--port', String(port)], true);
       await this.waitForHealth(this.base);
-      const root = this.start(['run', '--attach', this.base, '--format', 'json', '--model', this.task.model, '--dir', this.task.directory, '--', this.task.description], true);
+      const root = this.start([
+        'run', '--attach', this.base, '--format', 'json', '--model', this.task.model, '--dir', this.task.directory,
+        ...(this.options.sessionId === undefined ? [] : ['--session', this.options.sessionId]),
+        '--', this.options.prompt ?? this.task.description,
+      ], true);
       await this.waitForRoot(root);
-      if (!this.rootId) throw new Error('OpenCode run did not report a root session ID');
+      if (!this.rootId || !this.sessionReported) throw new Error('OpenCode run did not report a root session ID');
       error = await this.sessionTree(this.base).wait(this.rootId, this.rootExitCode, this.rootExitSignal);
     } catch (cause) {
       error = errorText(cause);
@@ -133,7 +142,15 @@ export class OpenCodeTaskRuntime {
       if (!line.trim()) continue;
       try {
         const id = rootSessionId(JSON.parse(line));
-        if (id) this.rootId ??= id;
+        if (id && !this.sessionReported) {
+          this.sessionReported = true;
+          if (this.rootId !== null && this.rootId !== id) {
+            this.processError = 'OpenCode run reported a different session than requested';
+          } else {
+            this.rootId = id;
+            this.options.onSession?.(id);
+          }
+        }
       } catch (error) {
         if (!(error instanceof SyntaxError)) this.processError = errorText(error);
       }
@@ -167,6 +184,7 @@ export class OpenCodeTaskRuntime {
       await this.sleep(POLL_MS, this.signal);
     }
     if (this.signal.aborted) throw new Error('Execution cancelled');
+    if (this.rootOutputLine) this.parseRoot(Buffer.from('\n'));
     if (this.processError) throw new Error(this.processError);
     if (!root.pid) throw new Error('OpenCode run did not start');
   }

@@ -1,3 +1,5 @@
+export const MAX_TASK_MESSAGE_LENGTH = 32000;
+
 export type TaskTrigger = { readonly type: 'quota' } | { readonly type: 'time'; readonly at: number };
 
 export interface CreateTaskInput {
@@ -9,6 +11,7 @@ export interface CreateTaskInput {
 
 export interface ManagedTask extends CreateTaskInput {
   readonly id: string;
+  readonly sessionId: string | null;
   readonly status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
   readonly createdAt: number;
   readonly startedAt: number | null;

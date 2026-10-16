@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
-import type { ManagedTask, TaskTrigger } from '../../shared/tasks.js';
+import { useEffect, useId, useState, type SubmitEvent } from 'react';
+import { MAX_TASK_MESSAGE_LENGTH, type ManagedTask, type TaskTrigger } from '../../shared/tasks.js';
 
-export type TaskAction = 'cancel' | 'delete';
+export type TaskAction = 'cancel' | 'delete' | 'message';
 type CopyFeedback = {
   readonly status: 'idle' | 'copied' | 'error';
   readonly message: string;
@@ -11,6 +11,8 @@ interface Props {
   readonly task: ManagedTask;
   readonly busyAction: TaskAction | null;
   readonly actionError: string;
+  readonly messageBlocked: boolean;
+  readonly onSendMessage: (message: string) => Promise<boolean>;
   readonly onCancel: () => void;
   readonly onDelete: () => void;
 }
@@ -42,10 +44,24 @@ function triggerText(trigger: TaskTrigger): string {
   }
 }
 
-export function TaskCard({ task, busyAction, actionError, onCancel, onDelete }: Props) {
+export function TaskCard({ task, busyAction, actionError, messageBlocked, onSendMessage, onCancel, onDelete }: Props) {
   const [copyFeedback, setCopyFeedback] = useState<CopyFeedback>({ status: 'idle', message: '' });
+  const [message, setMessage] = useState('');
+  const messageInputId = useId();
+  const messageHintId = useId();
   const cancellable = task.status === 'pending' || task.status === 'running';
   const busy = busyAction !== null;
+  const submitting = busyAction === 'message';
+  const canContinue = task.status === 'succeeded'
+    && 'sessionId' in task && typeof task.sessionId === 'string' && task.sessionId !== '';
+  const messageEnabled = canContinue && !busy && !messageBlocked;
+
+  const submitMessage = async (event: SubmitEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    const draft = message.trim();
+    if (!messageEnabled || draft === '') return;
+    if (await onSendMessage(draft)) setMessage('');
+  };
 
   useEffect(() => {
     setCopyFeedback({ status: 'idle', message: '' });
@@ -133,6 +149,37 @@ export function TaskCard({ task, busyAction, actionError, onCancel, onDelete }: 
         <p className="task-feedback task-feedback-error" role="alert">
           操作失败：{actionError}
         </p>
+      )}
+
+      {(canContinue || message !== '' || submitting) && (
+        <form className="task-form task-message-composer" aria-busy={submitting} onSubmit={submitMessage}>
+          <div className="field task-field">
+            <label htmlFor={messageInputId}><span>追加消息</span></label>
+            <textarea
+              id={messageInputId}
+              required
+              maxLength={MAX_TASK_MESSAGE_LENGTH}
+              rows={3}
+              value={message}
+              disabled={!messageEnabled}
+              aria-describedby={messageHintId}
+              placeholder="说明下一步要让 OpenCode 完成的工作"
+              onChange={(event) => setMessage(event.target.value)}
+            />
+          </div>
+          <small id={messageHintId} className="task-field-note">
+            {!canContinue
+              ? '任务完成且会话可用后才能追加消息。'
+              : messageBlocked && !submitting
+                ? '有任务正在执行或发送消息，请等待完成后再发送。'
+                : '沿用当前会话继续执行，输出仅显示最新一轮。'}
+          </small>
+          <div className="task-submit-row">
+            <button className="primary" type="submit" disabled={!messageEnabled || message.trim() === '' || message.length > MAX_TASK_MESSAGE_LENGTH}>
+              {submitting ? '正在发送…' : '发送消息'}
+            </button>
+          </div>
+        </form>
       )}
 
       <footer className="task-card-actions">

@@ -10,6 +10,7 @@ import { buildAccountViews } from '../src/server/accounts-view.js';
 import { syncTargetsOf } from '../src/server/clientsync.js';
 import { setClientPaths } from '../src/server/clientpaths.js';
 import { DEFAULT_ACCOUNT_SETTING, EMPTY_STAT } from '../src/shared/gateway.js';
+import type { ManagedTask } from '../src/shared/tasks.js';
 
 test('task model discovery uses the current directory and omits a blank fallback', async () => {
   const originalFetch = globalThis.fetch;
@@ -35,6 +36,62 @@ test('task model discovery uses the current directory and omits a blank fallback
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('sends a task follow-up as JSON to the encoded task URL and returns the resumed task', async (context) => {
+  const resumed: ManagedTask & { readonly sessionId: string } = {
+    id: 'task /?#',
+    description: 'Review the project',
+    model: 'openai/test-model',
+    directory: '/work/project',
+    trigger: { type: 'quota' },
+    status: 'running',
+    sessionId: 'ses_test',
+    createdAt: 1000,
+    startedAt: 2000,
+    finishedAt: null,
+    output: '',
+    error: '',
+  };
+  const message = 'Continue with tests\nPreserve "quoted" details.';
+  const originalFetch = globalThis.fetch;
+  let request: Request | undefined;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async (input, init) => {
+    request = new Request(new URL(String(input), 'http://localhost'), init);
+    return Response.json(resumed, { status: 202 });
+  };
+
+  const result = await taskApi.sendMessage(resumed.id, message);
+
+  assert.equal(request?.url, 'http://localhost/api/tasks/task%20%2F%3F%23/messages');
+  assert.equal(request?.method, 'POST');
+  assert.equal(request?.headers.get('content-type'), 'application/json');
+  assert.deepEqual(await request?.json(), { message });
+  assert.deepEqual(result, resumed);
+});
+
+for (const failure of [
+  { status: 400, body: JSON.stringify({ error: 'task is not eligible' }), message: 'task is not eligible' },
+  { status: 409, body: JSON.stringify({ error: 'another task is running' }), message: 'another task is running' },
+  { status: 502, body: 'Bad gateway', message: 'HTTP 502' },
+]) {
+  test(`reports task follow-up errors for HTTP ${failure.status}`, async (context) => {
+    const originalFetch = globalThis.fetch;
+    context.after(() => { globalThis.fetch = originalFetch; });
+    globalThis.fetch = async () => new Response(failure.body, { status: failure.status });
+
+    await assert.rejects(() => taskApi.sendMessage('task-1', 'Continue'), { message: failure.message });
+  });
+}
+
+test('propagates task follow-up network failures', async (context) => {
+  const originalFetch = globalThis.fetch;
+  const failure = new TypeError('Network unavailable');
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => { throw failure; };
+
+  await assert.rejects(() => taskApi.sendMessage('task-1', 'Continue'), failure);
 });
 
 test('imports token files as repeated multipart fields', async () => {

@@ -21,6 +21,7 @@ function fixture(t: TestContext, mode: string) {
     const read = () => JSON.parse(fs.readFileSync(stateFile, 'utf8'));
     const write = (value) => fs.writeFileSync(stateFile, JSON.stringify(value));
     if (process.argv[2] === 'serve') {
+      fs.writeFileSync(stateFile + '.server-pid', String(process.pid));
       const server = http.createServer((request, response) => {
         const url = new URL(request.url, 'http://127.0.0.1');
         const state = read();
@@ -71,6 +72,11 @@ function fixture(t: TestContext, mode: string) {
       });
       server.listen(Number(process.argv.at(-1)), '127.0.0.1');
     } else {
+      if (mode === 'resume') {
+        const assert = require('node:assert/strict');
+        assert.deepEqual(process.argv.slice(5), ['--format', 'json', '--model', 'openai/test', '--dir', process.cwd(), '--session', 'root', '--', 'follow up']);
+        assert.equal(process.env.PWD, process.cwd());
+      }
       process.stdout.write(JSON.stringify({ sessionID: 'root' }) + '\\n');
       process.stdout.write(JSON.stringify({ type: 'text', part: { text: process.argv.at(-1) } }) + '\\n');
       if (mode === 'root-failed') process.exitCode = 7;
@@ -200,4 +206,40 @@ test('bounds cancellation when OpenCode keeps reporting a session busy', { timeo
   const result = await running;
   assert.equal(result.status, 'failed');
   assert.match(result.error, /Execution cancelled.*Timed out aborting OpenCode session tree/);
+});
+
+test('reports the initial session while the task is still running', { timeout: 5000 }, async (t) => {
+  const data = fixture(t, 'no-message');
+  const controller = new AbortController();
+  const discovered = Promise.withResolvers<string>();
+  const running = runTask(data.input, controller.signal, {
+    executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'no-message' },
+    onSession: discovered.resolve,
+  });
+  assert.equal(await discovered.promise, 'root');
+  controller.abort();
+  assert.equal((await running).status, 'failed');
+});
+
+test('resumes the exact session with the new prompt and original directory and model', { timeout: 5000 }, async (t) => {
+  const data = fixture(t, 'resume');
+  const result = await runTask(data.input, new AbortController().signal, {
+    executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'resume' },
+    sessionId: 'root', prompt: 'follow up',
+  });
+  assert.equal(result.status, 'succeeded', result.error);
+  assert.deepEqual(JSON.parse(result.output.trim().split('\n').at(-1) ?? ''), { type: 'text', part: { text: 'follow up' } });
+  const serverPid = Number(readFileSync(data.state + '.server-pid', 'utf8'));
+  assert.throws(() => process.kill(serverPid, 0), (error: unknown) => error instanceof Error && 'code' in error && error.code === 'ESRCH');
+});
+
+test('fails rather than accepting a different session during continuation', { timeout: 5000 }, async (t) => {
+  const data = fixture(t, 'resume-mismatch');
+  const result = await runTask(data.input, new AbortController().signal, {
+    executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'resume-mismatch' },
+    sessionId: 'expected-root', prompt: 'follow up',
+    onSession: () => assert.fail('must not persist a replacement session'),
+  });
+  assert.equal(result.status, 'failed');
+  assert.match(result.error, /different session/);
 });

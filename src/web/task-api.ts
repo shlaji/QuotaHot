@@ -29,6 +29,11 @@ export const taskApi = {
   },
   create: (input: CreateTaskInput) =>
     json<ManagedTask>('/api/tasks', { method: 'POST', body: JSON.stringify(input) }),
+  sendMessage: (id: string, message: string) =>
+    json<ManagedTask>(`/api/tasks/${encodeURIComponent(id)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }),
   cancel: (id: string) =>
     json<ManagedTask>(`/api/tasks/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   remove: (id: string) =>
