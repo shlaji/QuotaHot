@@ -591,5 +591,78 @@ export const QuotaHot = async ({ client }) => {
     },
   };
 };
-export default { id: "QuotaHot", server: QuotaHot };
+// V2 使用独立的上下文适配层；定义对象无需运行时依赖（Plugin.define 是恒等函数）。
+async function setupV2(ctx) {
+  const controller = new AbortController();
+  const client = {
+    session: {
+      messages: async ({ path }) => {
+        const messages = await ctx.session.context({ sessionID: path.id });
+        return { data: messages.filter((message) => message.type !== "idle" || message.outcome !== "failed").map((message) => ({
+          info: { ...message, sessionID: path.id, role: message.type, providerID: message.model?.providerID },
+        })) };
+      },
+      status: async () => {
+        const active = await ctx.session.active();
+        return { data: Object.fromEntries(Object.keys(active).map((id) => [id, { type: "busy" }])) };
+      },
+      promptAsync: ({ path, body }) => ctx.session.prompt({ sessionID: path.id, text: body.parts[0].text }),
+    },
+    // V2 服务插件没有 V1 的 tui/app.log API，诊断输出交给插件运行时。
+    tui: { showToast: async ({ body }) => console.warn("[QuotaHot] " + body.message) },
+    app: { log: async ({ body }) => console.info("[QuotaHot] " + body.message) },
+  };
+  const plugin = await QuotaHot({ client });
+  const dispatch = (type, properties) => plugin.event({ event: { type, properties } });
+  const pending = new Set();
+  const handle = async (event) => {
+    const data = event.data;
+    const sessionID = data?.sessionID;
+    if (!sessionID) return;
+    if (event.type === "session.execution.failed" || event.type === "session.retry.scheduled") {
+      // V2 不再发布 message.updated；每次额度事件重新读取当前模型和失败消息。
+      assistantMessages.delete(sessionID);
+      if (event.type === "session.execution.failed") {
+        await dispatch("session.error", { sessionID, error: data.error });
+      } else {
+        await dispatch("session.status", { sessionID, messageID: data.assistantMessageID,
+          status: { type: "retry", error: data.error } });
+      }
+    } else if (event.type === "session.execution.interrupted" || event.type === "session.inbox.enqueued" ||
+               event.type === "session.execution.succeeded" || event.type === "session.model.selected") {
+      // 新输入、取消、成功或手动换模型均取消旧失败的自动续跑。
+      await dispatch("session.error", { sessionID, error: { name: "MessageAbortedError" } });
+      assistantMessages.delete(sessionID);
+    } else if (event.type === "session.execution.started") {
+      await dispatch("session.status", { sessionID, status: { type: "busy" } });
+    } else if (["session.status", "session.idle", "session.deleted"].includes(event.type)) {
+      await dispatch(event.type, data);
+    }
+  };
+  const consume = (async () => {
+    try {
+      for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+        if (controller.signal.aborted) break;
+        // 不让外部 hook 或 SDK 查询阻塞取消事件；恢复流程自身校验 revision。
+        const task = handle(event).catch(() => {
+          console.warn("[QuotaHot] 事件处理失败，请检查插件运行环境");
+        });
+        pending.add(task);
+        void task.finally(() => pending.delete(task));
+      }
+    } catch {
+      if (!controller.signal.aborted) console.warn("[QuotaHot] 事件订阅已停止，请重新加载插件");
+    } finally {
+      await plugin.dispose();
+      await Promise.all(pending);
+    }
+  })();
+  return async () => {
+    controller.abort();
+    // 先禁用恢复，避免正在执行的 hook 返回后重新建立等待。
+    await plugin.dispose();
+    await consume;
+  };
+}
+export default { id: "QuotaHot", server: QuotaHot, setup: setupV2 };
 // quotahot:end

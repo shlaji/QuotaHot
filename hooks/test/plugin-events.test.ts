@@ -316,7 +316,7 @@ async function recoveryFixture(t: TestContext) {
     promptAsync: async (request: Prompt): Promise<unknown> => { prompts.push(request); return { data: undefined }; },
   };
   const source = opencodePlugin('fake-hook').replace(/^import .* from "node:(?:child_process|crypto|fs|fs\/promises|path|os)";\n/gm, '')
-    .replace('export const QuotaHot', 'const QuotaHot').replace('export default { id: "QuotaHot", server: QuotaHot };', '({ QuotaHot, settledStatus: () => statusWrites });');
+    .replace('export const QuotaHot', 'const QuotaHot').replace(/^export default .*;$/m, '({ QuotaHot, settledStatus: () => statusWrites });');
   const { QuotaHot: factory, settledStatus }: { QuotaHot: (input: object) => Promise<Plugin>; settledStatus: () => Promise<void> } = runInNewContext(source, {
     Buffer, console, Date: { now: () => now }, process: { pid: process.pid, env: { QUOTAHOT_DATA_DIR: directory } }, randomUUID,
     homedir: () => '/test', join: (...parts: string[]) => parts.join('/'), dirname: (path: string) => path.slice(0, path.lastIndexOf('/')),

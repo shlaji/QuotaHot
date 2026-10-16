@@ -116,7 +116,7 @@ export async function uninstallCodex(): Promise<InstallReport> {
 
 /* ── OpenCode ──────────────────────────────────────────────────────────── */
 
-/** 插件放哪儿：本机已经有的那个目录优先，一个都没有就按官方文档建 plugin/。 */
+/** 优先复用已有目录，避免重复加载；全新安装按 V2 文档使用 plugins/。 */
 export async function opencodePluginPath(): Promise<string> {
   const base = join(
     process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config'),
@@ -130,7 +130,7 @@ export async function opencodePluginPath(): Promise<string> {
       // 这个目录还不存在，看下一个
     }
   }
-  return join(base, OPENCODE_PLUGIN_DIRS[0], OPENCODE_PLUGIN_FILE);
+  return join(base, 'plugins', OPENCODE_PLUGIN_FILE);
 }
 
 export async function installOpencode(command: string | readonly string[]): Promise<InstallReport> {

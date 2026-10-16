@@ -285,7 +285,7 @@ test('default install removes owned legacy triggers but preserves other hooks an
   const installed = await cli(['install'], home);
 
   assert.equal(installed.code, 0);
-  assert.match(await readFile(join(home, '.config', 'opencode', 'plugin', 'quotahot.js'), 'utf8'), /run.*opencode/);
+  assert.match(await readFile(join(home, '.config', 'opencode', 'plugins', 'quotahot.js'), 'utf8'), /run.*opencode/);
   const hooks = JSON.parse(await readFile(join(codexDir, 'hooks.json'), 'utf8'));
   assert.deepEqual(hooks.hooks.SessionStart[0].hooks.map((hook: { command: string }) => hook.command), ['keep-this-hook']);
   await assert.rejects(access(join(piDir, 'extensions', 'quotahot-hook.ts')));

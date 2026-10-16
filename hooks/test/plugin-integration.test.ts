@@ -38,7 +38,7 @@ esac
   else process.argv[1] = originalArgv;
   const environment = { ...process.env, HOME: root, XDG_CONFIG_HOME: configHome, XDG_DATA_HOME: dataHome, QUOTAHOT_DATA_DIR: dataHome };
   await exec(process.execPath, ['--import', import.meta.resolve('tsx'), resolve('src/index.ts'), 'install'], { cwd: process.cwd(), env: environment });
-  const installedPath = join(configHome, 'opencode', 'plugin', 'quotahot.js');
+  const installedPath = join(configHome, 'opencode', 'plugins', 'quotahot.js');
   assert.equal(await readFile(installedPath, 'utf8'), opencodePlugin([...invocation, 'run', 'opencode']));
 
   const pluginPath = join(root, 'installed-plugin.mjs');
@@ -48,6 +48,7 @@ esac
   assert.deepEqual(Object.keys(generated).sort(), ['QuotaHot', 'default']);
   assert.equal(generated.default.id, 'QuotaHot');
   assert.equal(generated.default.server, QuotaHot);
+  assert.equal(typeof generated.default.setup, 'function');
   const plugin = await generated.default.server({ client: { session: { messages: async () => [] } } });
   t.after(async () => { await plugin.dispose(); await rm(root, { recursive: true, force: true }); });
   await plugin.event({ event: { type: 'message.updated', properties: { info: { id: 'a', sessionID: 'eligible', role: 'assistant', providerID: 'openai', time: { created: 1 } } } } });

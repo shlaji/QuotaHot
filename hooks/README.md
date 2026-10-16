@@ -56,7 +56,11 @@ quotahot-hook recovery-status --json  # 机器可读的本地轮询状态
 quotahot-hook install --help           # 仅打印帮助，不写文件
 ```
 
-`install` 不接收 `codex`、`pi`、`all` 等客户端目标；`run` 只接受 `opencode`。Codex/Pi 插件安装入口已移除，仅保留旧 QuotaHot 集成的归属识别与清理；凭证写回仍可使用。OpenCode 插件写入 `$XDG_CONFIG_HOME/opencode/plugin/quotahot.js`（若已有 `plugins/` 目录则使用它），文件由 QuotaHot 标记以便安全更新和卸载。
+`install` 不接收 `codex`、`pi`、`all` 等客户端目标；`run` 只接受 `opencode`。Codex/Pi 插件安装入口已移除，仅保留旧 QuotaHot 集成的归属识别与清理；凭证写回仍可使用。OpenCode 全新安装使用 `$XDG_CONFIG_HOME/opencode/plugins/quotahot.js`；已有 `plugin/` 或 `plugins/` 目录时复用原目录，避免重复安装。文件由 QuotaHot 标记以便安全更新和卸载。
+
+插件同时提供 V1 `server()` 和 V2 `setup(ctx)` 入口，V1 对象入口要求 OpenCode 1.18.29 或更新版本。V2 使用 `ctx.event.subscribe()` 接收 `data` 载荷，适配 `session.context()`、`session.active()` 和 `session.prompt()`；卸载时取消订阅并清理恢复等待。V2 的新输入、取消、成功、删除会话或手动换模型会取消旧任务的自动续跑；诊断使用控制台日志，不调用 V1 的 TUI toast API。若另有显式配置，V2 应使用 `plugins` 而非 `plugin`，并将 `[package, options]` 改为 `{ "package": "...", "options": {} }`；自动发现的本地插件无需额外配置。参见 [V2 迁移指南](https://opencode.ai/v2/docs/build/plugins/migrate-v1)。
+
+此迁移适配插件运行时和事件 API，不迁移 OpenCode V2 的凭证存储：现有同步仍写入已存在的 OpenCode `auth.json`。若所用 V2 版本已改用 integration/credential 存储，不能仅凭 hook 返回切换成功就认定 V2 已使用新账户；需使用该版本的登录/凭证激活流程并验证实际请求账户。
 
 额度错误后的自动切换仅响应 OpenCode 的 OpenAI（Codex）明确配额信号。OpenCode 仍在内部重试时不会重放任务；若请求因额度终止、会话进入空闲，且没有新用户消息或取消，插件会在额度恢复后至多自动续跑一次。等待期间插件监听数据目录中的 `switch-state.json`：其他进程更新账户额度或重置时间后立即重新检查；没有外部更新时，根据已知最早重置时间（包括初次切换返回的 `waitUntil`）加一分钟检查。没有有效重置时间时采用低频指数退避，上限四小时；已过期的重置时间不会造成密集重试。多个插件实例共用监听和检查，销毁最后一个等待会话时关闭监听。该续跑不是原请求的断点恢复，模型必须核对先前完成的工具动作，避免重复执行。关闭或重载插件会取消进程内等待，不跨重启持久化；Claude 额度错误、上下文超长、网络错误和过载错误不会触发额度恢复流程。
 
