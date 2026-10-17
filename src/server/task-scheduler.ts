@@ -137,6 +137,7 @@ export class TaskScheduler {
       result = await this.run(task, signal, {
         ...options,
         onSession: (sessionId) => this.store.setSession(task.id, sessionId),
+        onSessionTitle: (sessionId, title) => this.store.setSessionTitle(task, sessionId, title),
         onOutputChunk: (chunk, stream) => { this.store.appendOutput(task.id, task.currentRunId, chunk, stream); },
         onOutput: (captured) => {
           output = captured;

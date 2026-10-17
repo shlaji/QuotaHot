@@ -9,6 +9,8 @@ import {
   errorText,
   reserveLoopbackPort,
   rootSessionId,
+  jsonObject,
+  requestUrl,
   waitFor,
 } from './opencode-runtime-support.js';
 import { OpenCodeSessionTree, type Fetcher, type SessionSleep } from './opencode-session-tree.js';
@@ -31,6 +33,7 @@ export interface TaskRunnerOptions extends RuntimeDependencies {
   readonly onOutputChunk?: (chunk: Buffer, stream: TaskOutputChunk['stream']) => void;
   readonly onOutput?: TaskOutputCallback;
   readonly onSession?: (sessionId: string) => void;
+  readonly onSessionTitle?: (sessionId: string, title: string) => void;
   readonly sessionId?: string;
   readonly prompt?: string;
   readonly proxy?: string;
@@ -88,6 +91,7 @@ export class OpenCodeTaskRuntime {
       await this.waitForRoot(root);
       if (!this.rootId || !this.sessionReported) throw new Error('OpenCode run did not report a root session ID');
       error = await this.sessionTree(this.base).wait(this.rootId, this.rootExitCode, this.rootExitSignal);
+      if (!error && !this.signal.aborted) await this.publishSessionTitle(this.rootId);
     } catch (cause) {
       error = errorText(cause);
       if (this.rootId && this.base) {
@@ -115,6 +119,23 @@ export class OpenCodeTaskRuntime {
       status: finalError ? 'failed' : 'succeeded', output: captured, error: finalError,
       archiveState: this.archiveError ? 'incomplete' : 'complete',
     };
+  }
+
+  private async publishSessionTitle(sessionId: string): Promise<void> {
+    try {
+      const response = await this.fetcher(requestUrl(this.base, `/session/${encodeURIComponent(sessionId)}`, this.task.directory), {
+        signal: AbortSignal.any([this.signal, AbortSignal.timeout(3000)]),
+      });
+      if (!response.ok) return;
+      const session = jsonObject(await response.json());
+      if (session?.id !== sessionId || (session.parentID != null && session.parentID !== '')
+        || typeof session.title !== 'string') return;
+      const title = session.title.trim();
+      if (!title || /^(?:untitled|new session|child session)(?: - \d{4}-\d{2}-\d{2}T.*)?$/i.test(title)) return;
+      if (!this.signal.aborted) this.options.onSessionTitle?.(sessionId, title);
+    } catch {
+      return;
+    }
   }
 
   private start(args: readonly string[], detached: boolean): ChildProcess {

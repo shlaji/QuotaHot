@@ -47,6 +47,7 @@ test('sends a task follow-up as JSON to the encoded task URL and returns the res
     trigger: { type: 'quota' },
     status: 'running',
     sessionId: 'ses_test',
+    sessionTitle: 'Project review',
     createdAt: 1000,
     startedAt: 2000,
     finishedAt: null,

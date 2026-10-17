@@ -1,5 +1,6 @@
 import { useId, useState, type SubmitEvent } from 'react';
 import type { CreateTaskInput, TaskSummary, TaskTrigger } from '../../shared/tasks.js';
+import { taskDisplayTitle } from '../../shared/tasks.js';
 import { TaskModelField, type TaskModelDiscovery } from './TaskModelField.js';
 
 interface Props {
@@ -200,7 +201,7 @@ export function TaskForm({
                 )}
                 {tasks.map((task) => (
                   <option key={task.id} value={task.id} title={task.id}>
-                    {task.description} · {task.id.slice(0, 8)}
+                    {taskDisplayTitle(task)} · {task.id.slice(0, 8)}
                   </option>
                 ))}
               </select>

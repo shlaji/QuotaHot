@@ -6,6 +6,7 @@ import type {
   TaskModelsResponse,
 } from '../../shared/tasks.js';
 import { taskApi } from '../task-api.js';
+import { taskDisplayTitle } from '../../shared/tasks.js';
 import '../task-styles.css';
 import { TaskCard, type TaskAction } from './TaskCard.js';
 import { TaskForm } from './TaskForm.js';
@@ -158,7 +159,7 @@ export function TaskPane({ active = true }: Props) {
     try {
       const cancelled = await taskApi.cancel(task.id);
       setSnapshot((current) => (current === null ? current : upsertTask(current, cancelled)));
-      setNotice(`已取消任务：${task.description}`);
+      setNotice(`已取消任务：${taskDisplayTitle(task)}`);
     } catch (error) {
       setActionErrors((current) => ({ ...current, [task.id]: messageOf(error) }));
     } finally {
@@ -168,7 +169,7 @@ export function TaskPane({ active = true }: Props) {
 
   const deleteTask = async (task: TaskSummary) => {
     if (busyTaskIdsRef.current.has(task.id)
-      || !confirm(`删除后任务和输出记录都会消失。确定删除“${task.description}”吗？`)) return;
+      || !confirm(`删除后任务和输出记录都会消失。确定删除“${taskDisplayTitle(task)}”吗？`)) return;
     beginMutation(task.id, 'delete');
     try {
       await taskApi.remove(task.id);
@@ -177,7 +178,7 @@ export function TaskPane({ active = true }: Props) {
           ? current
           : { ...current, tasks: current.tasks.filter((item) => item.id !== task.id) },
       );
-      setNotice(`已删除任务：${task.description}`);
+      setNotice(`已删除任务：${taskDisplayTitle(task)}`);
     } catch (error) {
       setActionErrors((current) => ({ ...current, [task.id]: messageOf(error) }));
     } finally {
@@ -191,7 +192,7 @@ export function TaskPane({ active = true }: Props) {
     try {
       const updated = await taskApi.sendMessage(task.id, message);
       setSnapshot((current) => (current === null ? current : upsertTask(current, updated)));
-      setNotice(`消息已发送，任务继续执行：${task.description}`);
+      setNotice(`消息已发送，任务继续执行：${taskDisplayTitle(task)}`);
       return true;
     } catch (error) {
       setActionErrors((current) => ({ ...current, [task.id]: messageOf(error) }));

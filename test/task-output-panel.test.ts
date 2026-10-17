@@ -10,7 +10,7 @@ import { projectTaskLogPage } from '../src/web/task-log-page.js';
 
 const task: TaskSummary = {
   id: 'task-1', description: 'Run tests', model: 'openai/test-model', directory: '/work/project',
-  trigger: { type: 'quota' }, status: 'succeeded', sessionId: 'ses_test',
+  trigger: { type: 'quota' }, status: 'succeeded', sessionId: 'ses_test', sessionTitle: null,
   createdAt: 1000, startedAt: 2000, finishedAt: 3000, hasOutput: true, error: '',
 };
 

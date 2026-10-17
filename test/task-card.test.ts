@@ -12,6 +12,7 @@ const predecessor: TaskSummary = {
   directory: '/tmp/project',
   trigger: { type: 'quota' },
   sessionId: null,
+  sessionTitle: null,
   status: 'failed',
   createdAt: 1000,
   startedAt: 1000,
@@ -54,4 +55,9 @@ test('task card keeps the predecessor ID when its summary is absent', () => {
   const html = renderDependency([]);
 
   assert.match(html, /前置任务：任务记录已删除 · predecessor-1234/);
+});
+
+test('task card identifies a predecessor by its generated title', () => {
+  const html = renderDependency([{ ...predecessor, sessionTitle: '  Release preparation  ' }]);
+  assert.match(html, /前置任务：Release preparation · 失败/);
 });

@@ -17,6 +17,7 @@ export interface CreateTaskInput {
 export interface ManagedTask extends CreateTaskInput {
   readonly id: string;
   readonly sessionId: string | null;
+  readonly sessionTitle: string | null;
   readonly status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
   readonly createdAt: number;
   readonly startedAt: number | null;
@@ -28,6 +29,10 @@ export interface ManagedTask extends CreateTaskInput {
 export interface TaskListResponse {
   readonly tasks: ManagedTask[];
   readonly defaultDirectory: string;
+}
+
+export function taskDisplayTitle(task: Pick<ManagedTask, 'sessionTitle' | 'description'>): string {
+  return task.sessionTitle?.trim() || task.description;
 }
 export interface TaskSummary extends Omit<ManagedTask, 'output'> {
   readonly hasOutput: boolean;

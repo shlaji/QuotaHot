@@ -1,5 +1,5 @@
 import { useId, useState, type SubmitEvent } from 'react';
-import { MAX_TASK_MESSAGE_LENGTH, type TaskSummary, type TaskTrigger } from '../../shared/tasks.js';
+import { MAX_TASK_MESSAGE_LENGTH, taskDisplayTitle, type TaskSummary, type TaskTrigger } from '../../shared/tasks.js';
 import { TaskOutputPanel } from './TaskOutputPanel.js';
 
 export type TaskAction = 'cancel' | 'delete' | 'message';
@@ -70,7 +70,7 @@ export function TaskCard({ task, tasks, active, busyAction, actionError, onSendM
     <article className={`card task-card task-status-${task.status}`} aria-busy={busy}>
       <header className="task-card-head">
         <div>
-          <h3>{task.description}</h3>
+          <h3>{taskDisplayTitle(task)}</h3>
           <span className="task-id" title={task.id}>{task.id}</span>
         </div>
         <span className={`task-status task-status-${task.status}`}>{STATUS_LABEL[task.status]}</span>
@@ -79,13 +79,19 @@ export function TaskCard({ task, tasks, active, busyAction, actionError, onSendM
       <p className="task-trigger">{triggerText(task.trigger)}</p>
       {dependency !== null && (
         <p className="task-trigger task-dependency-context">
-          前置任务：{predecessor?.description ?? '任务记录已删除'} · {predecessor === undefined
+          前置任务：{predecessor === undefined ? '任务记录已删除' : taskDisplayTitle(predecessor)} · {predecessor === undefined
             ? dependency.taskId
             : STATUS_LABEL[predecessor.status]}
         </p>
       )}
 
       <dl className="task-meta">
+        {task.sessionTitle?.trim() && (
+          <div className="task-meta-wide">
+            <dt>原始任务描述</dt>
+            <dd>{task.description}</dd>
+          </div>
+        )}
         <div className="task-meta-wide">
           <dt>Provider / Model</dt>
           <dd><code>{task.model}</code></dd>

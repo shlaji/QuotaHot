@@ -95,6 +95,48 @@ function fixture(t: TestContext, mode: string) {
   return { directory, executable, state, input };
 }
 
+for (const scenario of ['title', 'placeholder', 'blank', 'wrong-id', 'child', 'malformed', 'http-error', 'network-error', 'callback-error']) {
+  test(`root title metadata is best effort: ${scenario}`, { timeout: 5000 }, async (t) => {
+    const mode = scenario === 'title' ? 'success' : 'resume';
+    const data = fixture(t, mode);
+    const titles: string[] = [];
+    let requests = 0;
+    let treeRead = false;
+    const result = await runTask(data.input, new AbortController().signal, {
+      executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: mode },
+      ...(mode === 'resume' ? { sessionId: 'root', prompt: 'follow up' } : {}),
+      fetch: async (url, init) => {
+        const parsed = new URL(url);
+        if (parsed.pathname.endsWith('/message')) treeRead = true;
+        if (parsed.pathname !== '/session/root') return fetch(url, init);
+        requests++;
+        assert.equal(treeRead, true);
+        assert.equal(parsed.searchParams.get('directory'), data.directory);
+        assert.equal(init?.method ?? 'GET', 'GET');
+        const serverPid = Number(readFileSync(data.state + '.server-pid', 'utf8'));
+        process.kill(serverPid, 0);
+        if (scenario === 'network-error') throw new TypeError('offline');
+        if (scenario === 'http-error') return new Response('{}', { status: 503 });
+        if (scenario === 'malformed') return new Response('not json');
+        return Response.json({
+          id: scenario === 'wrong-id' ? 'different' : 'root',
+          ...(scenario === 'child' ? { parentID: 'parent' } : {}),
+          title: scenario === 'placeholder' ? 'New session - 2026-10-18T00:00:00.000Z'
+            : scenario === 'blank' ? '  ' : '  Generated root title  ',
+        });
+      },
+      onSessionTitle: (id, title) => {
+        assert.equal(id, 'root');
+        if (scenario === 'callback-error') throw new Error('metadata storage unavailable');
+        titles.push(title);
+      },
+    });
+    assert.equal(result.status, 'succeeded', result.error);
+    assert.equal(requests, 1);
+    assert.deepEqual(titles, scenario === 'title' ? ['Generated root title'] : []);
+  });
+}
+
 test('keeps an idle child without a terminal assistant message running', { timeout: 5000 }, async (t) => {
   const fixtureData = fixture(t, 'no-message');
   const controller = new AbortController();
@@ -248,6 +290,7 @@ test('fails rather than accepting a different session during continuation', { ti
     executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'resume-mismatch' },
     sessionId: 'expected-root', prompt: 'follow up',
     onSession: () => assert.fail('must not persist a replacement session'),
+    onSessionTitle: () => assert.fail('must not persist a replacement title'),
   });
   assert.equal(result.status, 'failed');
   assert.match(result.error, /different session/);

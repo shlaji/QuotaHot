@@ -51,6 +51,7 @@ function decodeMetadata(row: Record<string, SQLOutputValue>): Omit<ManagedTask, 
     ...decodeState(row), description: text(row.description), model: text(row.model),
     directory: text(row.directory), trigger,
     sessionId: row.session_id === null ? null : text(row.session_id),
+    sessionTitle: row.session_title === null ? null : text(row.session_title),
   };
 }
 
@@ -77,7 +78,7 @@ export class TaskStore {
   create(input: CreateTaskInput, now: number): ManagedTask {
     const task: ManagedTask = {
       ...input, id: randomUUID(), status: 'pending', createdAt: now,
-      startedAt: null, finishedAt: null, sessionId: null, output: '', error: '',
+      startedAt: null, finishedAt: null, sessionId: null, sessionTitle: null, output: '', error: '',
     };
     taskTransaction(this.db, () => {
       let at: string | null = null;
@@ -105,7 +106,7 @@ export class TaskStore {
 
   listSummaries(): TaskSummary[] {
     return this.db.prepare(`SELECT id, description, model, directory, trigger_type, trigger_at, trigger_task_id,
-      status, session_id, created_at, started_at, finished_at, error, length(output) > 0 AS has_output
+      status, session_id, session_title, created_at, started_at, finished_at, error, length(output) > 0 AS has_output
       FROM tasks ORDER BY created_at, rowid`).all()
       .map((row) => ({ ...decodeMetadata(row), hasOutput: row.has_output === 1 }));
   }
@@ -182,6 +183,15 @@ export class TaskStore {
 
   claimContinuation(id: string, now: number): ClaimedTask | null {
     return this.claimRound(id, now, 'continuation');
+  }
+
+  setSessionTitle(task: Pick<ClaimedTask, 'id' | 'currentRunId'>, sessionId: string, title: string): void {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    this.db.prepare(`UPDATE tasks SET session_title = ? WHERE id = ? AND current_run_id = ?
+      AND session_id = ? AND status = 'running'
+      AND EXISTS (SELECT 1 FROM task_runs WHERE id = tasks.current_run_id AND closed_at IS NULL)`)
+      .run(trimmed, task.id, task.currentRunId, sessionId);
   }
 
   finish(id: string, result: TaskOutcome, now: number): void {

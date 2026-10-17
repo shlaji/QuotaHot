@@ -50,6 +50,7 @@ export function initializeTaskLogSchema(db: DatabaseSync): void {
       ) WITHOUT ROWID;
     `);
     const columns = db.prepare('PRAGMA table_info(tasks)').all();
+    if (!columns.some((column) => column.name === 'session_title')) db.exec('ALTER TABLE tasks ADD COLUMN session_title TEXT');
     if (!columns.some((column) => column.name === 'session_id')) db.exec('ALTER TABLE tasks ADD COLUMN session_id TEXT');
     if (!columns.some((column) => column.name === 'trigger_task_id')) {
       db.exec('ALTER TABLE tasks ADD COLUMN trigger_task_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT');

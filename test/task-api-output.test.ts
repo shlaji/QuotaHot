@@ -6,7 +6,7 @@ import { copyTaskMessages } from '../src/web/task-message-copy.js';
 
 const task: ManagedTask = {
   id: 'task /?#', description: 'Run tests', model: 'openai/test-model', directory: '/work/project',
-  trigger: { type: 'quota' }, status: 'running', sessionId: 'ses_test',
+  trigger: { type: 'quota' }, status: 'running', sessionId: 'ses_test', sessionTitle: 'Generated title',
   createdAt: 1000, startedAt: 2000, finishedAt: null, output: 'retained excerpt', error: '',
 };
 
