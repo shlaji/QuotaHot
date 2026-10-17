@@ -77,7 +77,8 @@ test('persists initial discovery and runs queued work alongside continuation and
     [['stdout'], ['stdout', 'stderr']]);
 });
 
-test('continues a successful session while an unrelated task is already running', async (t) => {
+for (const status of ['succeeded', 'failed'] as const) {
+test(`continues a ${status} session while an unrelated task is already running`, async (t) => {
   const store = new TaskStore(':memory:');
   const finished = Promise.withResolvers<TaskOutcome>();
   const scheduler = new TaskScheduler(store, {
@@ -94,7 +95,7 @@ test('continues a successful session while an unrelated task is already running'
   const task = scheduler.create(input);
   store.claim(task.id, 1);
   store.setSession(task.id, 'root');
-  store.finish(task.id, success, 2);
+  store.finish(task.id, { ...success, status }, 2);
   const other = scheduler.create(input);
   scheduler.tick();
 
@@ -107,6 +108,30 @@ test('continues a successful session while an unrelated task is already running'
   assert.equal(store.get(task.id)?.output, 'continued');
   assert.equal(store.get(other.id)?.status, 'running');
   await scheduler.cancel(other.id);
+});
+}
+
+test('rejects a failed session while its execution is active and while stopping', async (t) => {
+  const store = new TaskStore(':memory:');
+  const scheduler = new TaskScheduler(store, {
+    now: () => 2, quota: async () => [], run: async (_task, _signal, options) => {
+      options.onSession?.('root');
+      return { status: 'failed', output: '', error: 'failure' };
+    },
+  });
+  t.after(async () => { await scheduler.stop(); store.close(); });
+  const task = scheduler.create(input);
+  scheduler.tick();
+  await Promise.resolve();
+  assert.equal(store.get(task.id)?.status, 'failed');
+  const previousRuns = store.listRuns(task.id);
+
+  assert.throws(() => scheduler.continueTask(task.id, 'active'), (error: unknown) => error instanceof TaskError && error.status === 409);
+  const stopping = scheduler.stop();
+  assert.throws(() => scheduler.continueTask(task.id, 'stopping'), (error: unknown) => error instanceof TaskError && error.status === 409);
+  await stopping;
+  assert.throws(() => scheduler.continueTask(task.id, 'stopped'), (error: unknown) => error instanceof TaskError && error.status === 409);
+  assert.deepEqual(store.listRuns(task.id), previousRuns);
 });
 
 test('stores continuation failures using normal execution semantics', async (t) => {

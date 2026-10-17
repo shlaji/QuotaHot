@@ -48,7 +48,7 @@ export function TaskCard({ task, active, busyAction, actionError, onSendMessage,
   const cancellable = task.status === 'pending' || task.status === 'running';
   const busy = busyAction !== null;
   const submitting = busyAction === 'message';
-  const canContinue = task.status === 'succeeded'
+  const canContinue = (task.status === 'succeeded' || task.status === 'failed')
     && 'sessionId' in task && typeof task.sessionId === 'string' && task.sessionId !== '';
   const messageEnabled = canContinue && !busy;
 
@@ -128,7 +128,7 @@ export function TaskCard({ task, active, busyAction, actionError, onSendMessage,
           </div>
           <small id={messageHintId} className="task-field-note">
             {!canContinue
-              ? '任务完成且会话可用后才能追加消息。'
+              ? '任务成功或失败且会话可用后才能追加消息。'
               : '沿用当前会话继续执行；输出默认显示最新一轮，可选择历史轮次。'}
           </small>
           <div className="task-submit-row">

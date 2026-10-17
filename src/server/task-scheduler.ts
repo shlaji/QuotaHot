@@ -75,7 +75,7 @@ export class TaskScheduler {
     if (!this.store.get(id)) throw new TaskError('Task not found', 404);
     if (this.stopped || this.active.has(id)) throw new TaskError('Task service is busy or stopping', 409);
     const task = this.store.claimContinuation(id, this.now());
-    if (!task || task.sessionId === null) throw new TaskError('Only succeeded tasks with a session can continue while idle', 409);
+    if (!task || task.sessionId === null) throw new TaskError('Only succeeded or failed tasks with a session can continue while idle', 409);
     this.launch(task, { sessionId: task.sessionId, prompt: message });
     return task;
   }

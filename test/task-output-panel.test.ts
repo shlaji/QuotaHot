@@ -14,6 +14,52 @@ const task: TaskSummary = {
   createdAt: 1000, startedAt: 2000, finishedAt: 3000, hasOutput: true, error: '',
 };
 
+for (const status of ['succeeded', 'failed'] as const) {
+  test(`enables the composer for a ${status} task with a session`, () => {
+    const html = renderToStaticMarkup(createElement(TaskCard, {
+      task: { ...task, status }, active: true, busyAction: null, actionError: '',
+      onSendMessage: async () => false, onCancel: () => {}, onDelete: () => {},
+    }));
+
+    assert.match(html, /<form class="task-form task-message-composer"/);
+    assert.match(html, /<textarea(?![^>]*\bdisabled=)[^>]*>/);
+    assert.match(html, /<button[^>]*type="submit"[^>]*disabled=/);
+  });
+
+  for (const sessionId of [null, '']) {
+    test(`does not offer a composer for a ${status} task with sessionId ${JSON.stringify(sessionId)}`, () => {
+      const html = renderToStaticMarkup(createElement(TaskCard, {
+        task: { ...task, status, sessionId }, active: true, busyAction: null, actionError: '',
+        onSendMessage: async () => false, onCancel: () => {}, onDelete: () => {},
+      }));
+
+      assert.doesNotMatch(html, /<form|<textarea|type="submit"/);
+    });
+  }
+
+  for (const busyAction of ['message', 'cancel', 'delete'] as const) {
+    test(`disables the composer for a ${status} task while ${busyAction} is busy`, () => {
+      const html = renderToStaticMarkup(createElement(TaskCard, {
+        task: { ...task, status }, active: true, busyAction, actionError: '',
+        onSendMessage: async () => false, onCancel: () => {}, onDelete: () => {},
+      }));
+
+      assert.match(html, /<textarea[^>]*disabled=/);
+    });
+  }
+}
+
+for (const status of ['pending', 'running', 'cancelled'] as const) {
+  test(`does not offer a composer for a ${status} task even with a session`, () => {
+    const html = renderToStaticMarkup(createElement(TaskCard, {
+      task: { ...task, status }, active: true, busyAction: null, actionError: '',
+      onSendMessage: async () => false, onCancel: () => {}, onDelete: () => {},
+    }));
+
+    assert.doesNotMatch(html, /<form|<textarea|type="submit"/);
+  });
+}
+
 for (const active of [true, false]) {
   test(`initially renders only the native output disclosure when active is ${active}`, (context) => {
     const fetch = context.mock.method(globalThis, 'fetch', async () => { throw new Error('Collapsed panels must not fetch'); });

@@ -54,7 +54,7 @@ for (const state of ['pending', 'running', 'failed', 'cancelled', 'legacy'] as c
   test(`rejects continuation for ${state} tasks`, async (t) => {
     const { store, task, request } = fixture(t);
     if (state !== 'pending') store.claim(task.id, 1);
-    if (state !== 'legacy') store.setSession(task.id, 'root');
+    if (state !== 'legacy' && state !== 'failed') store.setSession(task.id, 'root');
     if (state === 'failed') store.finish(task.id, { ...success, status: 'failed' }, 2);
     if (state === 'cancelled') store.cancel(task.id, 2);
     if (state === 'legacy') store.finish(task.id, success, 2);
@@ -62,11 +62,12 @@ for (const state of ['pending', 'running', 'failed', 'cancelled', 'legacy'] as c
   });
 }
 
-test('accepts continuation over live HTTP once and returns the running task', async (t) => {
+for (const status of ['succeeded', 'failed'] as const) {
+test(`accepts ${status} continuation over live HTTP once and returns the running task`, async (t) => {
   const { app, path, store, task, finished } = fixture(t);
   store.claim(task.id, 1);
   store.setSession(task.id, 'root');
-  store.finish(task.id, success, 2);
+  store.finish(task.id, { ...success, status }, 2);
   const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
   t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
   await once(server, 'listening');
@@ -89,3 +90,4 @@ test('accepts continuation over live HTTP once and returns the running task', as
   assert.equal(body.output, '');
   finished.resolve({ ...success, output: 'latest turn' });
 });
+}

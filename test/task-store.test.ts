@@ -159,7 +159,8 @@ test('migrates a legacy database additively and persists discovered sessions acr
   assert.equal(reopened.get(task.id)?.sessionId, 'session-root');
 });
 
-test('claims a successful session once across connections and clears only turn state', (t) => {
+for (const status of ['succeeded', 'failed'] as const) {
+test(`claims a ${status} session once across connections and clears only turn state`, (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'task-resume-claim-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const path = join(directory, 'tasks.db');
@@ -170,7 +171,8 @@ test('claims a successful session once across connections and clears only turn s
   const execution = first.claim(task.id, now);
   assert.ok(execution);
   first.setSession(task.id, 'root');
-  first.finishRun(task.id, execution.currentRunId, { status: 'succeeded', output: 'old output', error: '', finishedAt: now + 1 });
+  first.finishRun(task.id, execution.currentRunId, { status, output: 'old output', error: status === 'failed' ? 'old failure' : '', finishedAt: now + 1 });
+  const previousRuns = first.listRuns(task.id);
   const peer = first.create(input, now);
   const peerExecution = first.claim(peer.id, now);
   assert.ok(peerExecution);
@@ -184,6 +186,10 @@ test('claims a successful session once across connections and clears only turn s
   assert.ok(continued);
   assert.notEqual(continued.currentRunId, execution.currentRunId);
   assert.deepEqual(continued, { ...task, sessionId: 'root', status: 'running', startedAt: now + 2, currentRunId: continued.currentRunId });
+  const runs = first.listRuns(task.id);
+  assert.deepEqual(runs.slice(0, -1), previousRuns);
+  assert.equal(runs.at(-1)?.kind, 'continuation');
+  assert.equal(runs.at(-1)?.status, 'running');
   assert.equal(first.claimContinuation(peer.id, now + 2)?.sessionId, 'peer-root');
   assert.equal(first.claimContinuation(task.id, now + 3), null);
   assert.equal(second.claimContinuation(peer.id, now + 3), null);
@@ -191,3 +197,22 @@ test('claims a successful session once across connections and clears only turn s
   second.cancel(task.id, now + 4);
   assert.equal(first.claimContinuation(task.id, now + 5), null);
 });
+}
+
+for (const sessionId of [null, '']) {
+test(`rejects failed continuation with ${JSON.stringify(sessionId)} session`, (t) => {
+  const store = new TaskStore(':memory:');
+  t.after(() => store.close());
+  const task = store.create(input, now);
+  store.claim(task.id, now);
+  if (sessionId !== null) store.setSession(task.id, sessionId);
+  store.finish(task.id, { status: 'failed', output: 'partial', error: 'failure' }, now + 1);
+  const previousRuns = store.listRuns(task.id);
+
+  const continued = store.claimContinuation(task.id, now + 2);
+
+  assert.equal(continued, null);
+  assert.equal(store.get(task.id)?.status, 'failed');
+  assert.deepEqual(store.listRuns(task.id), previousRuns);
+});
+}

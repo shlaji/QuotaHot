@@ -112,9 +112,10 @@ export class TaskStore {
     return taskTransaction(this.db, () => {
       const status = { initial: 'pending', continuation: 'succeeded' }[kind];
       const row = this.db.prepare(`UPDATE tasks SET status = 'running', started_at = ?,
-        finished_at = NULL, output = '', error = '' WHERE id = ? AND status = ?
+        finished_at = NULL, output = '', error = '' WHERE id = ?
+        AND (status = ? OR (? = 'continuation' AND status = 'failed'))
         AND (? = 'initial' OR (session_id IS NOT NULL AND session_id != '')) RETURNING *`)
-        .get(new Date(now).toISOString(), id, status, kind);
+        .get(new Date(now).toISOString(), id, status, kind, kind);
       if (!row) return null;
       const currentRunId = this.logs.createRun(id, kind, now);
       return { ...decode(row), currentRunId };
