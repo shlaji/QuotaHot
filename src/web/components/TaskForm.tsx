@@ -28,7 +28,7 @@ export function TaskForm({
   onCreate,
 }: Props) {
   const [description, setDescription] = useState('');
-  const [model, setModel] = useState('openai/gpt-5.6-luna');
+  const [model, setModel] = useState('openai/gpt-6-luna-fast');
   const [triggerType, setTriggerType] = useState<TaskTrigger['type']>('quota');
   const [scheduledAt, setScheduledAt] = useState('');
   const [submitting, setSubmitting] = useState(false);

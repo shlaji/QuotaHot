@@ -7,6 +7,7 @@
   --task-space-6: 24px;
   --task-space-10: 40px;
   --task-control-radius: 7px;
+  --task-model-popup-max-height: 280px;
   --task-font-caption: 11px;
   --task-font-small: 12px;
   --task-font-strong: 13px;
@@ -56,14 +57,63 @@
 .task-field { min-width: 0; }
 .task-field-wide { grid-column: 1 / -1; }
 
-.task-model-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch;
+.task-model-field > button { align-self: flex-start; }
+
+.task-model-picker { position: relative; min-width: 0; }
+.task-model-picker-open { z-index: 20; }
+
+.task-model-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: var(--task-space-2);
+  width: 100%;
+  min-width: 0;
+  padding: var(--task-space-2) calc(var(--task-space-2) + var(--task-space-1) / 2);
+  border: 1px solid var(--line);
+  border-radius: var(--task-control-radius);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.task-model-controls button { white-space: nowrap; }
+.task-model-trigger-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-model-trigger-caret { flex: 0 0 auto; color: var(--muted); font-size: var(--task-font-caption); }
+
+.task-model-list {
+  position: absolute;
+  top: calc(100% + var(--task-space-1));
+  right: 0;
+  left: 0;
+  z-index: 1;
+  max-height: min(var(--task-model-popup-max-height), calc(100dvh - var(--task-space-6)));
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  padding: var(--task-space-1);
+  border: 1px solid var(--line);
+  border-radius: var(--task-control-radius);
+  background: var(--panel);
+}
+
+.task-model-option {
+  padding: var(--task-space-2);
+  border-radius: calc(var(--task-control-radius) - var(--task-space-1));
+  color: var(--text);
+  font-size: var(--task-font-small);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.task-model-option-active { background: var(--card); }
+.task-model-option-selected { font-weight: 600; }
 
 .task-model-custom {
   display: grid;
@@ -319,8 +369,7 @@
   .task-meta { grid-template-columns: minmax(0, 1fr); }
   .task-field-wide,
   .task-meta-wide { grid-column: auto; }
-  .task-model-controls { grid-template-columns: minmax(0, 1fr); }
-  .task-model-controls button { width: 100%; }
+  .task-model-field > button { width: 100%; }
   .task-submit-row { align-items: stretch; flex-direction: column; }
   .task-submit-row button { width: 100%; }
   .task-retry { align-items: flex-start; flex-direction: column; }
