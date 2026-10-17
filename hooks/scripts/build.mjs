@@ -19,7 +19,7 @@ const result = await build({
   banner: { js: '#!/usr/bin/env node' },
   metafile: true,
   logLevel: 'info',
-    define: { __QUOTAHOT_VERSION__: JSON.stringify(hookPackage.version) },
+  define: { __QUOTAHOT_VERSION__: JSON.stringify(hookPackage.version), 'import.meta.dirname': '__dirname' },
 });
 await chmod('dist/quotahot-hook', 0o755);
 await copyFile('src/opencode-plugin-template.js', 'dist/opencode-plugin-template.js');
