@@ -10,7 +10,7 @@ const input: CreateTaskInput = {
 };
 const success: TaskOutcome = { status: 'succeeded', output: 'first turn', error: '' };
 
-test('persists initial discovery and serializes continuation with queued work and cancellation', async (t) => {
+test('persists initial discovery and runs queued work alongside continuation and cancellation', async (t) => {
   const store = new TaskStore(':memory:');
   const finished = Promise.withResolvers<TaskOutcome>();
   let turns = 0;
@@ -22,7 +22,7 @@ test('persists initial discovery and serializes continuation with queued work an
       assert.equal(task.model, input.model);
       assert.equal(task.directory, input.directory);
       options.onSession?.('root');
-      if (turns === 1) return success;
+      if (!options.sessionId) return success;
       assert.equal(options.sessionId, 'root');
       assert.equal(options.prompt, 'second turn');
       options.onOutput?.('live second turn');
@@ -45,26 +45,45 @@ test('persists initial discovery and serializes continuation with queued work an
   assert.equal(store.get(task.id)?.output, 'live second turn');
   assert.throws(() => scheduler.continueTask(task.id, 'duplicate'), (error: unknown) => error instanceof TaskError && error.status === 409);
   scheduler.tick();
-  assert.equal(store.get(queued.id)?.status, 'pending');
+  assert.equal(store.get(queued.id)?.status, 'running');
   const cancelled = await scheduler.cancel(task.id);
+  await scheduler.settled();
   assert.equal(cancelled.status, 'cancelled');
   assert.equal(cancelled.output, 'cancelled turn output');
-  assert.equal(turns, 2);
+  assert.equal(store.get(queued.id)?.status, 'succeeded');
+  assert.equal(turns, 3);
 });
 
-test('rejects continuation while another persisted task is running', async (t) => {
+test('continues a successful session while an unrelated task is already running', async (t) => {
   const store = new TaskStore(':memory:');
-  const scheduler = new TaskScheduler(store, { quota: async () => [], run: async () => assert.fail('must not run') });
-  t.after(async () => { await scheduler.stop(); store.close(); });
+  const finished = Promise.withResolvers<TaskOutcome>();
+  const scheduler = new TaskScheduler(store, {
+    now: () => 4, quota: async () => [], run: async (_task, signal, options) => {
+      if (options.sessionId === 'root') {
+        assert.equal(options.prompt, 'follow up');
+        return { ...success, output: 'continued' };
+      }
+      signal.addEventListener('abort', () => finished.resolve(success));
+      return finished.promise;
+    },
+  });
+  t.after(async () => { finished.resolve(success); await scheduler.stop(); store.close(); });
   const task = scheduler.create(input);
   store.claim(task.id, 1);
   store.setSession(task.id, 'root');
   store.finish(task.id, success, 2);
   const other = scheduler.create(input);
-  store.claim(other.id, 3);
+  scheduler.tick();
 
-  assert.throws(() => scheduler.continueTask(task.id, 'follow up'), (error: unknown) => error instanceof TaskError && error.status === 409);
+  const continued = scheduler.continueTask(task.id, 'follow up');
+
+  assert.equal(continued.status, 'running');
+  assert.throws(() => scheduler.continueTask(task.id, 'duplicate'), (error: unknown) => error instanceof TaskError && error.status === 409);
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(store.get(task.id)?.status, 'succeeded');
+  assert.equal(store.get(task.id)?.output, 'continued');
+  assert.equal(store.get(other.id)?.status, 'running');
+  await scheduler.cancel(other.id);
 });
 
 test('stores continuation failures using normal execution semantics', async (t) => {

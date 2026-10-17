@@ -45,14 +45,11 @@ export function TaskPane({ active = true }: Props) {
   const [modelError, setModelError] = useState('');
   const [busyById, setBusyById] = useState<Record<string, TaskAction>>({});
   const [actionErrors, setActionErrors] = useState<Record<string, string>>({});
-  const sendingMessageRef = useRef(false);
-  const mutationVersionRef = useRef(0);
-  const mutationCountRef = useRef(0);
+  const busyTaskIdsRef = useRef(new Set<string>());
+  const pollProtectedIdsRef = useRef(new Set<string>());
   const pollControllerRef = useRef<AbortController | null>(null);
   const directoryRef = useRef('');
   const modelRequestRef = useRef(0);
-  const hasRunningTask = snapshot?.tasks.some((task) => task.status === 'running') ?? false;
-  const messageBlocked = hasRunningTask || Object.values(busyById).includes('message');
 
   const loadModels = useCallback(async (): Promise<void> => {
     const request = modelRequestRef.current + 1;
@@ -92,23 +89,28 @@ export function TaskPane({ active = true }: Props) {
     // Recursive scheduling means a slow request delays the next tick instead of overlapping it.
     const poll = async (): Promise<void> => {
       if (disposed) return;
-      if (mutationCountRef.current > 0) {
-        schedule();
-        return;
-      }
-
       const controller = new AbortController();
-      const version = mutationVersionRef.current;
+      const protectedIds = new Set(busyTaskIdsRef.current);
+      pollProtectedIdsRef.current = protectedIds;
       pollControllerRef.current = controller;
       try {
         const response = await taskApi.list(controller.signal);
-        if (!disposed && version === mutationVersionRef.current) {
-          setSnapshot(response);
+        if (!disposed) {
+          setSnapshot((current) => {
+            const previous = new Map(current?.tasks.map((task) => [task.id, task]));
+            const tasks = new Map(response.tasks.map((task) => [task.id, task]));
+            for (const id of protectedIds) {
+              const preserved = previous.get(id);
+              if (preserved === undefined) tasks.delete(id);
+              else tasks.set(id, preserved);
+            }
+            return { ...response, tasks: [...tasks.values()] };
+          });
           setLoadError('');
         }
       } catch (error) {
         const aborted = error instanceof DOMException && error.name === 'AbortError';
-        if (!aborted && !disposed && version === mutationVersionRef.current) {
+        if (!aborted && !disposed) {
           setLoadError(messageOf(error));
         }
       } finally {
@@ -127,31 +129,32 @@ export function TaskPane({ active = true }: Props) {
     };
   }, [active, retryGeneration]);
 
-  const beginMutation = () => {
-    mutationVersionRef.current += 1;
-    mutationCountRef.current += 1;
-    pollControllerRef.current?.abort();
+  const beginMutation = (id: string, action: TaskAction) => {
+    busyTaskIdsRef.current.add(id);
+    pollProtectedIdsRef.current.add(id);
+    setBusyById((current) => ({ ...current, [id]: action }));
+    setActionErrors((current) => withoutKey(current, id));
+  };
+
+  const endMutation = (id: string) => {
+    busyTaskIdsRef.current.delete(id);
+    setBusyById((current) => withoutKey(current, id));
   };
 
   const createTask = async (input: CreateTaskInput): Promise<void> => {
-    beginMutation();
-    try {
-      const created = await taskApi.create(input);
-      setSnapshot((current) =>
-        current === null
-          ? { tasks: [created], defaultDirectory: '' }
-          : upsertTask(current, created),
-      );
-      setNotice('任务已创建，正在等待触发。');
-    } finally {
-      mutationCountRef.current -= 1;
-    }
+    const created = await taskApi.create(input);
+    pollProtectedIdsRef.current.add(created.id);
+    setSnapshot((current) =>
+      current === null
+        ? { tasks: [created], defaultDirectory: '' }
+        : upsertTask(current, created),
+    );
+    setNotice('任务已创建，正在等待触发。');
   };
 
   const cancelTask = async (task: ManagedTask) => {
-    setBusyById((current) => ({ ...current, [task.id]: 'cancel' }));
-    setActionErrors((current) => withoutKey(current, task.id));
-    beginMutation();
+    if (busyTaskIdsRef.current.has(task.id)) return;
+    beginMutation(task.id, 'cancel');
     try {
       const cancelled = await taskApi.cancel(task.id);
       setSnapshot((current) => (current === null ? current : upsertTask(current, cancelled)));
@@ -159,16 +162,14 @@ export function TaskPane({ active = true }: Props) {
     } catch (error) {
       setActionErrors((current) => ({ ...current, [task.id]: messageOf(error) }));
     } finally {
-      mutationCountRef.current -= 1;
-      setBusyById((current) => withoutKey(current, task.id));
+      endMutation(task.id);
     }
   };
 
   const deleteTask = async (task: ManagedTask) => {
-    if (!confirm(`删除后任务和输出记录都会消失。确定删除“${task.description}”吗？`)) return;
-    setBusyById((current) => ({ ...current, [task.id]: 'delete' }));
-    setActionErrors((current) => withoutKey(current, task.id));
-    beginMutation();
+    if (busyTaskIdsRef.current.has(task.id)
+      || !confirm(`删除后任务和输出记录都会消失。确定删除“${task.description}”吗？`)) return;
+    beginMutation(task.id, 'delete');
     try {
       await taskApi.remove(task.id);
       setSnapshot((current) =>
@@ -180,17 +181,13 @@ export function TaskPane({ active = true }: Props) {
     } catch (error) {
       setActionErrors((current) => ({ ...current, [task.id]: messageOf(error) }));
     } finally {
-      mutationCountRef.current -= 1;
-      setBusyById((current) => withoutKey(current, task.id));
+      endMutation(task.id);
     }
   };
 
   const sendMessage = async (task: ManagedTask, message: string): Promise<boolean> => {
-    if (sendingMessageRef.current || hasRunningTask || busyById[task.id] !== undefined) return false;
-    sendingMessageRef.current = true;
-    setBusyById((current) => ({ ...current, [task.id]: 'message' }));
-    setActionErrors((current) => withoutKey(current, task.id));
-    beginMutation();
+    if (busyTaskIdsRef.current.has(task.id)) return false;
+    beginMutation(task.id, 'message');
     try {
       const updated = await taskApi.sendMessage(task.id, message);
       setSnapshot((current) => (current === null ? current : upsertTask(current, updated)));
@@ -200,9 +197,7 @@ export function TaskPane({ active = true }: Props) {
       setActionErrors((current) => ({ ...current, [task.id]: messageOf(error) }));
       return false;
     } finally {
-      mutationCountRef.current -= 1;
-      setBusyById((current) => withoutKey(current, task.id));
-      sendingMessageRef.current = false;
+      endMutation(task.id);
     }
   };
 
@@ -261,7 +256,6 @@ export function TaskPane({ active = true }: Props) {
                 task={task}
                 busyAction={busyById[task.id] ?? null}
                 actionError={actionErrors[task.id] ?? ''}
-                messageBlocked={messageBlocked}
                 onSendMessage={(message) => sendMessage(task, message)}
                 onCancel={() => void cancelTask(task)}
                 onDelete={() => void deleteTask(task)}

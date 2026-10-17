@@ -40,7 +40,7 @@ test('preserves pending tasks and fails interrupted work when the store is reope
   });
 });
 
-test('claims atomically and admits only one running task across connections', (t) => {
+test('claims distinct tasks across connections while rejecting duplicate claims per task', (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'task-claim-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const path = join(directory, 'tasks.db');
@@ -52,8 +52,10 @@ test('claims atomically and admits only one running task across connections', (t
 
   assert.equal(first.claim(one.id, now)?.status, 'running');
   assert.equal(second.claim(one.id, now), null);
-  assert.equal(second.claim(two.id, now), null);
+  assert.equal(second.claim(two.id, now)?.status, 'running');
+  assert.equal(first.claim(two.id, now), null);
   assert.equal(first.remove(one.id), false);
+  assert.equal(second.remove(two.id), false);
 });
 
 test('keeps cancellation terminal when a late process result arrives', (t) => {
@@ -124,12 +126,19 @@ test('claims a successful session once across connections and clears only turn s
   first.claim(task.id, now);
   first.setSession(task.id, 'root');
   first.finish(task.id, { status: 'succeeded', output: 'old output', error: '' }, now + 1);
+  const peer = first.create(input, now);
+  first.claim(peer.id, now);
+  first.setSession(peer.id, 'peer-root');
+  first.finish(peer.id, { status: 'succeeded', output: 'peer output', error: '' }, now + 1);
   const pending = first.create(input, now);
+  first.claim(pending.id, now + 1);
 
   const continued = second.claimContinuation(task.id, now + 2);
 
   assert.deepEqual(continued, { ...task, sessionId: 'root', status: 'running', startedAt: now + 2 });
+  assert.equal(first.claimContinuation(peer.id, now + 2)?.sessionId, 'peer-root');
   assert.equal(first.claimContinuation(task.id, now + 3), null);
+  assert.equal(second.claimContinuation(peer.id, now + 3), null);
   assert.equal(first.claim(pending.id, now + 3), null);
   second.cancel(task.id, now + 4);
   assert.equal(first.claimContinuation(task.id, now + 5), null);

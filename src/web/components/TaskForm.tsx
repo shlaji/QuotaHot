@@ -90,7 +90,7 @@ export function TaskForm({
       <header className="task-section-head">
         <div>
           <h2 id="task-create-title">新建任务</h2>
-          <p>在服务主机上排队执行一次 OpenCode 任务。</p>
+          <p>在服务主机上按条件执行一次 OpenCode 任务。</p>
         </div>
       </header>
 
@@ -165,7 +165,7 @@ export function TaskForm({
         )}
 
         <div className="task-submit-row">
-          <span className="task-submit-hint">任务单次执行，不会自动重试。</span>
+          <span className="task-submit-hint">触发器仅启动一轮，不会自动重试。</span>
           <button className="primary" type="submit" disabled={submitting}>
             {submitting ? '正在创建…' : '创建任务'}
           </button>
@@ -177,7 +177,8 @@ export function TaskForm({
         <ul>
           <li>额度触发每 60 秒检查一次；任一未禁用且符合 include / exclude 筛选的托管账户满足条件就会放行。</li>
           <li>额度触发只判断条件，不会自动同步认证；执行使用 OpenCode 已配置的凭证。</li>
-          <li>任务在服务主机的所选目录运行，并按顺序串行执行；每个任务只执行一次且不重试。</li>
+          <li>任务在服务主机的所选目录运行；不同任务 ID 可并行，应用不设置跨任务并发上限。</li>
+          <li>每个任务 ID 同时只运行一轮，初始执行不会自动重试；完成且会话可用后可独立追加消息。</li>
           <li>服务重启会恢复待执行任务；重启时仍在运行的任务会标记为失败。</li>
           <li><code>opencode</code> 必须已安装并在服务进程的 PATH 中；权限遵循 OpenCode 配置，不会传 <code>--auto</code>。</li>
         </ul>

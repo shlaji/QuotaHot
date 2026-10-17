@@ -1,7 +1,7 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -145,24 +145,33 @@ test('real server restores pending work, never reruns interrupted tasks, and exe
 
 test('real server terminates active processes before closing the task database on shutdown', { timeout: 20000 }, async (t) => {
   const directory = sandbox(t);
+  const workspaces = ['first', 'second'].map((name) => join(directory, name));
+  for (const workspace of workspaces) mkdirSync(workspace);
   const server = await serve(t, directory);
-  const response = await fetch(`${server.base}/api/tasks`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ description: 'hold', model: 'openai/fake', directory, trigger: { type: 'time', at: Date.now() + 200 } }),
-  });
-  assert.equal(response.status, 201);
-  const created: ManagedTask = await response.json();
-  await waitFor(async () => existsSync(join(directory, 'ready')));
-  assert.equal((await fetch(`${server.base}/api/tasks/${created.id}`, { method: 'DELETE' })).status, 409);
+  const at = Date.now() + 200;
+  const tasks = await Promise.all(workspaces.map(async (workspace): Promise<ManagedTask> => {
+    const response = await fetch(`${server.base}/api/tasks`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ description: 'hold', model: 'openai/fake', directory: workspace, trigger: { type: 'time', at } }),
+    });
+    assert.equal(response.status, 201);
+    return response.json();
+  }));
+  await waitFor(async () => workspaces.every((workspace) => existsSync(join(workspace, 'ready'))));
+  for (const task of tasks) {
+    assert.equal((await fetch(`${server.base}/api/tasks/${task.id}`, { method: 'DELETE' })).status, 409);
+  }
 
   await server.stop();
 
-  assert.equal(existsSync(join(directory, 'terminated')), true);
+  for (const workspace of workspaces) assert.equal(existsSync(join(workspace, 'terminated')), true);
   const store = new TaskStore(join(directory, 'tasks.db'));
   try {
-    assert.equal(store.get(created.id)?.status, 'failed');
-    assert.match(store.get(created.id)?.output ?? '', /live output/);
-    assert.match(store.get(created.id)?.output ?? '', /final output/);
+    for (const task of tasks) {
+      assert.equal(store.get(task.id)?.status, 'failed');
+      assert.match(store.get(task.id)?.output ?? '', /live output/);
+      assert.match(store.get(task.id)?.output ?? '', /final output/);
+    }
   } finally { store.close(); }
 });
 

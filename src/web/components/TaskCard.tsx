@@ -11,7 +11,6 @@ interface Props {
   readonly task: ManagedTask;
   readonly busyAction: TaskAction | null;
   readonly actionError: string;
-  readonly messageBlocked: boolean;
   readonly onSendMessage: (message: string) => Promise<boolean>;
   readonly onCancel: () => void;
   readonly onDelete: () => void;
@@ -44,7 +43,7 @@ function triggerText(trigger: TaskTrigger): string {
   }
 }
 
-export function TaskCard({ task, busyAction, actionError, messageBlocked, onSendMessage, onCancel, onDelete }: Props) {
+export function TaskCard({ task, busyAction, actionError, onSendMessage, onCancel, onDelete }: Props) {
   const [copyFeedback, setCopyFeedback] = useState<CopyFeedback>({ status: 'idle', message: '' });
   const [message, setMessage] = useState('');
   const messageInputId = useId();
@@ -54,7 +53,7 @@ export function TaskCard({ task, busyAction, actionError, messageBlocked, onSend
   const submitting = busyAction === 'message';
   const canContinue = task.status === 'succeeded'
     && 'sessionId' in task && typeof task.sessionId === 'string' && task.sessionId !== '';
-  const messageEnabled = canContinue && !busy && !messageBlocked;
+  const messageEnabled = canContinue && !busy;
 
   const submitMessage = async (event: SubmitEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -170,9 +169,7 @@ export function TaskCard({ task, busyAction, actionError, messageBlocked, onSend
           <small id={messageHintId} className="task-field-note">
             {!canContinue
               ? '任务完成且会话可用后才能追加消息。'
-              : messageBlocked && !submitting
-                ? '有任务正在执行或发送消息，请等待完成后再发送。'
-                : '沿用当前会话继续执行，输出仅显示最新一轮。'}
+              : '沿用当前会话继续执行，输出仅显示最新一轮。'}
           </small>
           <div className="task-submit-row">
             <button className="primary" type="submit" disabled={!messageEnabled || message.trim() === '' || message.length > MAX_TASK_MESSAGE_LENGTH}>

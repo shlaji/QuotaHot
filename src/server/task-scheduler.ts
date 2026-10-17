@@ -19,7 +19,7 @@ export class TaskScheduler {
   private readonly run: NonNullable<TaskSchedulerOptions['run']>;
   private timer: NodeJS.Timeout | undefined;
   private stopped = false;
-  private active: { readonly id: string; readonly controller: AbortController; readonly promise: Promise<void> } | null = null;
+  private readonly active = new Map<string, { readonly controller: AbortController; readonly promise: Promise<void> }>();
   private quotaCheck: Promise<void> | null = null;
   private quotaResults: readonly UsageResult[] = [];
   private quotaCheckedAt = -Infinity;
@@ -51,22 +51,21 @@ export class TaskScheduler {
     const task = this.store.get(id);
     if (!task) throw new TaskError('Task not found', 404);
     const cancelled = this.store.cancel(id, this.now());
-    if (!cancelled) {
-      if (task.status === 'cancelled') return task;
+    if (!cancelled && task.status !== 'cancelled') {
       throw new TaskError('Only pending or running tasks can be cancelled', 409);
     }
-    if (this.active?.id === id) {
-      const active = this.active;
+    const active = this.active.get(id);
+    if (active) {
       active.controller.abort();
       await active.promise;
-      return this.store.get(id) ?? cancelled;
+      return this.store.get(id) ?? cancelled ?? task;
     }
-    return cancelled;
+    return cancelled ?? task;
   }
 
   continueTask(id: string, message: string): ManagedTask {
     if (!this.store.get(id)) throw new TaskError('Task not found', 404);
-    if (this.stopped || this.active) throw new TaskError('Task service is busy or stopping', 409);
+    if (this.stopped || this.active.has(id)) throw new TaskError('Task service is busy or stopping', 409);
     const task = this.store.claimContinuation(id, this.now());
     if (!task || task.sessionId === null) throw new TaskError('Only succeeded tasks with a session can continue while idle', 409);
     this.launch(task, { sessionId: task.sessionId, prompt: message });
@@ -75,7 +74,7 @@ export class TaskScheduler {
 
   remove(id: string): void {
     if (!this.store.get(id)) throw new TaskError('Task not found', 404);
-    if (this.active?.id === id || !this.store.remove(id)) throw new TaskError('Running tasks cannot be deleted', 409);
+    if (this.active.has(id) || !this.store.remove(id)) throw new TaskError('Running tasks cannot be deleted', 409);
   }
 
   tick(): void {
@@ -86,24 +85,25 @@ export class TaskScheduler {
       this.nextQuotaCheck = now + 60_000;
       this.quotaCheck = this.checkQuota(now).finally(() => { this.quotaCheck = null; });
     }
-    if (this.active) return;
-    const ready = pending.find((task) => {
+    const ready = pending.filter((task) => {
       switch (task.trigger.type) {
         case 'time': return task.trigger.at <= now;
         case 'quota': return now >= this.quotaCheckedAt && now - this.quotaCheckedAt < 60_000
           && this.quotaResults.some((result) => hasTaskQuota(result, task.model, now));
       }
     });
-    if (!ready) return;
-    const claimed = this.store.claim(ready.id, now);
-    if (!claimed) return;
-    this.launch(claimed);
+    for (const task of ready) {
+      if (this.stopped) break;
+      if (this.active.has(task.id)) continue;
+      const claimed = this.store.claim(task.id, now);
+      if (claimed) this.launch(claimed);
+    }
   }
 
   private launch(task: ManagedTask, options: TaskRunnerOptions = {}): void {
     const controller = new AbortController();
-    const promise = this.execute(task, controller.signal, options).finally(() => { this.active = null; });
-    this.active = { id: task.id, controller, promise };
+    const promise = this.execute(task, controller.signal, options).finally(() => { this.active.delete(task.id); });
+    this.active.set(task.id, { controller, promise });
   }
 
   private async checkQuota(startedAt: number): Promise<void> {
@@ -138,13 +138,17 @@ export class TaskScheduler {
   }
 
   async settled(): Promise<void> {
-    await Promise.all([this.quotaCheck, this.active?.promise]);
+    while (this.quotaCheck || this.active.size) {
+      const results = await Promise.allSettled([this.quotaCheck, ...Array.from(this.active.values(), (execution) => execution.promise)]);
+      const failure = results.find((result) => result.status === 'rejected');
+      if (failure) throw failure.reason;
+    }
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
     clearInterval(this.timer);
-    this.active?.controller.abort();
+    for (const execution of this.active.values()) execution.controller.abort();
     await this.settled();
   }
 }

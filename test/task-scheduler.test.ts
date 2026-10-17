@@ -21,7 +21,7 @@ const available: UsageResult = {
   orgType: '', quotaAvailable: true, windows: [], endpoint: '', raw: '',
 };
 
-test('runs due time tasks once, serially, without querying quota for time-only queues', async (t) => {
+test('runs all due time tasks once in parallel without querying quota for time-only queues', async (t) => {
   const store = storeFor(t);
   let now = 1000;
   let calls = 0;
@@ -30,7 +30,7 @@ test('runs due time tasks once, serially, without querying quota for time-only q
     now: () => now, quota: async () => { throw new Error('must not query'); },
     run: async () => { calls++; return gate.promise; },
   });
-  t.after(() => scheduler.stop());
+  t.after(async () => { gate.resolve(success); await scheduler.stop(); });
   const one = scheduler.create({ ...input, trigger: { type: 'time', at: 2000 } });
   const two = scheduler.create({ ...input, trigger: { type: 'time', at: 2000 } });
   scheduler.tick();
@@ -39,14 +39,13 @@ test('runs due time tasks once, serially, without querying quota for time-only q
 
   scheduler.tick(); scheduler.tick();
 
-  assert.equal(calls, 1);
+  assert.equal(calls, 2);
   assert.equal(store.get(one.id)?.status, 'running');
-  assert.equal(store.get(two.id)?.status, 'pending');
+  assert.equal(store.get(two.id)?.status, 'running');
   gate.resolve(success);
   await scheduler.settled();
-  scheduler.tick();
-  await scheduler.settled();
   assert.equal(calls, 2);
+  assert.equal(store.get(one.id)?.status, 'succeeded');
   assert.equal(store.get(two.id)?.status, 'succeeded');
   scheduler.tick();
   assert.equal(calls, 2);
@@ -73,6 +72,36 @@ test('does not block due time tasks or overlap quota queries when a quota reques
   quota.resolve([]);
   await scheduler.settled();
   assert.equal(store.get(timed.id)?.status, 'succeeded');
+});
+
+test('launches every fresh-quota task while a timed peer remains active', async (t) => {
+  const store = new TaskStore(':memory:');
+  const finished = Promise.withResolvers<TaskOutcome>();
+  const quota = Promise.withResolvers<UsageResult[]>();
+  const entered: string[] = [];
+  let checks = 0;
+  const scheduler = new TaskScheduler(store, {
+    now: () => 1000, quota: () => { checks++; return quota.promise; },
+    run: (task) => { entered.push(task.description); return finished.promise; },
+  });
+  t.after(async () => {
+    quota.resolve([]); finished.resolve(success);
+    await scheduler.stop(); store.close();
+  });
+  const timed = scheduler.create({ ...input, description: 'timed', trigger: { type: 'time', at: 1 } });
+  const tasks = ['quota-one', 'quota-two', 'quota-three'].map((description) => scheduler.create({ ...input, description }));
+  scheduler.tick();
+  assert.deepEqual(entered, ['timed']);
+  quota.resolve([available]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  scheduler.tick(); scheduler.tick();
+
+  assert.deepEqual(entered, ['timed', 'quota-one', 'quota-two', 'quota-three']);
+  assert.equal(checks, 1);
+  for (const task of [timed, ...tasks]) assert.equal(store.get(task.id)?.status, 'running');
+  finished.resolve(success);
+  await scheduler.settled();
 });
 
 test('retries quota every 60 seconds after failure and accepts any confirmed account', async (t) => {
@@ -140,8 +169,9 @@ test('cancellation cannot be overwritten and shutdown awaits execution and quota
   assert.equal(aborted, true);
 
   finished.resolve(success);
-  quota.resolve([available]);
   await cancellation;
+  assert.equal(stopped, false);
+  quota.resolve([available]);
   await stopping;
 
   assert.equal(store.get(task.id)?.status, 'cancelled');

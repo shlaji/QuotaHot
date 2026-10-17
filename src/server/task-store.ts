@@ -92,8 +92,7 @@ export class TaskStore {
 
   claim(id: string, now: number): ManagedTask | null {
     const row = this.db.prepare(`UPDATE tasks SET status = 'running', started_at = ?
-      WHERE id = ? AND status = 'pending'
-      AND NOT EXISTS (SELECT 1 FROM tasks WHERE status = 'running') RETURNING *`)
+      WHERE id = ? AND status = 'pending' RETURNING *`)
       .get(new Date(now).toISOString(), id);
     return row ? decode(row) : null;
   }
@@ -111,8 +110,7 @@ export class TaskStore {
   claimContinuation(id: string, now: number): ManagedTask | null {
     const row = this.db.prepare(`UPDATE tasks SET status = 'running', started_at = ?,
       finished_at = NULL, output = '', error = ''
-      WHERE id = ? AND status = 'succeeded' AND session_id IS NOT NULL AND session_id != ''
-      AND NOT EXISTS (SELECT 1 FROM tasks WHERE status = 'running') RETURNING *`)
+      WHERE id = ? AND status = 'succeeded' AND session_id IS NOT NULL AND session_id != '' RETURNING *`)
       .get(new Date(now).toISOString(), id);
     return row ? decode(row) : null;
   }
