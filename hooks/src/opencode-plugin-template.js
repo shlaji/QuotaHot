@@ -50,6 +50,7 @@ const deletedSessions = new Map();
 
 const RECOVERY_INTERVAL_MS = 600000;
 const RESET_BUFFER_MS = 60000;
+const STATE_WATCH_RETRY_MS = 1000;
 const STATE_PATH = join(process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), ".quotahot"), "switch-state.json");
 const RECOVERY_STATUS_DIR = "recovery-status";
 const recoveryStatusID = randomUUID();
@@ -59,6 +60,7 @@ const completedFailures = new Map();
 let recoveryTimer;
 let nextCheckAt = null;
 let heartbeatTimer;
+let stateWatchRetryTimer;
 let statusWrites = Promise.resolve();
 let lastCheckAt = null;
 let lastCheckResult = null;
@@ -162,13 +164,33 @@ async function refreshRecoveryState(external) {
 function watchRecoveryState() {
   if (stateWatcher) return;
   try {
-    stateWatcher = watch(dirname(STATE_PATH), (_event, filename) => {
-      if (filename === "switch-state.json") void refreshRecoveryState(true);
+    const watcher = watch(dirname(STATE_PATH), () => {
+      void refreshRecoveryState(true);
     });
-    stateWatcher.unref?.();
+    stateWatcher = watcher;
+    clearTimeout(stateWatchRetryTimer);
+    stateWatchRetryTimer = undefined;
+    watcher.on("error", () => {
+      if (stateWatcher === watcher) stateWatcher = undefined;
+      watcher.close();
+      scheduleStateWatchRetry();
+    });
+    watcher.unref?.();
   } catch {
     // The data directory may not exist yet; the timer remains the fallback.
+    scheduleStateWatchRetry();
   }
+}
+
+function scheduleStateWatchRetry() {
+  if (stateWatchRetryTimer || stateWatcher || !waitingSessions.size) return;
+  stateWatchRetryTimer = setTimeout(async () => {
+    stateWatchRetryTimer = undefined;
+    watchRecoveryState();
+    await refreshRecoveryState(true);
+    if (!stateWatcher) scheduleStateWatchRetry();
+  }, STATE_WATCH_RETRY_MS);
+  stateWatchRetryTimer.unref?.();
 }
 
 function failureKey(entry) {
@@ -186,6 +208,8 @@ function forget(entry) {
   if (!waitingSessions.size) {
     clearTimeout(recoveryTimer);
     recoveryTimer = undefined;
+    clearTimeout(stateWatchRetryTimer);
+    stateWatchRetryTimer = undefined;
     nextCheckAt = null;
     recoveryDelay = RECOVERY_INTERVAL_MS;
     recoveryWaitUntil = 0;
@@ -266,6 +290,7 @@ function scheduleRecovery(delay) {
     try {
       const owner = entries[0]?.owner;
       if (!owner) return;
+      watchRecoveryState();
       const result = await owner.run({ source: "opencode", recover: true, provider: "openai" });
       const outcome = result?.switched ? "switched" : result?.outcome;
       lastCheckAt = Date.now();

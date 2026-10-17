@@ -303,8 +303,10 @@ async function recoveryFixture(t: TestContext) {
   const timers = new Map<object, { at: number; callback: () => void }>();
   const payloads: Array<{ source: string; recover?: boolean; provider?: string; event?: { properties: { sessionID: string } } }> = [];
   const children: Array<{ finish(outcome: string, waitUntil?: number): void }> = [];
-  const watcherEvents: Array<(event: string, filename: string) => void> = [];
-  let stateAccounts: Record<string, { resetAt: number; blockedUntil: number; checkedAt?: number }> = {};
+  const watcherEvents: Array<(event: string, filename: string | null) => void> = [];
+  const watcherInstances: Array<EventEmitter & { close(): void; unref(): void }> = [];
+  let watchFailures = 0;
+  let stateAccounts: Record<string, { usedPercent?: number | null; resetAt: number; blockedUntil: number; checkedAt?: number }> = {};
   let readState = async () => JSON.stringify({ accounts: stateAccounts });
   const prompts: Prompt[] = [];
   const histories = new Map<string, object[]>();
@@ -322,9 +324,18 @@ async function recoveryFixture(t: TestContext) {
     homedir: () => '/test', join: (...parts: string[]) => parts.join('/'), dirname: (path: string) => path.slice(0, path.lastIndexOf('/')),
     readFile: (path: string) => path.endsWith('switch-state.json') ? readState() : readFile(path, 'utf8'),
     mkdir, writeFile, rename, unlink,
-    watch: (_directory: string, callback: (event: string, filename: string) => void) => {
+    watch: (_directory: string, callback: (event: string, filename: string | null) => void) => {
+      if (watchFailures > 0) {
+        watchFailures -= 1;
+        throw new Error('watch unavailable');
+      }
       watcherEvents.push(callback);
-      return { close: () => { const index = watcherEvents.indexOf(callback); if (index >= 0) watcherEvents.splice(index, 1); }, unref() {} };
+      const watcher = Object.assign(new EventEmitter(), {
+        close: () => { const index = watcherEvents.indexOf(callback); if (index >= 0) watcherEvents.splice(index, 1); },
+        unref() {},
+      });
+      watcherInstances.push(watcher);
+      return watcher;
     },
     setTimeout: (callback: () => void, delay: number) => {
       const timer = { unref() {} }; timers.set(timer, { at: now + delay, callback }); return timer;
@@ -363,10 +374,11 @@ async function recoveryFixture(t: TestContext) {
     children.at(-1)?.finish(outcome); await pending;
     await plugin.event(idle(sessionID));
   };
-  return { plugin, directory, sdk, histories, statuses, notifications, prompts, payloads, children, timers, advance, flush, seed, fail, settledStatus,
-    setAccounts: (accounts: Record<string, { resetAt: number; blockedUntil: number; checkedAt?: number }>) => { stateAccounts = accounts; },
+  return { plugin, directory, sdk, histories, statuses, notifications, prompts, payloads, children, timers, advance, flush, seed, fail, settledStatus, watcherInstances,
+    setAccounts: (accounts: Record<string, { usedPercent?: number | null; resetAt: number; blockedUntil: number; checkedAt?: number }>) => { stateAccounts = accounts; },
     setReadState: (reader: () => Promise<string>) => { readState = reader; },
-    emitState: () => { for (const callback of [...watcherEvents]) callback('rename', 'switch-state.json'); },
+    failNextWatch: () => { watchFailures += 1; },
+    emitState: (filename: string | null = 'switch-state.json') => { for (const callback of [...watcherEvents]) callback('rename', filename); },
     get watchers() { return watcherEvents.length; },
     second: () => factory(input) };
 }
@@ -584,6 +596,61 @@ test('external quota state change wakes shared recovery once and unchanged write
   assert.equal(state.payloads.length, 2);
   await second.dispose(); await state.plugin.dispose();
   assert.equal(state.watchers, 0);
+});
+
+test('changed quota state wakes recovery when directory watcher omits the filename', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.fail('missing-filename');
+  assert.equal(state.children.length, 1);
+
+  state.emitState('unrelated.tmp');
+  await state.flush();
+  await state.advance(0);
+  assert.equal(state.children.length, 1);
+
+  state.setAccounts({ available: { usedPercent: 34, resetAt: 0, blockedUntil: 0 } });
+  state.emitState(null);
+  await state.flush();
+  await state.advance(0);
+  assert.equal(state.children.length, 2);
+  assert.equal(state.payloads[1]?.recover, true);
+});
+
+test('watcher errors are handled and the next recovery check reinstalls the watcher', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.fail('watcher-error');
+  const [watcher] = state.watcherInstances;
+  assert.ok(watcher);
+  assert.equal(state.watchers, 1);
+
+  assert.doesNotThrow(() => watcher.emit('error', new Error('watcher failed')));
+  assert.equal(state.watchers, 0);
+  assert.equal(state.children.length, 1);
+
+  await state.advance(pollInterval);
+  assert.equal(state.watcherInstances.length, 2);
+  assert.equal(state.watchers, 1);
+  assert.equal(state.children.length, 2);
+});
+
+test('degraded watcher polling detects changed state until watcher registration succeeds', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.fail('degraded-watch');
+  const [watcher] = state.watcherInstances;
+  assert.ok(watcher);
+  state.failNextWatch();
+
+  watcher.emit('error', new Error('watcher failed'));
+  state.setAccounts({ available: { usedPercent: 34, resetAt: 0, blockedUntil: 0 } });
+  await state.advance(1000);
+  await state.advance(0);
+
+  assert.equal(state.children.length, 2);
+  assert.equal(state.payloads[1]?.recover, true);
+  assert.equal(state.watchers, 1);
+  const registered = state.watcherInstances.length;
+  await state.advance(1000);
+  assert.equal(state.watcherInstances.length, registered);
 });
 
 test('recovery shares one provider poll and continues each failed idle session only once', async (t) => {
