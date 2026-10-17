@@ -20,10 +20,13 @@ export function initializeTaskLogSchema(db: DatabaseSync): void {
     db.exec(`
       CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY, description TEXT NOT NULL, model TEXT NOT NULL,
-        directory TEXT NOT NULL, trigger_type TEXT NOT NULL CHECK(trigger_type IN ('quota','time')),
+        directory TEXT NOT NULL, trigger_type TEXT NOT NULL CHECK(trigger_type IN ('quota','time','task')),
         trigger_at TEXT, status TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed','cancelled')),
         created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
-        output TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT ''
+        output TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '',
+        trigger_task_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT,
+        CHECK((trigger_type = 'task' AND trigger_task_id IS NOT NULL AND trigger_task_id != id)
+          OR (trigger_type != 'task' AND trigger_task_id IS NULL))
       );
       CREATE INDEX IF NOT EXISTS tasks_status ON tasks(status);
       CREATE TABLE IF NOT EXISTS task_runs (
@@ -48,6 +51,10 @@ export function initializeTaskLogSchema(db: DatabaseSync): void {
     `);
     const columns = db.prepare('PRAGMA table_info(tasks)').all();
     if (!columns.some((column) => column.name === 'session_id')) db.exec('ALTER TABLE tasks ADD COLUMN session_id TEXT');
+    if (!columns.some((column) => column.name === 'trigger_task_id')) {
+      db.exec('ALTER TABLE tasks ADD COLUMN trigger_task_id TEXT REFERENCES tasks(id) ON DELETE RESTRICT');
+    }
+    db.exec('CREATE INDEX IF NOT EXISTS tasks_dependency ON tasks(trigger_task_id)');
     if (columns.some((column) => column.name === 'current_run_id')) return;
     db.exec('ALTER TABLE tasks ADD COLUMN current_run_id TEXT REFERENCES task_runs(id) ON DELETE SET NULL');
     const insertRun = db.prepare(`INSERT INTO task_runs

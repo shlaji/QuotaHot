@@ -216,6 +216,7 @@ export function TaskPane({ active = true }: Props) {
       <TaskForm
         defaultDirectory={snapshot?.defaultDirectory ?? ''}
         directory={directory}
+        tasks={snapshot?.tasks ?? []}
         modelDiscovery={{
           response: modelResponse,
           loading: modelLoading,
@@ -254,6 +255,7 @@ export function TaskPane({ active = true }: Props) {
               <TaskCard
                 key={task.id}
                 task={task}
+                tasks={snapshot.tasks}
                 active={active}
                 busyAction={busyById[task.id] ?? null}
                 actionError={actionErrors[task.id] ?? ''}

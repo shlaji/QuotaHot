@@ -5,6 +5,7 @@ import { TaskStore, type TaskOutcome } from './task-store.js';
 import { runTask, type TaskRunnerOptions } from './task-runner.js';
 import { hasTaskQuota } from './task-quota.js';
 import { TaskError } from './task-error.js';
+import { assertNeverTaskTrigger } from '../shared/tasks.js';
 
 interface TaskSchedulerOptions {
   readonly now?: () => number;
@@ -82,7 +83,7 @@ export class TaskScheduler {
 
   remove(id: string): void {
     if (!this.store.get(id)) throw new TaskError('Task not found', 404);
-    if (this.active.has(id) || !this.store.remove(id)) throw new TaskError('Running tasks cannot be deleted', 409);
+    if (this.active.has(id) || !this.store.remove(id)) throw new TaskError('Running or referenced tasks cannot be deleted', 409);
   }
 
   tick(): void {
@@ -95,9 +96,11 @@ export class TaskScheduler {
     }
     const ready = pending.filter((task) => {
       switch (task.trigger.type) {
+        case 'task': return this.store.dependencyReady(task.trigger.taskId);
         case 'time': return task.trigger.at <= now;
         case 'quota': return now >= this.quotaCheckedAt && now - this.quotaCheckedAt < 60_000
           && this.quotaResults.some((result) => hasTaskQuota(result, task.model, now));
+        default: return assertNeverTaskTrigger(task.trigger);
       }
     });
     for (const task of ready) {

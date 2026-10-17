@@ -6,6 +6,7 @@ export type TaskAction = 'cancel' | 'delete' | 'message';
 
 interface Props {
   readonly task: TaskSummary;
+  readonly tasks: readonly TaskSummary[];
   readonly active: boolean;
   readonly busyAction: TaskAction | null;
   readonly actionError: string;
@@ -36,12 +37,14 @@ function triggerText(trigger: TaskTrigger): string {
       return '任一托管账户额度可用';
     case 'time':
       return `定时于 ${dateTime(trigger.at)}`;
+    case 'task':
+      return `等待前置任务完成 · ${trigger.taskId.slice(0, 8)}`;
     default:
       return assertNever(trigger);
   }
 }
 
-export function TaskCard({ task, active, busyAction, actionError, onSendMessage, onCancel, onDelete }: Props) {
+export function TaskCard({ task, tasks, active, busyAction, actionError, onSendMessage, onCancel, onDelete }: Props) {
   const [message, setMessage] = useState('');
   const messageInputId = useId();
   const messageHintId = useId();
@@ -51,6 +54,10 @@ export function TaskCard({ task, active, busyAction, actionError, onSendMessage,
   const canContinue = (task.status === 'succeeded' || task.status === 'failed')
     && 'sessionId' in task && typeof task.sessionId === 'string' && task.sessionId !== '';
   const messageEnabled = canContinue && !busy;
+  const dependency = task.trigger.type === 'task' ? task.trigger : null;
+  const predecessor = dependency !== null
+    ? tasks.find((candidate) => candidate.id === dependency.taskId)
+    : undefined;
 
   const submitMessage = async (event: SubmitEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -70,6 +77,13 @@ export function TaskCard({ task, active, busyAction, actionError, onSendMessage,
       </header>
 
       <p className="task-trigger">{triggerText(task.trigger)}</p>
+      {dependency !== null && (
+        <p className="task-trigger task-dependency-context">
+          前置任务：{predecessor?.description ?? '任务记录已删除'} · {predecessor === undefined
+            ? dependency.taskId
+            : STATUS_LABEL[predecessor.status]}
+        </p>
+      )}
 
       <dl className="task-meta">
         <div className="task-meta-wide">

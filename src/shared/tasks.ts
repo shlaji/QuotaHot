@@ -1,6 +1,11 @@
 export const MAX_TASK_MESSAGE_LENGTH = 32000;
 
-export type TaskTrigger = { readonly type: 'quota' } | { readonly type: 'time'; readonly at: number };
+export type TaskTrigger = { readonly type: 'quota' } | { readonly type: 'time'; readonly at: number }
+  | { readonly type: 'task'; readonly taskId: string };
+
+export function assertNeverTaskTrigger(trigger: never): never {
+  throw new TypeError(`Invalid task trigger: ${JSON.stringify(trigger)}`);
+}
 
 export interface CreateTaskInput {
   readonly description: string;

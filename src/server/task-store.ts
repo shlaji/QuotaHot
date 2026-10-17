@@ -9,6 +9,11 @@ import type {
 import { boundedText } from './task-output.js';
 import { TaskLogStore } from './task-log-store.js';
 import { taskTransaction } from './task-log-schema.js';
+import { assertNeverTaskTrigger } from '../shared/tasks.js';
+import { TaskError } from './task-error.js';
+
+const completedTaskIds = `SELECT id FROM tasks WHERE status IN ('succeeded','failed','cancelled')
+  UNION SELECT task_id FROM task_runs WHERE status IN ('succeeded','failed','cancelled')`;
 
 export type TaskOutcome = Readonly<Pick<ManagedTask, 'output' | 'error'>> & {
   readonly status: 'succeeded' | 'failed';
@@ -39,6 +44,7 @@ function decodeMetadata(row: Record<string, SQLOutputValue>): Omit<ManagedTask, 
   switch (row.trigger_type) {
     case 'quota': trigger = { type: 'quota' }; break;
     case 'time': trigger = { type: 'time', at: Date.parse(text(row.trigger_at)) }; break;
+    case 'task': trigger = { type: 'task', taskId: text(row.trigger_task_id) }; break;
     default: throw new TypeError('Invalid task trigger');
   }
   return {
@@ -73,12 +79,23 @@ export class TaskStore {
       ...input, id: randomUUID(), status: 'pending', createdAt: now,
       startedAt: null, finishedAt: null, sessionId: null, output: '', error: '',
     };
-    this.db.prepare(`INSERT INTO tasks
-      (id, description, model, directory, trigger_type, trigger_at, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`)
-      .run(task.id, input.description, input.model, input.directory, input.trigger.type,
-        input.trigger.type === 'time' ? new Date(input.trigger.at).toISOString() : null,
-        new Date(now).toISOString());
+    taskTransaction(this.db, () => {
+      let at: string | null = null;
+      let predecessor: string | null = null;
+      switch (input.trigger.type) {
+        case 'quota': break;
+        case 'time': at = new Date(input.trigger.at).toISOString(); break;
+        case 'task':
+          predecessor = input.trigger.taskId;
+          if (predecessor === task.id || !this.get(predecessor)) throw new TaskError('Predecessor must be an existing different task', 400);
+          break;
+        default: assertNeverTaskTrigger(input.trigger);
+      }
+      this.db.prepare(`INSERT INTO tasks
+        (id, description, model, directory, trigger_type, trigger_at, trigger_task_id, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`)
+        .run(task.id, input.description, input.model, input.directory, input.trigger.type, at, predecessor, new Date(now).toISOString());
+    });
     return task;
   }
 
@@ -87,7 +104,7 @@ export class TaskStore {
   }
 
   listSummaries(): TaskSummary[] {
-    return this.db.prepare(`SELECT id, description, model, directory, trigger_type, trigger_at,
+    return this.db.prepare(`SELECT id, description, model, directory, trigger_type, trigger_at, trigger_task_id,
       status, session_id, created_at, started_at, finished_at, error, length(output) > 0 AS has_output
       FROM tasks ORDER BY created_at, rowid`).all()
       .map((row) => ({ ...decodeMetadata(row), hasOutput: row.has_output === 1 }));
@@ -108,12 +125,17 @@ export class TaskStore {
     return this.claimRound(id, now, 'initial');
   }
 
+  dependencyReady(id: string): boolean {
+    return this.db.prepare(`SELECT 1 FROM (${completedTaskIds}) WHERE id = ?`).get(id) !== undefined;
+  }
+
   private claimRound(id: string, now: number, kind: Exclude<TaskRunKind, 'legacy_unknown'>): ClaimedTask | null {
     return taskTransaction(this.db, () => {
       const status = { initial: 'pending', continuation: 'succeeded' }[kind];
       const row = this.db.prepare(`UPDATE tasks SET status = 'running', started_at = ?,
         finished_at = NULL, output = '', error = '' WHERE id = ?
         AND (status = ? OR (? = 'continuation' AND status = 'failed'))
+        AND (trigger_type != 'task' OR trigger_task_id IN (${completedTaskIds}))
         AND (? = 'initial' OR (session_id IS NOT NULL AND session_id != '')) RETURNING *`)
         .get(new Date(now).toISOString(), id, status, kind, kind);
       if (!row) return null;
@@ -202,6 +224,7 @@ export class TaskStore {
 
   remove(id: string): boolean {
     return this.db.prepare(`DELETE FROM tasks WHERE id = ? AND status != 'running'
+      AND NOT EXISTS (SELECT 1 FROM tasks AS dependent WHERE dependent.trigger_task_id = tasks.id)
       AND NOT EXISTS (SELECT 1 FROM task_runs WHERE task_id = tasks.id AND closed_at IS NULL)`).run(id).changes > 0;
   }
 

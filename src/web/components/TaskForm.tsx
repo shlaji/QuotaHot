@@ -1,10 +1,11 @@
-import { useState, type SubmitEvent } from 'react';
-import type { CreateTaskInput, TaskTrigger } from '../../shared/tasks.js';
+import { useId, useState, type SubmitEvent } from 'react';
+import type { CreateTaskInput, TaskSummary, TaskTrigger } from '../../shared/tasks.js';
 import { TaskModelField, type TaskModelDiscovery } from './TaskModelField.js';
 
 interface Props {
   readonly defaultDirectory: string;
   readonly directory: string;
+  readonly tasks: readonly TaskSummary[];
   readonly modelDiscovery: TaskModelDiscovery;
   readonly onDirectoryChange: (directory: string) => void;
   readonly onCreate: (input: CreateTaskInput) => Promise<void>;
@@ -23,6 +24,7 @@ function localDateTime(timestamp: number): string {
 export function TaskForm({
   defaultDirectory,
   directory,
+  tasks,
   modelDiscovery,
   onDirectoryChange,
   onCreate,
@@ -31,8 +33,11 @@ export function TaskForm({
   const [model, setModel] = useState('openai/gpt-6-luna-fast');
   const [triggerType, setTriggerType] = useState<TaskTrigger['type']>('quota');
   const [scheduledAt, setScheduledAt] = useState('');
+  const [predecessorId, setPredecessorId] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const predecessorHintId = useId();
+  const predecessorAvailable = tasks.some((task) => task.id === predecessorId);
 
   const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -63,6 +68,17 @@ export function TaskForm({
         trigger = { type: 'time', at };
         break;
       }
+      case 'task':
+        if (predecessorId === '') {
+          setError('请选择一个前置任务。');
+          return;
+        }
+        if (!predecessorAvailable) {
+          setError('所选前置任务已不存在，请重新选择。');
+          return;
+        }
+        trigger = { type: 'task', taskId: predecessorId };
+        break;
       default:
         trigger = assertNever(triggerType);
     }
@@ -77,7 +93,18 @@ export function TaskForm({
         trigger,
       });
       setDescription('');
-      if (trigger.type === 'time') setScheduledAt('');
+      switch (trigger.type) {
+        case 'quota':
+          break;
+        case 'time':
+          setScheduledAt('');
+          break;
+        case 'task':
+          setPredecessorId('');
+          break;
+        default:
+          assertNever(trigger);
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -136,11 +163,12 @@ export function TaskForm({
               value={triggerType}
               onChange={(event) => {
                 const value = event.target.value;
-                if (value === 'quota' || value === 'time') setTriggerType(value);
+                if (value === 'quota' || value === 'time' || value === 'task') setTriggerType(value);
               }}
             >
               <option value="quota">有可用额度时</option>
               <option value="time">指定本地时间</option>
+              <option value="task">等待其他任务完成</option>
             </select>
           </label>
 
@@ -154,6 +182,31 @@ export function TaskForm({
                 value={scheduledAt}
                 onChange={(event) => setScheduledAt(event.target.value)}
               />
+            </label>
+          )}
+
+          {triggerType === 'task' && (
+            <label className="field task-field">
+              <span>前置任务</span>
+              <select
+                required
+                value={predecessorId}
+                aria-describedby={predecessorHintId}
+                onChange={(event) => setPredecessorId(event.target.value)}
+              >
+                <option value="">{tasks.length === 0 ? '暂无可选任务，请先创建前置任务' : '请选择前置任务'}</option>
+                {predecessorId !== '' && !predecessorAvailable && (
+                  <option value={predecessorId} disabled>已不可用 · {predecessorId}</option>
+                )}
+                {tasks.map((task) => (
+                  <option key={task.id} value={task.id} title={task.id}>
+                    {task.description} · {task.id.slice(0, 8)}
+                  </option>
+                ))}
+              </select>
+              <small id={predecessorHintId} className="task-field-note">
+                前置任务成功、失败或取消后均会触发；已完成的任务会立即满足条件。
+              </small>
             </label>
           )}
         </div>
