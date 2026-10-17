@@ -41,6 +41,14 @@ export function initializeTaskLogSchema(db: DatabaseSync): void {
         total_chunks INTEGER NOT NULL DEFAULT 0 CHECK(total_chunks >= 0),
         UNIQUE(task_id, ordinal)
       );
+    `);
+    const chunkColumns = db.prepare('PRAGMA table_info(task_log_chunks)').all();
+    if (chunkColumns.length > 0 && !chunkColumns.some((column) => column.name === 'stream')) {
+      db.exec(`UPDATE task_runs SET total_bytes = 0, total_chunks = 0, archive_state = 'incomplete'
+        WHERE total_bytes > 0 OR total_chunks > 0 OR id IN (SELECT run_id FROM task_log_chunks);
+        DROP TABLE task_log_chunks;`);
+    }
+    db.exec(`
       CREATE TABLE IF NOT EXISTS task_log_chunks (
         run_id TEXT NOT NULL REFERENCES task_runs(id) ON DELETE CASCADE,
         sequence INTEGER NOT NULL CHECK(sequence >= 0), byte_offset INTEGER NOT NULL CHECK(byte_offset >= 0),

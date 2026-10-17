@@ -59,6 +59,48 @@ test('migrates legacy excerpts as unknown archives once without modifying existi
   assert.equal(reopened.listRuns('pending')[0]?.ordinal, 1);
 });
 
+test('discards obsolete chunks once while preserving new chunks across reopen', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'task-log-reset-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = join(directory, 'tasks.db');
+  const original = new TaskStore(path);
+  const task = original.create(input, now);
+  const running = original.claim(task.id, now + 1);
+  assert.ok(running);
+  original.appendOutput(task.id, running.currentRunId, Buffer.from('obsolete'), 'stdout');
+  const emptyTask = original.create(input, now);
+  original.claim(emptyTask.id, now + 1);
+  original.finish(emptyTask.id, { status: 'succeeded', output: '', error: '' }, now + 2);
+  const emptyRuns = original.listRuns(emptyTask.id);
+  original.close();
+  const obsolete = new DatabaseSync(path);
+  obsolete.exec('ALTER TABLE task_log_chunks DROP COLUMN stream');
+  obsolete.close();
+
+  const reset = new TaskStore(path);
+
+  const [run] = reset.listRuns(task.id);
+  assert.ok(run);
+  assert.equal(run.totalBytes, 0);
+  assert.equal(run.totalChunks, 0);
+  assert.equal(run.archiveState, 'incomplete');
+  assert.deepEqual(reset.readLogPage(task.id, run.id)?.chunks, []);
+  assert.deepEqual(reset.listRuns(emptyTask.id), emptyRuns);
+  const bytes = Buffer.from([255, 0, 129]);
+  reset.appendOutput(task.id, run.id, bytes, 'stderr');
+  reset.finishRun(task.id, run.id, { status: 'succeeded', output: '', error: '', finishedAt: now + 3 });
+  reset.close();
+  const reopened = new TaskStore(path);
+  t.after(() => reopened.close());
+  const page = reopened.readLogPage(task.id, run.id);
+  assert.ok(page);
+  assert.equal(page.totalBytes, bytes.length);
+  assert.equal(page.totalChunks, 1);
+  assert.deepEqual(page.chunks.map((chunk) => chunk.stream), ['stderr']);
+  assert.deepEqual(Buffer.concat(page.chunks.map((chunk) => chunk.data)), bytes);
+  assert.equal(reopened.listRuns(task.id)[0]?.archiveState, 'incomplete');
+});
+
 test('closes interrupted archives as incomplete without deleting committed bytes', (t) => {
   const store = new TaskStore(':memory:');
   t.after(() => store.close());
