@@ -475,6 +475,8 @@ Qoder 不参与保活调度，但可以参与 API 转发。要让 Qoder 账户�
 
 成功或失败的任务若已关联 OpenCode 会话（持久化的 `sessionId` 非空），可在任务卡片中追加消息，让 OpenCode 沿用原会话继续执行。追加消息会立即启动该任务的新一轮，其他任务正在运行或发送消息时仍可独立提交。等待中、运行中或已取消的任务不能追加消息；发送、取消、删除请求尚未结束时，不能重复提交该任务的操作。草稿在轮询和请求失败后保留，仅在请求被接受后清空；慢请求不暂停其他任务的状态刷新。每轮结束后临时 OpenCode 服务会关闭，会话 ID 保存在任务数据库中，因此 QuotaHot 重启后仍可继续。卡片默认显示最新一轮日志，也可切换查看此前轮次；新一轮不会覆盖旧轮次的完整归档。旧版任务或没有可用会话的任务不能追加消息。
 
+任务关联 OpenCode 会话后，卡片还提供折叠的**会话内容**。展开后 QuotaHot 调用 `opencode export <sessionId>` 读取原生会话 JSON，按消息顺序展示用户和助手正文；推理、工具输入与输出默认折叠。它包含该根会话的追加消息，不递归展开子会话；执行中显示的是本次读取时的快照，可手动刷新。会话导出独立于逐轮日志，导出失败不会改变任务状态；无法取得原生会话时，仍可查看已归档的逐轮输出。
+
 任务卡片默认不请求或挂载日志正文。展开**查看输出**后才会单独加载该任务的轮次列表和日志页；每页最多 64 KiB、最多 128 个归档块，浏览器只保留最近 3 页。可按轮次查看、从头顺序翻页或跳到最新窗口；执行中的轮次在最新窗口每两秒跟随新数据。收起面板、切离任务页或换轮次后会取消在途请求。窗口只从 stdout JSONL 事件里显示 `type: "text"` 且 `part.text` 为字符串的内容，保持事件顺序与文本空白；`step_start`、`tool_use`、`step_finish`、session 元数据及 stderr 不作为消息正文显示。stderr 可在**诊断输出**流查看，旧版来源未知的输出不猜作消息。
 
 单条 JSON 文本事件过大时，窗口为控制渲染内存只显示该事件正文前 64 KiB，并明确标注已截取；这是显示预览上限，不影响数据库里的完整原始字节、完整事件 JSON 数组复制或日志下载。要查看被窗口省略的正文，请复制完整消息数组或下载原始/JSONL 归档。
@@ -485,7 +487,7 @@ Qoder 不参与保活调度，但可以参与 API 转发。要让 Qoder 账户�
 
 需要轮询任务状态的 API 客户端应使用 `GET /api/tasks/summary`：返回 `{ tasks, defaultDirectory }`，任务包含原有元数据和 `hasOutput`，不包含输出或日志正文，数据库查询也不会读取归档 BLOB。旧的 `GET /api/tasks` 仍返回包含兼容预览的完整任务列表；`GET /api/tasks/:id/output` 仍用于读取当前轮次的有界预览。
 
-归档 API：`GET /api/tasks/:id/runs` 获取轮次元数据；`GET /api/tasks/:id/runs/:runId/log` 使用字节游标分页读取有界 base64 块；`GET /api/tasks/:id/runs/:runId/download` 下载该轮原始 stdout/stderr 字节；`GET /api/tasks/:id/runs/:runId/messages/download` 下载该轮完整 stdout JSON 事件对象数组；`GET /api/tasks/:id/logs/download` 下载所有轮次的 JSONL 归档。分页参数为 `sequence`、`byteOffset`、`maxBytes`、`maxChunks`；每次最多读取 64 KiB 和 128 个块。所有端点沿用 Web 访问认证和跨站保护，并禁止缓存日志内容。
+归档 API：`GET /api/tasks/:id/session` 按任务数据库中的会话 ID 和工作目录导出原生会话快照；`GET /api/tasks/:id/runs` 获取轮次元数据；`GET /api/tasks/:id/runs/:runId/log` 使用字节游标分页读取有界 base64 块；`GET /api/tasks/:id/runs/:runId/download` 下载该轮原始 stdout/stderr 字节；`GET /api/tasks/:id/runs/:runId/messages/download` 下载该轮完整 stdout JSON 事件对象数组；`GET /api/tasks/:id/logs/download` 下载所有轮次的 JSONL 归档。分页参数为 `sequence`、`byteOffset`、`maxBytes`、`maxChunks`；每次最多读取 64 KiB 和 128 个块。所有端点沿用 Web 访问认证和跨站保护，并禁止缓存日志内容。
 
 任务执行时，QuotaHot 为每个任务启动一个仅监听 `127.0.0.1` 的 OpenCode `serve`，再用 `run --attach` 启动根会话。根命令退出不代表任务完成：QuotaHot 会递归读取根会话及所有子会话，只有每个会话都有已完成的 assistant terminal message 且没有 `busy` 或 `retry` 状态时才标记成功。子会话尚未产生消息、嵌套子会话仍在运行、或任一 assistant 报错都会阻止成功或使任务失败。取消和服务关闭会按最深层子会话优先调用 abort，确认会话树停止后才关闭任务级 OpenCode 服务；任务状态一旦取消不会被迟到的进程结果覆盖。
 

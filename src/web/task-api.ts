@@ -3,6 +3,7 @@ import type {
   ManagedTask,
   TaskModelsResponse,
   TaskOutputResponse,
+  TaskSessionResponse,
   TaskSummary,
   TaskSummaryListResponse,
   TaskLogCursor,
@@ -41,6 +42,8 @@ export const taskApi = {
     json<TaskSummaryListResponse>('/api/tasks/summary', signal === undefined ? undefined : { signal }),
   output: (id: string, signal: AbortSignal) =>
     json<TaskOutputResponse>(`/api/tasks/${encodeURIComponent(id)}/output`, { signal }),
+  session: (id: string, signal: AbortSignal) =>
+    json<TaskSessionResponse>(`/api/tasks/${encodeURIComponent(id)}/session`, { signal }),
   runs: (id: string, signal: AbortSignal) =>
     json<TaskRunListResponse>(`/api/tasks/${encodeURIComponent(id)}/runs`, { signal }),
   log: (id: string, selection: TaskLogSelection, signal: AbortSignal) => {

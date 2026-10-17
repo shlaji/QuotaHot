@@ -145,3 +145,29 @@ export interface TaskModelsResponse {
   readonly models: string[];
   readonly directory: string;
 }
+
+export type TaskSessionPart =
+  | { readonly id: string; readonly type: 'text' | 'reasoning'; readonly text: string }
+  | { readonly id: string; readonly type: 'tool'; readonly tool: string; readonly status: 'pending' | 'running' | 'completed' | 'error'; readonly input: string; readonly output: string; readonly error: string }
+  | { readonly id: string; readonly type: 'unsupported'; readonly originalType: string };
+
+export interface TaskSessionMessage {
+  readonly id: string;
+  readonly role: 'user' | 'assistant';
+  readonly parts: readonly TaskSessionPart[];
+}
+
+export interface TaskSessionTranscript {
+  readonly sessionId: string;
+  readonly title: string;
+  readonly scope: 'root-only';
+  readonly messages: readonly TaskSessionMessage[];
+}
+
+export type TaskSessionErrorCode = 'timeout' | 'cli_unavailable' | 'session_unavailable'
+  | 'export_failed' | 'invalid_output' | 'limit_exceeded';
+
+export type TaskSessionResponse =
+  | { readonly taskId: string; readonly status: 'no_session' }
+  | { readonly taskId: string; readonly status: 'ready'; readonly transcript: TaskSessionTranscript }
+  | { readonly taskId: string; readonly status: 'error'; readonly code: TaskSessionErrorCode; readonly error: string };

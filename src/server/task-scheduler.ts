@@ -6,6 +6,9 @@ import { runTask, type TaskRunnerOptions } from './task-runner.js';
 import { hasTaskQuota } from './task-quota.js';
 import { TaskError } from './task-error.js';
 import { assertNeverTaskTrigger } from '../shared/tasks.js';
+import type { TaskSessionResponse } from '../shared/tasks.js';
+import { exportSession, type SessionExporter } from './opencode-session-export.js';
+import { SessionExportError } from './opencode-export-payload.js';
 
 interface TaskSchedulerOptions {
   readonly now?: () => number;
@@ -13,6 +16,7 @@ interface TaskSchedulerOptions {
   readonly run?: (task: CreateTaskInput, signal: AbortSignal, options: TaskRunnerOptions) => Promise<TaskOutcome>;
   readonly proxy?: () => string;
   readonly noProxy?: () => readonly string[];
+  readonly exportSession?: SessionExporter;
 }
 
 export class TaskScheduler {
@@ -49,6 +53,19 @@ export class TaskScheduler {
     const output = this.store.getOutput(id);
     if (!output) throw new TaskError('Task not found', 404);
     return output;
+  }
+
+  async getSession(id: string): Promise<TaskSessionResponse> {
+    const task = this.store.get(id);
+    if (!task) throw new TaskError('Task not found', 404);
+    if (!task.sessionId) return { taskId: id, status: 'no_session' };
+    try {
+      const transcript = await (this.options.exportSession ?? exportSession)({ sessionId: task.sessionId, directory: task.directory });
+      return { taskId: id, status: 'ready', transcript };
+    } catch (error) {
+      if (error instanceof SessionExportError) return { taskId: id, status: 'error', code: error.code, error: error.message };
+      throw error;
+    }
   }
 
   create(input: CreateTaskInput): ManagedTask {

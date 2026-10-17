@@ -20,6 +20,11 @@ export function taskRoutes(
   app.get('/tasks', (context) => context.json(scheduler.list()));
   app.get('/tasks/summary', (context) => context.json(scheduler.listSummaries()));
   app.get('/tasks/:id/output', (context) => context.json(scheduler.getOutput(context.req.param('id'))));
+  app.get('/tasks/:id/session', async (context) => {
+    context.header('Cache-Control', 'no-store');
+    const result = await scheduler.getSession(context.req.param('id'));
+    return context.json(result, result.status === 'error' ? 502 : 200);
+  });
   app.get('/tasks/models', async (context) => {
     const directory = context.req.query('directory')?.trim() || scheduler.list().defaultDirectory;
     if (!isAbsolute(directory) || directory.includes('\0')) {

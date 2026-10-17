@@ -17,7 +17,7 @@ const task: TaskSummary = {
 for (const status of ['succeeded', 'failed'] as const) {
   test(`enables the composer for a ${status} task with a session`, () => {
     const html = renderToStaticMarkup(createElement(TaskCard, {
-      task: { ...task, status }, active: true, busyAction: null, actionError: '',
+      task: { ...task, status }, tasks: [], active: true, busyAction: null, actionError: '',
       onSendMessage: async () => false, onCancel: () => {}, onDelete: () => {},
     }));
 
@@ -29,7 +29,7 @@ for (const status of ['succeeded', 'failed'] as const) {
   for (const sessionId of [null, '']) {
     test(`does not offer a composer for a ${status} task with sessionId ${JSON.stringify(sessionId)}`, () => {
       const html = renderToStaticMarkup(createElement(TaskCard, {
-        task: { ...task, status, sessionId }, active: true, busyAction: null, actionError: '',
+        task: { ...task, status, sessionId }, tasks: [], active: true, busyAction: null, actionError: '',
         onSendMessage: async () => false, onCancel: () => {}, onDelete: () => {},
       }));
 
@@ -40,7 +40,7 @@ for (const status of ['succeeded', 'failed'] as const) {
   for (const busyAction of ['message', 'cancel', 'delete'] as const) {
     test(`disables the composer for a ${status} task while ${busyAction} is busy`, () => {
       const html = renderToStaticMarkup(createElement(TaskCard, {
-        task: { ...task, status }, active: true, busyAction, actionError: '',
+        task: { ...task, status }, tasks: [], active: true, busyAction, actionError: '',
         onSendMessage: async () => false, onCancel: () => {}, onDelete: () => {},
       }));
 
@@ -52,7 +52,7 @@ for (const status of ['succeeded', 'failed'] as const) {
 for (const status of ['pending', 'running', 'cancelled'] as const) {
   test(`does not offer a composer for a ${status} task even with a session`, () => {
     const html = renderToStaticMarkup(createElement(TaskCard, {
-      task: { ...task, status }, active: true, busyAction: null, actionError: '',
+      task: { ...task, status }, tasks: [], active: true, busyAction: null, actionError: '',
       onSendMessage: async () => false, onCancel: () => {}, onDelete: () => {},
     }));
 
@@ -74,7 +74,7 @@ for (const active of [true, false]) {
 for (const status of ['running', 'succeeded', 'failed', 'cancelled'] as const) {
   test(`keeps the output disclosure available for a ${status} task without an excerpt yet`, () => {
     const html = renderToStaticMarkup(createElement(TaskCard, {
-      task: { ...task, status, hasOutput: false }, active: true, busyAction: null, actionError: '',
+      task: { ...task, status, hasOutput: false }, tasks: [], active: true, busyAction: null, actionError: '',
       onSendMessage: async () => false, onCancel: () => {}, onDelete: () => {},
     }));
 
@@ -85,8 +85,8 @@ for (const status of ['running', 'succeeded', 'failed', 'cancelled'] as const) {
 
 test('does not offer output for a pending task that has never produced any', () => {
   const html = renderToStaticMarkup(createElement(TaskCard, {
-    task: { ...task, status: 'pending', startedAt: null, finishedAt: null, hasOutput: false },
-    active: true, busyAction: null, actionError: '',
+    task: { ...task, status: 'pending', sessionId: null, startedAt: null, finishedAt: null, hasOutput: false },
+    tasks: [], active: true, busyAction: null, actionError: '',
     onSendMessage: async () => false, onCancel: () => {}, onDelete: () => {},
   }));
 

@@ -1,6 +1,7 @@
 import { useId, useState, type SubmitEvent } from 'react';
 import { MAX_TASK_MESSAGE_LENGTH, taskDisplayTitle, type TaskSummary, type TaskTrigger } from '../../shared/tasks.js';
 import { TaskOutputPanel } from './TaskOutputPanel.js';
+import { TaskSessionPanel } from './TaskSessionPanel.js';
 
 export type TaskAction = 'cancel' | 'delete' | 'message';
 
@@ -118,6 +119,10 @@ export function TaskCard({ task, tasks, active, busyAction, actionError, onSendM
         <p className="task-feedback task-feedback-error" role="alert">
           {task.error}
         </p>
+      )}
+
+      {task.sessionId?.trim() && (
+        <TaskSessionPanel task={task} active={active && !busy} />
       )}
 
       {(task.hasOutput || task.status !== 'pending') && (
