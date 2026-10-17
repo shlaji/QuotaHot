@@ -280,7 +280,7 @@ test('a synchronous SDK logging failure cannot reject the hook event', async (t)
 
 type Plugin = { event(input: { event: object }): Promise<void>; dispose(): Promise<void> };
 type Prompt = { path: { id: string }; body: { parts: readonly { type: string; text: string }[] } };
-const pollInterval = 30 * 60 * 1000;
+const pollInterval = 10 * 60 * 1000;
 const terminal = (sessionID: string) => ({ event: { type: 'session.error', properties: { sessionID, error: { statusCode: 429 } } } });
 const idle = (sessionID: string) => ({ event: { type: 'session.status', properties: { sessionID, status: { type: 'idle' } } } });
 

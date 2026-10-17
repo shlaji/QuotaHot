@@ -48,7 +48,7 @@ const assistantMessages = new Map();
 const lookupPromises = new Map();
 const deletedSessions = new Map();
 
-const RECOVERY_INTERVAL_MS = 1800000;
+const RECOVERY_INTERVAL_MS = 600000;
 const RESET_BUFFER_MS = 60000;
 const STATE_PATH = join(process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), ".quotahot"), "switch-state.json");
 const RECOVERY_STATUS_DIR = "recovery-status";
