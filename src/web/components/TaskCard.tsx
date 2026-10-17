@@ -1,14 +1,12 @@
-import { useEffect, useId, useState, type SubmitEvent } from 'react';
-import { MAX_TASK_MESSAGE_LENGTH, type ManagedTask, type TaskTrigger } from '../../shared/tasks.js';
+import { useId, useState, type SubmitEvent } from 'react';
+import { MAX_TASK_MESSAGE_LENGTH, type TaskSummary, type TaskTrigger } from '../../shared/tasks.js';
+import { TaskOutputPanel } from './TaskOutputPanel.js';
 
 export type TaskAction = 'cancel' | 'delete' | 'message';
-type CopyFeedback = {
-  readonly status: 'idle' | 'copied' | 'error';
-  readonly message: string;
-};
 
 interface Props {
-  readonly task: ManagedTask;
+  readonly task: TaskSummary;
+  readonly active: boolean;
   readonly busyAction: TaskAction | null;
   readonly actionError: string;
   readonly onSendMessage: (message: string) => Promise<boolean>;
@@ -16,7 +14,7 @@ interface Props {
   readonly onDelete: () => void;
 }
 
-const STATUS_LABEL: Record<ManagedTask['status'], string> = {
+const STATUS_LABEL: Record<TaskSummary['status'], string> = {
   pending: '待执行',
   running: '执行中',
   succeeded: '已完成',
@@ -43,8 +41,7 @@ function triggerText(trigger: TaskTrigger): string {
   }
 }
 
-export function TaskCard({ task, busyAction, actionError, onSendMessage, onCancel, onDelete }: Props) {
-  const [copyFeedback, setCopyFeedback] = useState<CopyFeedback>({ status: 'idle', message: '' });
+export function TaskCard({ task, active, busyAction, actionError, onSendMessage, onCancel, onDelete }: Props) {
   const [message, setMessage] = useState('');
   const messageInputId = useId();
   const messageHintId = useId();
@@ -60,23 +57,6 @@ export function TaskCard({ task, busyAction, actionError, onSendMessage, onCance
     const draft = message.trim();
     if (!messageEnabled || draft === '') return;
     if (await onSendMessage(draft)) setMessage('');
-  };
-
-  useEffect(() => {
-    setCopyFeedback({ status: 'idle', message: '' });
-  }, [task.output]);
-
-  const copyOutput = async (): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(task.output);
-      setCopyFeedback({ status: 'copied', message: '已复制' });
-    } catch (error: unknown) {
-      const reason = error instanceof Error && error.message !== '' ? `（${error.message}）` : '';
-      setCopyFeedback({
-        status: 'error',
-        message: `复制失败${reason}，请手动选中输出内容复制。`,
-      });
-    }
   };
 
   return (
@@ -120,28 +100,8 @@ export function TaskCard({ task, busyAction, actionError, onSendMessage, onCance
         </p>
       )}
 
-      {task.output !== '' && (
-        <details className="task-output">
-          <summary>查看输出</summary>
-          <div className="task-output-toolbar">
-            <button
-              className="link task-output-copy"
-              type="button"
-              onClick={() => void copyOutput()}
-            >
-              复制全部输出
-            </button>
-            {copyFeedback.status === 'copied' && (
-              <span className="task-output-feedback" role="status">已复制</span>
-            )}
-            {copyFeedback.status === 'error' && (
-              <span className="task-output-feedback task-output-feedback-error" role="alert">
-                {copyFeedback.message}
-              </span>
-            )}
-          </div>
-          <pre>{task.output}</pre>
-        </details>
+      {(task.hasOutput || task.status !== 'pending') && (
+        <TaskOutputPanel task={task} active={active && !busy} />
       )}
 
       {actionError !== '' && (
@@ -169,7 +129,7 @@ export function TaskCard({ task, busyAction, actionError, onSendMessage, onCance
           <small id={messageHintId} className="task-field-note">
             {!canContinue
               ? '任务完成且会话可用后才能追加消息。'
-              : '沿用当前会话继续执行，输出仅显示最新一轮。'}
+              : '沿用当前会话继续执行；输出默认显示最新一轮，可选择历史轮次。'}
           </small>
           <div className="task-submit-row">
             <button className="primary" type="submit" disabled={!messageEnabled || message.trim() === '' || message.length > MAX_TASK_MESSAGE_LENGTH}>

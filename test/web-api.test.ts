@@ -68,7 +68,8 @@ test('sends a task follow-up as JSON to the encoded task URL and returns the res
   assert.equal(request?.method, 'POST');
   assert.equal(request?.headers.get('content-type'), 'application/json');
   assert.deepEqual(await request?.json(), { message });
-  assert.deepEqual(result, resumed);
+  const { output, ...summary } = resumed;
+  assert.deepEqual(result, { ...summary, hasOutput: output !== '' });
 });
 
 for (const failure of [

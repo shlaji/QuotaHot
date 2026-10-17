@@ -8,6 +8,22 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { TaskStore } from '../src/server/task-store.js';
 import type { TaskListResponse, ManagedTask } from '../src/shared/tasks.js';
 
+const liveBytes = Buffer.concat([Buffer.from('{"sessionID":"root"}\nlive output\n'), Buffer.alloc(100000, 120), Buffer.from([255, 0, 226])]);
+const finalBytes = Buffer.concat([Buffer.alloc(70000, 121), Buffer.from([128, 0, 255]), Buffer.from('\nfinal output\n')]);
+
+function readArchive(store: TaskStore, taskId: string) {
+  const [run] = store.listRuns(taskId);
+  assert.ok(run);
+  const page = store.readLogPage(taskId, run.id, { maxBytes: 262144 });
+  assert.ok(page);
+  assert.equal(page.hasMore, false);
+  return {
+    run, bytes: Buffer.concat(page.chunks.map((chunk) => chunk.data)),
+    stdout: Buffer.concat(page.chunks.filter((chunk) => chunk.stream === 'stdout').map((chunk) => chunk.data)),
+    stderr: Buffer.concat(page.chunks.filter((chunk) => chunk.stream === 'stderr').map((chunk) => chunk.data)),
+  };
+}
+
 async function waitFor(check: () => Promise<boolean>): Promise<void> {
   const deadline = Date.now() + 10000;
   while (!(await check())) {
@@ -57,10 +73,14 @@ function sandbox(t: TestContext, proxy = ''): string {
   writeFileSync(join(directory, 'config.json'), JSON.stringify({
     autoStart: false, usageRefreshMinutes: 0, clientCheckMinutes: 0, proxy, noProxy: ['localhost'],
   }));
+  writeFileSync(join(directory, 'live.bin'), liveBytes);
+  writeFileSync(join(directory, 'final.bin'), finalBytes);
   writeFileSync(join(directory, 'opencode'), `#!${process.execPath}
     const fs = require('node:fs');
     const http = require('node:http');
     if (process.argv[2] === 'serve') {
+      process.stdout.write('serve stdout must not be archived\\n');
+      process.stderr.write('serve stderr must not be archived\\n');
       const server = http.createServer((request, response) => {
         const url = new URL(request.url, 'http://127.0.0.1');
         response.setHeader('content-type', 'application/json');
@@ -76,14 +96,14 @@ function sandbox(t: TestContext, proxy = ''): string {
       });
       server.listen(Number(process.argv.at(-1)), '127.0.0.1');
     } else if (process.argv.at(-1) === 'hold') {
-      process.stdout.write(JSON.stringify({sessionID:'root'}) + '\\n');
       process.on('SIGTERM', () => {
         fs.writeFileSync('terminated', 'yes');
-        process.stdout.write('final output\\n', () => process.exit(0));
+        process.stderr.write(fs.readFileSync(process.env.HOME + '/final.bin'), () => process.exit(0));
       });
-      process.stdout.write('live output\\n');
-      fs.writeFileSync('ready', 'yes');
+      process.stdout.write(fs.readFileSync(process.env.HOME + '/live.bin'), () => fs.writeFileSync('ready', 'yes'));
       setInterval(() => {}, 1000);
+    } else if (process.argv.at(-1) === 'archive') {
+      process.stdout.write(fs.readFileSync(process.env.HOME + '/live.bin'));
     } else if (process.argv.at(-1) === 'inspect') {
       process.stdout.write(JSON.stringify({sessionID:'root'}) + '\\n');
       process.stdout.write(JSON.stringify({cwd:process.cwd(),pwd:process.env.PWD,http:process.env.HTTP_PROXY,https:process.env.HTTPS_PROXY,httpLower:process.env.http_proxy,httpsLower:process.env.https_proxy,noProxy:process.env.NO_PROXY,noProxyLower:process.env.no_proxy,allProxy:process.env.ALL_PROXY,allProxyLower:process.env.all_proxy}) + '\\n');
@@ -133,14 +153,21 @@ test('real server restores pending work, never reruns interrupted tasks, and exe
   assert.equal((await fetch(`${server.base}/api/tasks`, { method: 'POST', body: '{' })).status, 400);
   const response = await fetch(`${server.base}/api/tasks`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...input, description: 'from HTTP', trigger: { type: 'time', at: Date.now() + 300 } }),
+    body: JSON.stringify({ ...input, description: 'archive', trigger: { type: 'time', at: Date.now() + 300 } }),
   });
   assert.equal(response.status, 201);
   const created: ManagedTask = await response.json();
   await waitFor(async () => (await server.list()).tasks.find((task) => task.id === created.id)?.status === 'succeeded');
   const finished = (await server.list()).tasks.find((task) => task.id === created.id);
-  assert.match(finished?.output ?? '', /from HTTP/);
+  assert.ok(Buffer.byteLength(finished?.output ?? '') <= 65536);
   await server.stop();
+  const archived = new TaskStore(join(directory, 'tasks.db'));
+  try {
+    assert.deepEqual(readArchive(archived, created.id).bytes, liveBytes);
+    assert.equal(readArchive(archived, created.id).run.archiveState, 'complete');
+    assert.equal(archived.listRuns(interrupted.id).length, 1);
+    assert.equal(readArchive(archived, interrupted.id).run.archiveState, 'incomplete');
+  } finally { archived.close(); }
 });
 
 test('real server terminates active processes before closing the task database on shutdown', { timeout: 20000 }, async (t) => {
@@ -171,6 +198,14 @@ test('real server terminates active processes before closing the task database o
       assert.equal(store.get(task.id)?.status, 'failed');
       assert.match(store.get(task.id)?.output ?? '', /live output/);
       assert.match(store.get(task.id)?.output ?? '', /final output/);
+      assert.ok(Buffer.byteLength(store.get(task.id)?.output ?? '') <= 65536);
+      const archive = readArchive(store, task.id);
+      assert.deepEqual(archive.bytes, Buffer.concat([liveBytes, finalBytes]));
+      assert.deepEqual(archive.stdout, liveBytes);
+      assert.deepEqual(archive.stderr, finalBytes);
+      assert.equal(archive.run.status, 'failed');
+      assert.equal(archive.run.archiveState, 'complete');
+      assert.notEqual(archive.run.closedAt, null);
     }
   } finally { store.close(); }
 });
@@ -186,6 +221,16 @@ test('HTTP exposes live output and preserves cancellation output across restart'
   const created: ManagedTask = await response.json();
   await waitFor(async () => (await server.list()).tasks.find((task) => task.id === created.id)?.output.includes('live output') ?? false);
   assert.equal((await server.list()).tasks.find((task) => task.id === created.id)?.status, 'running');
+  const store = new TaskStore(join(directory, 'tasks.db'));
+  t.after(() => store.close());
+  await waitFor(async () => store.getPreviewMetadata(created.id)?.totalBytes === liveBytes.length);
+  const live = readArchive(store, created.id);
+  assert.deepEqual(live.bytes, liveBytes);
+  assert.deepEqual(live.stdout, liveBytes);
+  assert.deepEqual(live.stderr, Buffer.alloc(0));
+  assert.equal(live.run.archiveState, 'capturing');
+  assert.equal(live.run.closedAt, null);
+  assert.ok(Buffer.byteLength(store.get(created.id)?.output ?? '') <= 65536);
 
   const cancellation = await fetch(`${server.base}/api/tasks/${created.id}/cancel`, { method: 'POST' });
 
@@ -194,9 +239,19 @@ test('HTTP exposes live output and preserves cancellation output across restart'
   assert.equal(cancelled.status, 'cancelled');
   assert.match(cancelled.output, /live output/);
   assert.match(cancelled.output, /final output/);
+  assert.ok(Buffer.byteLength(cancelled.output) <= 65536);
+  const terminal = readArchive(store, created.id);
+  assert.equal(terminal.run.id, live.run.id);
+  assert.equal(terminal.run.status, 'cancelled');
+  assert.equal(terminal.run.archiveState, 'complete');
+  assert.notEqual(terminal.run.closedAt, null);
+  assert.deepEqual(terminal.bytes, Buffer.concat([liveBytes, finalBytes]));
+  assert.deepEqual(terminal.stdout, liveBytes);
+  assert.deepEqual(terminal.stderr, finalBytes);
   assert.deepEqual((await server.list()).tasks.find((task) => task.id === created.id), cancelled);
   await server.stop();
   const restarted = await serve(t, directory);
   assert.deepEqual((await restarted.list()).tasks.find((task) => task.id === created.id), cancelled);
+  assert.deepEqual(readArchive(store, created.id), terminal);
   await restarted.stop();
 });

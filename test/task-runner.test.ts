@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runTask } from '../src/server/task-runner.js';
-import type { CreateTaskInput } from '../src/shared/tasks.js';
+import { TaskStore } from '../src/server/task-store.js';
+import { TaskScheduler } from '../src/server/task-scheduler.js';
+import type { CreateTaskInput, TaskOutputChunk } from '../src/shared/tasks.js';
 
 function fixture(t: TestContext, mode: string) {
   const directory = mkdtempSync(join(tmpdir(), 'task-runtime-'));
@@ -77,8 +79,14 @@ function fixture(t: TestContext, mode: string) {
         assert.deepEqual(process.argv.slice(5), ['--format', 'json', '--model', 'openai/test', '--dir', process.cwd(), '--session', 'root', '--', 'follow up']);
         assert.equal(process.env.PWD, process.cwd());
       }
+      if (mode === 'oversized-line') process.stdout.write(JSON.stringify({ sessionID: 'wrong', padding: 'x'.repeat(200000) }) + '\\n');
       process.stdout.write(JSON.stringify({ sessionID: 'root' }) + '\\n');
       process.stdout.write(JSON.stringify({ type: 'text', part: { text: process.argv.at(-1) } }) + '\\n');
+      if (mode === 'raw-output') process.stderr.write(Buffer.from([0, 255, 254, 13, 10]));
+      if (mode === 'sink-failure') {
+        process.on('SIGTERM', () => process.stdout.write('drained after failure\\n', () => process.exit(0)));
+        setInterval(() => {}, 1000);
+      }
       if (mode === 'root-failed') process.exitCode = 7;
       if (mode === 'root-signaled') process.kill(process.pid, 'SIGTERM');
     }
@@ -110,6 +118,7 @@ test('fails when a recursive child reports an assistant error', { timeout: 5000 
   const result = await runTask(fixtureData.input, new AbortController().signal, { executable: fixtureData.executable, env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'error' } });
   assert.equal(result.status, 'failed');
   assert.match(result.error, /child failed/);
+  assert.equal(result.archiveState, 'complete');
 });
 
 test('fails on structured OpenCode assistant errors without a string finish reason', { timeout: 5000 }, async (t) => {
@@ -242,4 +251,80 @@ test('fails rather than accepting a different session during continuation', { ti
   });
   assert.equal(result.status, 'failed');
   assert.match(result.error, /different session/);
+});
+
+test('recovers the root session after an oversized JSON line', { timeout: 5000 }, async (t) => {
+  const data = fixture(t, 'oversized-line');
+  const sessions: string[] = [];
+  const chunks: Buffer[] = [];
+  const store = new TaskStore(':memory:');
+  t.after(() => store.close());
+  const task = store.create(data.input, Date.now());
+  const claimed = store.claim(task.id, Date.now());
+  assert.ok(claimed);
+
+  const result = await runTask(data.input, new AbortController().signal, {
+    executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'oversized-line' },
+    onSession: (id) => {
+      assert.ok(Buffer.concat(chunks).includes(Buffer.from(JSON.stringify({ sessionID: 'root' }) + '\n')));
+      sessions.push(id);
+    },
+    onOutputChunk: (chunk, stream) => { chunks.push(chunk); store.appendOutput(task.id, claimed.currentRunId, chunk, stream); },
+    onOutput: (preview) => store.updatePreview(task.id, claimed.currentRunId, preview),
+  });
+
+  assert.equal(result.status, 'succeeded', result.error);
+  assert.deepEqual(sessions, ['root']);
+  assert.deepEqual(Buffer.concat(chunks), Buffer.from([JSON.stringify({ sessionID: 'wrong', padding: 'x'.repeat(200000) }), JSON.stringify({ sessionID: 'root' }), JSON.stringify({ type: 'text', part: { text: 'oversized-line' } }), ''].join('\n')));
+  store.finishRun(task.id, claimed.currentRunId, { ...result, finishedAt: Date.now() });
+  const page = store.readLogPage(task.id, claimed.currentRunId, { maxBytes: 256 * 1024 });
+  assert.ok(page);
+  assert.deepEqual(Buffer.concat(page.chunks.map((chunk) => chunk.data)), Buffer.concat(chunks));
+  assert.ok(page.chunks.every((chunk) => chunk.stream === 'stdout'));
+  assert.equal(page.hasMore, false);
+  assert.equal(store.listRuns(task.id)[0].archiveState, 'complete');
+  assert.ok(Buffer.byteLength(result.output) <= 65536);
+  assert.ok(result.output.endsWith('"oversized-line"}}\n'));
+});
+
+test('captures original stdout and stderr bytes in callback arrival order', { timeout: 5000 }, async (t) => {
+  const data = fixture(t, 'raw-output');
+  const chunks: TaskOutputChunk[] = [];
+  const result = await runTask(data.input, new AbortController().signal, {
+    executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'raw-output' },
+    onOutputChunk: (chunk, stream) => chunks.push({ data: chunk, stream }),
+  });
+  const raw = Buffer.concat(chunks.map((chunk) => chunk.data));
+  assert.deepEqual(Buffer.concat(chunks.filter((chunk) => chunk.stream === 'stdout').map((chunk) => chunk.data)),
+    Buffer.from([JSON.stringify({ sessionID: 'root' }), JSON.stringify({ type: 'text', part: { text: 'raw-output' } }), ''].join('\n')));
+  assert.deepEqual(Buffer.concat(chunks.filter((chunk) => chunk.stream === 'stderr').map((chunk) => chunk.data)),
+    Buffer.from([0, 255, 254, 13, 10]));
+  assert.ok(raw.includes(Buffer.from([0, 255, 254, 13, 10])));
+  assert.ok(raw.includes(Buffer.from(JSON.stringify({ sessionID: 'root' }) + '\n')));
+  assert.equal(result.output, raw.toString('utf8'));
+  assert.equal(result.archiveState, 'complete');
+});
+
+test('fails and closes an incomplete archive when the raw sink throws during a data event', { timeout: 5000 }, async (t) => {
+  const data = fixture(t, 'sink-failure');
+  const store = new TaskStore(':memory:');
+  const scheduler = new TaskScheduler(store, {
+    quota: async () => [],
+    run: (task, signal, options) => runTask(task, signal, {
+      ...options, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'sink-failure' },
+    }),
+  });
+  t.after(async () => { await scheduler.stop(); store.close(); });
+  t.mock.method(store, 'appendOutput', () => { throw new Error('injected disk full'); });
+  const task = scheduler.create(data.input);
+  scheduler.tick();
+  await scheduler.settled();
+  assert.equal(store.get(task.id)?.status, 'failed');
+  assert.match(store.get(task.id)?.error ?? '', /archive failed: injected disk full/);
+  assert.match(store.get(task.id)?.output ?? '', /drained after failure/);
+  assert.equal(store.listRuns(task.id)[0].archiveState, 'incomplete');
+  assert.ok(store.listRuns(task.id)[0].closedAt);
+  assert.deepEqual(JSON.parse(readFileSync(data.state, 'utf8')).aborted, ['child', 'root']);
+  const serverPid = Number(readFileSync(data.state + '.server-pid', 'utf8'));
+  assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
 });

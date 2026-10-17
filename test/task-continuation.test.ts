@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { TaskStore, type TaskOutcome } from '../src/server/task-store.js';
 import { TaskScheduler } from '../src/server/task-scheduler.js';
 import { TaskError } from '../src/server/task-error.js';
+import type { TaskRunnerOptions } from '../src/server/task-runner.js';
 import type { CreateTaskInput } from '../src/shared/tasks.js';
 
 const input: CreateTaskInput = {
@@ -14,6 +15,7 @@ test('persists initial discovery and runs queued work alongside continuation and
   const store = new TaskStore(':memory:');
   const finished = Promise.withResolvers<TaskOutcome>();
   let turns = 0;
+  let initialCallbacks: TaskRunnerOptions | undefined;
   const scheduler = new TaskScheduler(store, {
     now: () => 2, quota: async () => [],
     run: async (task, signal, options) => {
@@ -22,11 +24,19 @@ test('persists initial discovery and runs queued work alongside continuation and
       assert.equal(task.model, input.model);
       assert.equal(task.directory, input.directory);
       options.onSession?.('root');
-      if (!options.sessionId) return success;
+      if (!options.sessionId) {
+        initialCallbacks ??= options;
+        options.onOutputChunk?.(Buffer.from('first turn'), 'stdout');
+        return success;
+      }
       assert.equal(options.sessionId, 'root');
       assert.equal(options.prompt, 'second turn');
       options.onOutput?.('live second turn');
-      signal.addEventListener('abort', () => finished.resolve({ ...success, output: 'cancelled turn output' }));
+      options.onOutputChunk?.(Buffer.from('live second turn'), 'stdout');
+      signal.addEventListener('abort', () => {
+        options.onOutputChunk?.(Buffer.from('\nlate cancelled output'), 'stderr');
+        finished.resolve({ ...success, output: 'cancelled turn output' });
+      });
       return finished.promise;
     },
   });
@@ -43,6 +53,11 @@ test('persists initial discovery and runs queued work alongside continuation and
   assert.equal(continued.output, '');
   assert.equal(continued.finishedAt, null);
   assert.equal(store.get(task.id)?.output, 'live second turn');
+  const stale = initialCallbacks;
+  assert.ok(stale);
+  assert.throws(() => stale.onOutputChunk?.(Buffer.from('stale bytes'), 'stdout'), /not writable/);
+  assert.throws(() => stale.onOutput?.('stale preview'), /not writable/);
+  assert.equal(store.get(task.id)?.output, 'live second turn');
   assert.throws(() => scheduler.continueTask(task.id, 'duplicate'), (error: unknown) => error instanceof TaskError && error.status === 409);
   scheduler.tick();
   assert.equal(store.get(queued.id)?.status, 'running');
@@ -52,6 +67,14 @@ test('persists initial discovery and runs queued work alongside continuation and
   assert.equal(cancelled.output, 'cancelled turn output');
   assert.equal(store.get(queued.id)?.status, 'succeeded');
   assert.equal(turns, 3);
+  const runs = store.listRuns(task.id);
+  assert.deepEqual(runs.map((run) => [run.kind, run.status, run.archiveState]), [
+    ['initial', 'succeeded', 'complete'], ['continuation', 'cancelled', 'complete'],
+  ]);
+  const history = runs.map((run) => Buffer.concat(store.readLogPage(task.id, run.id)?.chunks.map((chunk) => chunk.data) ?? []).toString());
+  assert.deepEqual(history, ['first turn', 'live second turn\nlate cancelled output']);
+  assert.deepEqual(runs.map((run) => store.readLogPage(task.id, run.id)?.chunks.map((chunk) => chunk.stream)),
+    [['stdout'], ['stdout', 'stderr']]);
 });
 
 test('continues a successful session while an unrelated task is already running', async (t) => {
@@ -90,6 +113,7 @@ test('stores continuation failures using normal execution semantics', async (t) 
   const store = new TaskStore(':memory:');
   const scheduler = new TaskScheduler(store, {
     quota: async () => [], run: async (_task, _signal, options) => {
+      options.onOutputChunk?.(Buffer.from('partial follow up'), 'stdout');
       options.onOutput?.('partial follow up');
       throw new Error('session unavailable');
     },
@@ -107,4 +131,7 @@ test('stores continuation failures using normal execution semantics', async (t) 
   assert.equal(store.get(task.id)?.output, 'partial follow up');
   assert.equal(store.get(task.id)?.error, 'session unavailable');
   assert.equal(store.get(task.id)?.sessionId, 'root');
+  const run = store.listRuns(task.id).at(-1);
+  assert.equal(run?.archiveState, 'incomplete');
+  assert.ok(run?.closedAt);
 });

@@ -20,8 +20,9 @@ test('preserves pending tasks and fails interrupted work when the store is reope
   const original = new TaskStore(path);
   const pending = original.create(input, now);
   const running = original.create(input, now);
-  original.claim(running.id, now + 1000);
-  original.updateOutput(running.id, 'before restart');
+  const execution = original.claim(running.id, now + 1000);
+  assert.ok(execution);
+  original.updatePreview(running.id, execution.currentRunId, 'before restart');
   original.close();
 
   const reopened = new TaskStore(path);
@@ -62,10 +63,11 @@ test('keeps cancellation terminal when a late process result arrives', (t) => {
   const store = new TaskStore(':memory:');
   t.after(() => store.close());
   const task = store.create(input, now);
-  store.claim(task.id, now);
+  const execution = store.claim(task.id, now);
+  assert.ok(execution);
   store.cancel(task.id, now + 100);
 
-  store.finish(task.id, { status: 'succeeded', output: 'late', error: '' }, now + 200);
+  store.finishRun(task.id, execution.currentRunId, { status: 'succeeded', output: 'late', error: '', finishedAt: now + 200 });
 
   assert.equal(store.get(task.id)?.status, 'cancelled');
   assert.equal(store.get(task.id)?.finishedAt, now + 100);
@@ -77,15 +79,57 @@ test('bounds progress and final output without splitting UTF-8 characters', (t) 
   const store = new TaskStore(':memory:');
   t.after(() => store.close());
   const task = store.create(input, now);
-  store.claim(task.id, now);
+  const execution = store.claim(task.id, now);
+  assert.ok(execution);
   const output = '\u732b'.repeat(30000);
-  const expected = '\u732b'.repeat(Math.floor(65536 / 3));
 
-  store.updateOutput(task.id, output);
+  store.updatePreview(task.id, execution.currentRunId, output);
 
-  assert.equal(store.get(task.id)?.output, expected);
-  store.finish(task.id, { status: 'succeeded', output, error: '' }, now + 100);
-  assert.equal(store.get(task.id)?.output, expected);
+  const retained = store.get(task.id)?.output ?? '';
+  assert.ok(retained.startsWith('猫'));
+  assert.ok(retained.endsWith('猫'));
+  assert.match(retained, /output omitted/);
+  assert.ok(Buffer.byteLength(retained) <= 65536);
+  assert.ok(!retained.includes('\ufffd'));
+  store.finishRun(task.id, execution.currentRunId, { status: 'succeeded', output, error: '', finishedAt: now + 100 });
+  assert.equal(store.get(task.id)?.output, retained);
+});
+
+test('lists metadata without output and fetches output for only the requested task', (t) => {
+  const store = new TaskStore(':memory:');
+  t.after(() => store.close());
+  const pending = store.create(input, now);
+  const running = store.create(input, now + 1);
+  const execution = store.claim(running.id, now + 2);
+  assert.ok(execution);
+  store.updatePreview(running.id, execution.currentRunId, 'retained output');
+
+  const summaries = store.listSummaries();
+
+  assert.deepEqual(summaries.map(({ id, hasOutput }) => ({ id, hasOutput })), [
+    { id: pending.id, hasOutput: false }, { id: running.id, hasOutput: true },
+  ]);
+  assert.ok(summaries.every((summary) => !('output' in summary)));
+  assert.deepEqual(store.getOutput(running.id), {
+    id: running.id, status: 'running', createdAt: now + 1, startedAt: now + 2,
+    finishedAt: null, output: 'retained output', error: '',
+  });
+  assert.equal(store.getOutput('missing'), null);
+  assert.equal(store.list()[1]?.output, 'retained output');
+});
+
+test('bounds errors at the persistence boundary', (t) => {
+  const store = new TaskStore(':memory:');
+  t.after(() => store.close());
+  const task = store.create(input, now);
+  const execution = store.claim(task.id, now);
+  assert.ok(execution);
+
+  store.finishRun(task.id, execution.currentRunId, { status: 'failed', output: '', error: '猫'.repeat(100000) + 'FINAL', finishedAt: now + 1 });
+
+  const error = store.getOutput(task.id)?.error ?? '';
+  assert.ok(Buffer.byteLength(error) <= 65536);
+  assert.ok(error.endsWith('FINAL'));
 });
 
 test('migrates a legacy database additively and persists discovered sessions across reopen', (t) => {
@@ -123,19 +167,23 @@ test('claims a successful session once across connections and clears only turn s
   const second = new TaskStore(path);
   t.after(() => { first.close(); second.close(); });
   const task = first.create(input, now);
-  first.claim(task.id, now);
+  const execution = first.claim(task.id, now);
+  assert.ok(execution);
   first.setSession(task.id, 'root');
-  first.finish(task.id, { status: 'succeeded', output: 'old output', error: '' }, now + 1);
+  first.finishRun(task.id, execution.currentRunId, { status: 'succeeded', output: 'old output', error: '', finishedAt: now + 1 });
   const peer = first.create(input, now);
-  first.claim(peer.id, now);
+  const peerExecution = first.claim(peer.id, now);
+  assert.ok(peerExecution);
   first.setSession(peer.id, 'peer-root');
-  first.finish(peer.id, { status: 'succeeded', output: 'peer output', error: '' }, now + 1);
+  first.finishRun(peer.id, peerExecution.currentRunId, { status: 'succeeded', output: 'peer output', error: '', finishedAt: now + 1 });
   const pending = first.create(input, now);
   first.claim(pending.id, now + 1);
 
   const continued = second.claimContinuation(task.id, now + 2);
 
-  assert.deepEqual(continued, { ...task, sessionId: 'root', status: 'running', startedAt: now + 2 });
+  assert.ok(continued);
+  assert.notEqual(continued.currentRunId, execution.currentRunId);
+  assert.deepEqual(continued, { ...task, sessionId: 'root', status: 'running', startedAt: now + 2, currentRunId: continued.currentRunId });
   assert.equal(first.claimContinuation(peer.id, now + 2)?.sessionId, 'peer-root');
   assert.equal(first.claimContinuation(task.id, now + 3), null);
   assert.equal(second.claimContinuation(peer.id, now + 3), null);

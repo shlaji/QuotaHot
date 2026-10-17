@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import type { CreateTaskInput, ManagedTask, TaskListResponse } from '../shared/tasks.js';
+import type { ClaimedTask, CreateTaskInput, ManagedTask, TaskListResponse, TaskSummaryListResponse, TaskOutputResponse } from '../shared/tasks.js';
 import type { UsageResult } from '../shared/types.js';
 import { TaskStore, type TaskOutcome } from './task-store.js';
 import { runTask, type TaskRunnerOptions } from './task-runner.js';
@@ -42,6 +42,14 @@ export class TaskScheduler {
 
   list(): TaskListResponse { return { tasks: this.store.list(), defaultDirectory: homedir() }; }
 
+  listSummaries(): TaskSummaryListResponse { return { tasks: this.store.listSummaries(), defaultDirectory: homedir() }; }
+
+  getOutput(id: string): TaskOutputResponse {
+    const output = this.store.getOutput(id);
+    if (!output) throw new TaskError('Task not found', 404);
+    return output;
+  }
+
   create(input: CreateTaskInput): ManagedTask {
     if (this.stopped) throw new TaskError('Task service is stopping', 503);
     return this.store.create(input, this.now());
@@ -80,7 +88,7 @@ export class TaskScheduler {
   tick(): void {
     if (this.stopped) return;
     const now = this.now();
-    const pending = this.store.list().filter((task) => task.status === 'pending');
+    const pending = this.store.listSummaries().filter((task) => task.status === 'pending');
     if (pending.some((task) => task.trigger.type === 'quota') && !this.quotaCheck && now >= this.nextQuotaCheck) {
       this.nextQuotaCheck = now + 60_000;
       this.quotaCheck = this.checkQuota(now).finally(() => { this.quotaCheck = null; });
@@ -100,7 +108,7 @@ export class TaskScheduler {
     }
   }
 
-  private launch(task: ManagedTask, options: TaskRunnerOptions = {}): void {
+  private launch(task: ClaimedTask, options: TaskRunnerOptions = {}): void {
     const controller = new AbortController();
     const promise = this.execute(task, controller.signal, options).finally(() => { this.active.delete(task.id); });
     this.active.set(task.id, { controller, promise });
@@ -119,22 +127,23 @@ export class TaskScheduler {
     }
   }
 
-  private async execute(task: ManagedTask, signal: AbortSignal, options: TaskRunnerOptions): Promise<void> {
+  private async execute(task: ClaimedTask, signal: AbortSignal, options: TaskRunnerOptions): Promise<void> {
     let result: TaskOutcome;
     let output = '';
     try {
       result = await this.run(task, signal, {
         ...options,
         onSession: (sessionId) => this.store.setSession(task.id, sessionId),
+        onOutputChunk: (chunk, stream) => { this.store.appendOutput(task.id, task.currentRunId, chunk, stream); },
         onOutput: (captured) => {
           output = captured;
-          this.store.updateOutput(task.id, captured);
+          this.store.updatePreview(task.id, task.currentRunId, captured);
         },
       });
     } catch (error) {
-      result = { status: 'failed', output, error: error instanceof Error ? error.message : String(error) };
+      result = { status: 'failed', output, error: error instanceof Error ? error.message : String(error), archiveState: 'incomplete' };
     }
-    this.store.finish(task.id, result, this.now());
+    this.store.finishRun(task.id, task.currentRunId, { ...result, finishedAt: this.now() });
   }
 
   async settled(): Promise<void> {

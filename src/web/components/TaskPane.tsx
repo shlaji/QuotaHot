@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   CreateTaskInput,
-  ManagedTask,
-  TaskListResponse,
+  TaskSummary,
+  TaskSummaryListResponse,
   TaskModelsResponse,
 } from '../../shared/tasks.js';
 import { taskApi } from '../task-api.js';
@@ -20,7 +20,7 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function upsertTask(current: TaskListResponse, task: ManagedTask): TaskListResponse {
+function upsertTask(current: TaskSummaryListResponse, task: TaskSummary): TaskSummaryListResponse {
   const exists = current.tasks.some((item) => item.id === task.id);
   return {
     ...current,
@@ -35,7 +35,7 @@ function withoutKey<T>(record: Readonly<Record<string, T>>, id: string): Record<
 }
 
 export function TaskPane({ active = true }: Props) {
-  const [snapshot, setSnapshot] = useState<TaskListResponse | null>(null);
+  const [snapshot, setSnapshot] = useState<TaskSummaryListResponse | null>(null);
   const [loadError, setLoadError] = useState('');
   const [notice, setNotice] = useState('');
   const [retryGeneration, setRetryGeneration] = useState(0);
@@ -152,7 +152,7 @@ export function TaskPane({ active = true }: Props) {
     setNotice('任务已创建，正在等待触发。');
   };
 
-  const cancelTask = async (task: ManagedTask) => {
+  const cancelTask = async (task: TaskSummary) => {
     if (busyTaskIdsRef.current.has(task.id)) return;
     beginMutation(task.id, 'cancel');
     try {
@@ -166,7 +166,7 @@ export function TaskPane({ active = true }: Props) {
     }
   };
 
-  const deleteTask = async (task: ManagedTask) => {
+  const deleteTask = async (task: TaskSummary) => {
     if (busyTaskIdsRef.current.has(task.id)
       || !confirm(`删除后任务和输出记录都会消失。确定删除“${task.description}”吗？`)) return;
     beginMutation(task.id, 'delete');
@@ -185,7 +185,7 @@ export function TaskPane({ active = true }: Props) {
     }
   };
 
-  const sendMessage = async (task: ManagedTask, message: string): Promise<boolean> => {
+  const sendMessage = async (task: TaskSummary, message: string): Promise<boolean> => {
     if (busyTaskIdsRef.current.has(task.id)) return false;
     beginMutation(task.id, 'message');
     try {
@@ -230,7 +230,7 @@ export function TaskPane({ active = true }: Props) {
         <header className="task-section-head task-list-head">
           <div>
             <h2 id="task-list-title">任务列表</h2>
-            <p>{active ? '每 2 秒刷新一次状态。' : '切回本页后继续刷新状态。'}</p>
+            <p>{active ? '每 2 秒刷新状态；展开输出后按页读取日志。' : '切回本页后继续刷新状态，日志读取已暂停。'}</p>
           </div>
           {snapshot !== null && <span className="task-count">{snapshot.tasks.length}</span>}
         </header>
@@ -254,6 +254,7 @@ export function TaskPane({ active = true }: Props) {
               <TaskCard
                 key={task.id}
                 task={task}
+                active={active}
                 busyAction={busyById[task.id] ?? null}
                 actionError={actionErrors[task.id] ?? ''}
                 onSendMessage={(message) => sendMessage(task, message)}

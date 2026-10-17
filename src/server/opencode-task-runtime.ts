@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import type { CreateTaskInput } from '../shared/tasks.js';
+import type { CreateTaskInput, TaskOutputChunk } from '../shared/tasks.js';
 import type { TaskOutcome } from './task-store.js';
 import { boundedText, TaskOutput } from './task-output.js';
+import { TaskOutputLines } from './task-output-lines.js';
 import { terminateProcessTree } from './opencode-process.js';
 import {
   createEnvironment,
@@ -27,6 +28,7 @@ export interface TaskRunnerOptions extends RuntimeDependencies {
   readonly executable?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly killGraceMs?: number;
+  readonly onOutputChunk?: (chunk: Buffer, stream: TaskOutputChunk['stream']) => void;
   readonly onOutput?: TaskOutputCallback;
   readonly onSession?: (sessionId: string) => void;
   readonly sessionId?: string;
@@ -45,6 +47,9 @@ export class OpenCodeTaskRuntime {
   private readonly env: NodeJS.ProcessEnv;
   private readonly processes: ChildProcess[] = [];
   private readonly closeEvents = new Map<ChildProcess, Promise<void>>();
+  private readonly archiveAbort = new AbortController();
+  private readonly signal: AbortSignal;
+  private archiveError = '';
   private published = '';
   private processError = '';
   private serverError = '';
@@ -56,9 +61,10 @@ export class OpenCodeTaskRuntime {
   private rootId: string | null = null;
   private sessionReported = false;
   private base = '';
-  private rootOutputLine = '';
+  private readonly rootOutputLines = new TaskOutputLines();
 
-  constructor(private readonly task: CreateTaskInput, private readonly signal: AbortSignal, private readonly options: TaskRunnerOptions) {
+  constructor(private readonly task: CreateTaskInput, private readonly cancellationSignal: AbortSignal, private readonly options: TaskRunnerOptions) {
+    this.signal = AbortSignal.any([cancellationSignal, this.archiveAbort.signal]);
     this.fetcher = options.fetch ?? fetch;
     this.spawnProcess = options.spawn ?? spawn;
     this.sleep = options.sleep ?? waitFor;
@@ -67,7 +73,7 @@ export class OpenCodeTaskRuntime {
   }
 
   async run(): Promise<TaskOutcome> {
-    if (this.signal.aborted) return { status: 'failed', output: '', error: 'Execution cancelled' };
+    if (this.signal.aborted) return { status: 'failed', output: '', error: 'Execution cancelled', archiveState: 'complete' };
     let error = '';
     try {
       const port = await (this.options.reservePort ?? reserveLoopbackPort)();
@@ -91,8 +97,11 @@ export class OpenCodeTaskRuntime {
     }
     this.stopping = true;
     try { await this.stopProcesses(); }
-    catch (cleanupError) { this.processError ||= errorText(cleanupError); }
-    if (this.signal.aborted) error = `Execution cancelled${this.processError ? `: ${this.processError}` : ''}`;
+    catch (cleanupError) {
+      this.processError ||= errorText(cleanupError);
+      if (!this.rootClosed) this.failArchive(cleanupError);
+    }
+    if (this.cancellationSignal.aborted) error = `Execution cancelled${this.processError ? `: ${this.processError}` : ''}`;
     else if (this.processError || this.serverError) error ||= this.processError || this.serverError;
     else if (this.rootExitCode !== 0) error ||= `OpenCode exited with ${this.rootExitSignal ?? this.rootExitCode}`;
     return this.finish(error);
@@ -101,8 +110,11 @@ export class OpenCodeTaskRuntime {
   private finish(error: string): TaskOutcome {
     const captured = this.output.finish();
     this.publish(captured);
-    const finalError = boundedText(error || this.output.error);
-    return { status: finalError ? 'failed' : 'succeeded', output: captured, error: finalError };
+    const finalError = boundedText(this.archiveError || error || this.processError || this.output.error);
+    return {
+      status: finalError ? 'failed' : 'succeeded', output: captured, error: finalError,
+      archiveState: this.archiveError ? 'incomplete' : 'complete',
+    };
   }
 
   private start(args: readonly string[], detached: boolean): ChildProcess {
@@ -112,12 +124,12 @@ export class OpenCodeTaskRuntime {
     this.processes.push(child);
     this.closeEvents.set(child, new Promise<void>((resolve) => child.once('close', resolve)));
     child.stdout?.on('data', (chunk: Buffer) => {
-      if (args[0] === 'run') {
-        this.output.append(chunk, true);
-        this.parseRoot(chunk);
-      }
+      if (args[0] === 'run') this.capture(chunk, 'stdout');
     });
-    child.stderr?.on('data', (chunk: Buffer) => { if (args[0] === 'run') this.output.append(chunk, false); });
+    child.stderr?.on('data', (chunk: Buffer) => { if (args[0] === 'run') this.capture(chunk, 'stderr'); });
+    for (const stream of [child.stdout, child.stderr]) {
+      stream?.on('error', (error: Error) => { if (args[0] === 'run') this.failArchive(error); });
+    }
     child.on('error', (error) => {
       if (args[0] === 'run') this.processError = error.message;
       else this.serverError = error.message;
@@ -135,11 +147,21 @@ export class OpenCodeTaskRuntime {
     return child;
   }
 
+  private capture(chunk: Buffer, stream: TaskOutputChunk['stream']): void {
+    try { this.options.onOutputChunk?.(chunk, stream); }
+    catch (error) { this.failArchive(error); }
+    this.output.append(chunk, stream === 'stdout');
+    if (stream === 'stdout') this.parseRoot(chunk);
+  }
+
+  private failArchive(error: unknown): void {
+    this.archiveError ||= `Task output archive failed: ${errorText(error)}`;
+    this.archiveAbort.abort();
+  }
+
   private parseRoot(chunk: Buffer): void {
-    const lines = (this.rootOutputLine + chunk.toString('utf8')).split('\n');
-    this.rootOutputLine = lines.pop() ?? '';
-    for (const line of lines) {
-      if (!line.trim()) continue;
+    this.rootOutputLines.append(chunk, (line) => {
+      if (!line.trim()) return;
       try {
         const id = rootSessionId(JSON.parse(line));
         if (id && !this.sessionReported) {
@@ -154,7 +176,7 @@ export class OpenCodeTaskRuntime {
       } catch (error) {
         if (!(error instanceof SyntaxError)) this.processError = errorText(error);
       }
-    }
+    });
   }
 
   private publish(captured: string): void {
@@ -184,7 +206,7 @@ export class OpenCodeTaskRuntime {
       await this.sleep(POLL_MS, this.signal);
     }
     if (this.signal.aborted) throw new Error('Execution cancelled');
-    if (this.rootOutputLine) this.parseRoot(Buffer.from('\n'));
+    this.parseRoot(Buffer.from('\n'));
     if (this.processError) throw new Error(this.processError);
     if (!root.pid) throw new Error('OpenCode run did not start');
   }
@@ -201,7 +223,10 @@ export class OpenCodeTaskRuntime {
 
   private async terminate(child: ChildProcess): Promise<void> {
     const error = await terminateProcessTree(child, undefined, this.options.killGraceMs ?? 3000, this.closeEvents.get(child));
-    if (error) this.processError ||= error;
+    if (error) {
+      this.processError ||= error;
+      if (!this.rootClosed) this.failArchive(error);
+    }
   }
 }
 

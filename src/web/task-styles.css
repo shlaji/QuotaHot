@@ -297,6 +297,7 @@
 
 .task-output-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--task-space-2);
@@ -304,6 +305,30 @@
 }
 
 .task-output-copy { flex: 0 0 auto; }
+
+.task-output-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--task-space-2);
+  padding: var(--task-space-3);
+}
+
+.task-output-controls select { width: 100%; min-width: 0; max-width: 100%; }
+
+.task-output-navigation,
+.task-output-downloads {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--task-space-2);
+  padding: var(--task-space-2) var(--task-space-3);
+}
+
+.task-output-downloads { font-size: var(--task-font-small); }
+.task-output a { color: var(--accent-strong); overflow-wrap: anywhere; }
+.task-output a:focus-visible,
+.task-output pre:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 1px; }
+.task-output-copy-area { border-top: 1px solid var(--line); }
 
 .task-output-feedback {
   min-width: 0;
@@ -315,6 +340,8 @@
 .task-output-feedback-error { color: var(--danger); }
 
 .task-output pre {
+  min-width: 0;
+  max-width: 100%;
   max-height: calc(var(--task-space-10) * 8);
   margin: 0;
   padding: var(--task-space-3);

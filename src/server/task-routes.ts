@@ -18,6 +18,8 @@ export function taskRoutes(
     throw error;
   });
   app.get('/tasks', (context) => context.json(scheduler.list()));
+  app.get('/tasks/summary', (context) => context.json(scheduler.listSummaries()));
+  app.get('/tasks/:id/output', (context) => context.json(scheduler.getOutput(context.req.param('id'))));
   app.get('/tasks/models', async (context) => {
     const directory = context.req.query('directory')?.trim() || scheduler.list().defaultDirectory;
     if (!isAbsolute(directory) || directory.includes('\0')) {

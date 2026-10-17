@@ -55,6 +55,7 @@ import { TaskStore } from './task-store.js';
 import { TaskScheduler } from './task-scheduler.js';
 import { taskQuotaSource } from './task-quota.js';
 import { taskRoutes } from './task-routes.js';
+import { taskLogRoutes } from './task-log-routes.js';
 import { listTaskModels } from './task-models.js';
 
 const PORT = Number(process.env.PORT ?? 8686);
@@ -191,6 +192,7 @@ api.route('/', qoderRoutes({ accountsDir: cfgMod.ACCOUNTS_DIR, changed: async ()
   await pushAccounts();
 } }));
 api.route('/', taskRoutes(taskScheduler, Date.now, listTaskModels));
+api.route('/', taskLogRoutes(taskStore));
 
 api.get('/state', async (c) => {
   const body: StateResponse = {
