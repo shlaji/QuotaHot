@@ -1,50 +1,49 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+<!--
+Sync Impact Report
+Version change: 1.2.0 -> 2.0.0 (bounded exemption from mandatory unit tests)
+Modified principles: III. 契约与行为可验证 (simple, low-risk methods may use documented AI static analysis)
+Added sections: none; Development and Review Process aligns the submission gate with Principle III
+Removed sections: none
+Follow-up TODO: confirm the original ratification date
+-->
+# QuotaHot Constitution
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. 可预期且可见的界面交互
+界面 MUST 清晰呈现当前状态、可执行操作及操作结果。异步操作 MUST 提供进行中与完成状态；失败时 MUST 给出可理解的原因或下一步。会消耗上游额度、修改凭证或产生其他重要影响的操作，MUST 在执行前说明影响，并在影响不易撤销时要求用户确认。交互规则 MUST 在同类页面和账户操作间保持一致，避免状态与实际行为不符。
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+### II. 按功能组织且职责分层的代码结构
+代码 MUST 按职责放置并通过明确接口协作：`src/web/` 承载 React 界面，`src/server/` 承载 HTTP/API 与服务端业务流程，`src/shared/` 承载前后端共享类型、调度逻辑及通用工具。`src/server/` 与 `src/web/` 下的代码 MUST 优先按功能建立子目录；当同一功能同时包含服务端与 Web 实现时，两侧 MUST 使用相同的功能目录名，相关文件归入对应目录。不存在对应实现的一侧无需建立空目录。模块 MUST 保持单一、可辨识的职责；业务规则不得在多个层重复实现。跨层依赖须通过既有 API、共享类型或明确的模块接口，不得以隐式文件访问绕过边界。
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+### III. 契约与行为可验证
+新增或变更的业务行为 MUST 由自动化测试验证；修改 HTTP、持久化或共享数据契约时 MUST 覆盖相应边界和集成行为。修复缺陷时 MUST 添加能够复现问题的回归验证。测试 MUST 验证用户可见结果或稳定契约，而非仅验证实现细节。对于不改变可观察行为、业务规则、外部契约、持久化、安全或权限边界的简单低风险方法，可以不新增单元测试；此时 MUST 由 AI 静态分析检查实现及其调用上下文，并在审查说明中记录免测理由。只要变更影响上述任一行为或边界，就 MUST 通过自动化测试验证，不得以静态分析替代。
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### IV. 凭证与额度操作安全
+凭证 MUST 存放在 QuotaHot 自有数据目录，不得直接复用或改写上游客户端凭证作为应用存储。日志、界面和错误信息 MUST 避免暴露完整令牌或密钥。任何可能扩大服务访问范围、消耗账户额度或改写凭证的功能 MUST 遵循最小权限和明确授权原则，并提供可审查的操作结果。
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+### V. 控制复杂度并保持可维护性
+实现 MUST 优先复用现有架构和依赖，新增抽象、配置项或兼容分支 MUST 有明确需求依据。模块、类型和测试 MUST 围绕稳定职责组织；当文件或模块承担多种独立职责时，MUST 在相关变更范围内拆分。不得为未证实的场景引入迁移层、回退路径或额外机制。
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+## 技术约束
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+- 根应用使用 TypeScript、Hono、React 和 Node.js 内置 `node:sqlite`；运行时要求 Node.js 24 或更高版本。
+- 根应用与 `hooks/` 是独立包，共享磁盘数据契约但不互相导入；两者版本须保持一致。
+- 根目录 TypeScript 检查覆盖 `src/**/*.ts`、`src/**/*.tsx` 与 `vite.config.ts`；修改 `hooks/` 时须单独运行 hook 包的检查和测试。
+- 所有凭证及账户副本归 QuotaHot 自有数据目录管理；不得将真实密钥写入源代码、文档、日志或测试产物。
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+## 开发与审查流程
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+- 提交变更前，针对修改范围运行类型检查和相关测试；涉及构建产物或发布流程时运行完整构建。
+- 代码仅可在任务范围内工作完成且按原则 III 要求的验证通过后提交；必需测试未通过或尚未完成的工作不得提交。
+- 界面变更须验证实际交互状态，包括成功、失败、等待和取消等适用路径；API 或存储变更须验证对应契约与持久化行为。
+- 代码审查须检查本章程合规性、权限与凭证暴露风险、错误处理、测试覆盖及对现有模块边界的影响。
+- 未通过验证的变更不得宣称完成；已知且与本次变更无关的问题须在审查说明中明确区分。
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+本章程定义 QuotaHot 的长期工程约束。具体实现可细化原则，但不得违反其要求。新增、删除或实质性调整原则须经项目维护者审查，并在本文件中记录版本、日期及影响。维护者在功能设计、实现和代码审查阶段均须检查章程合规性；任何例外必须说明理由、范围和后续处理方式。
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+版本遵循语义化版本规则：MAJOR 表示不兼容地移除或重新定义原则；MINOR 表示新增原则或实质扩展治理要求；PATCH 表示不改变治理含义的澄清和文字修订。
+
+**Version**: 2.0.0 | **Ratified**: TODO(RATIFICATION_DATE): 原始批准日期未知，需维护者确认 | **Last Amended**: 2026-10-18
