@@ -1,10 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { TaskStore } from '../src/server/task-store.js';
+import { initializeTaskLogSchema } from '../src/server/task-log-schema.js';
 
 const input = { description: 'work', model: 'openai/test', directory: tmpdir(), trigger: { type: 'quota' } } as const;
 
@@ -71,28 +70,17 @@ test('rolls back the claim when creating its execution round fails', (t) => {
   assert.deepEqual(store.listRuns(task.id), []);
 });
 
-test('rolls back additive startup migration completely when backfill fails', (t) => {
-  const directory = mkdtempSync(join(tmpdir(), 'task-log-rollback-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const path = join(directory, 'tasks.db');
-  const db = new DatabaseSync(path);
+test('rolls back schema creation completely when a later table cannot be created', (t) => {
+  const db = new DatabaseSync(':memory:');
   t.after(() => db.close());
-  db.exec(`CREATE TABLE tasks (
-    id TEXT PRIMARY KEY, description TEXT, model TEXT, directory TEXT, trigger_type TEXT,
-    trigger_at TEXT, status TEXT, created_at TEXT, started_at TEXT, finished_at TEXT,
-    output TEXT DEFAULT '', error TEXT DEFAULT '');
-    INSERT INTO tasks (id, description, model, directory, trigger_type, status, created_at, output)
-    VALUES ('old', 'work', 'openai/test', '/tmp', 'quota', 'succeeded', '2026-10-16T12:00:00.000Z', 'excerpt');
-    CREATE TRIGGER reject_migration BEFORE UPDATE ON tasks
-    BEGIN SELECT RAISE(ABORT, 'backfill failed'); END`);
+  db.exec(`PRAGMA foreign_keys = ON;
+    CREATE TABLE sentinel (id TEXT);
+    CREATE INDEX task_log_chunks ON sentinel(id);`);
+  const schema = db.prepare("SELECT name, sql FROM sqlite_schema ORDER BY name").all();
 
-  assert.throws(() => new TaskStore(path), /backfill failed/);
+  assert.throws(() => initializeTaskLogSchema(db), /already an index named task_log_chunks/);
 
-  assert.equal(db.prepare('SELECT output FROM tasks').get()?.output, 'excerpt');
-  assert.equal(db.prepare('PRAGMA table_info(tasks)').all().some((column) => column.name === 'current_run_id' || column.name === 'session_id'), false);
-  assert.equal(db.prepare("SELECT count(*) AS count FROM sqlite_schema WHERE name IN ('task_runs','task_log_chunks')").get()?.count, 0);
-  db.exec('DROP TRIGGER reject_migration');
-  const reopened = new TaskStore(path);
-  t.after(() => reopened.close());
-  assert.equal(reopened.listRuns('old')[0]?.totalBytes, 7);
+  assert.equal(db.isTransaction, false);
+  assert.equal(db.prepare('PRAGMA foreign_keys').get()?.foreign_keys, 1);
+  assert.deepEqual(db.prepare("SELECT name, sql FROM sqlite_schema ORDER BY name").all(), schema);
 });

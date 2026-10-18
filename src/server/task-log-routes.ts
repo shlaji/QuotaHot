@@ -110,6 +110,7 @@ export function taskLogRoutes(store: TaskStore): Hono {
     const runId = c.req.param('runId');
     const run = store.listRuns(id).find((item) => item.id === runId);
     if (!run || !UUID.test(id) || !UUID.test(runId)) return c.json({ error: 'Task run not found' }, 404);
+    c.header('X-Task-Archive-State', run.archiveState);
     c.header('Content-Type', 'application/octet-stream');
     c.header('Content-Disposition', `attachment; filename="task-${id}-run-${runId}.log"`);
     c.header('Content-Length', String(run.totalBytes));
@@ -142,8 +143,17 @@ export function taskLogRoutes(store: TaskStore): Hono {
       }
       for (const run of runs) {
         yield line({ type: 'run', run });
+        const decoders = new Map<TaskLogChunk['stream'], TextDecoder>();
         for (const chunk of snapshotChunks(store, run)) {
-          yield line({ type: 'chunk', runId: run.id, encoding: 'base64', chunk: encoded(chunk) });
+          let decoder = decoders.get(chunk.stream);
+          if (!decoder) {
+            decoder = new TextDecoder('utf-8');
+            decoders.set(chunk.stream, decoder);
+          }
+          yield line({
+            type: 'chunk', runId: run.id, encoding: 'utf8',
+            chunk: { sequence: chunk.sequence, byteOffset: chunk.byteOffset, stream: chunk.stream, data: decoder.decode(chunk.data, { stream: true }) },
+          });
         }
       }
       yield line({ type: 'complete', taskId: id, totalRuns: runs.length, totalBytes: runs.reduce((total, run) => total + run.totalBytes, 0) });

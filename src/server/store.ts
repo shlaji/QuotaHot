@@ -154,7 +154,6 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec(SCHEMA);
-    this.migrate();
     try {
       this.cleanupGatewayRequests();
     } catch (error) {
@@ -170,23 +169,6 @@ export class Store {
       }
     }, GATEWAY_REQUEST_CLEANUP_INTERVAL_MS);
     this.gatewayCleanupTimer.unref();
-  }
-
-  /**
-   * 补齐旧库缺的列。
-   *
-   * schema 用的都是 `CREATE TABLE IF NOT EXISTS`：表已经存在时，后加进 schema 的列不会被
-   * 自动补上。这里按 `table_info` 挨个查一遍，缺哪列补哪列——`ADD COLUMN` 带默认值，旧行
-   * 读出来就是默认值，不必回填。
-   */
-  private migrate(): void {
-    const columnsOf = (table: string): Set<string> =>
-      new Set(
-        (this.db.prepare(`PRAGMA table_info(${table})`).all() as Record<string, unknown>[]).map((r) => String(r.name)),
-      );
-    const gateway = columnsOf('gateway_account');
-    if (!gateway.has('pat')) this.db.exec("ALTER TABLE gateway_account ADD COLUMN pat TEXT NOT NULL DEFAULT ''");
-    if (!gateway.has('machine_id')) this.db.exec("ALTER TABLE gateway_account ADD COLUMN machine_id TEXT NOT NULL DEFAULT ''");
   }
 
   getState(accountId: string): AccountState | null {

@@ -132,28 +132,18 @@ test('bounds errors at the persistence boundary', (t) => {
   assert.ok(error.endsWith('FINAL'));
 });
 
-test('migrates a legacy database additively and persists discovered sessions across reopen', (t) => {
-  const directory = mkdtempSync(join(tmpdir(), 'task-migration-'));
+test('persists the first discovered session across reopen', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'task-session-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const path = join(directory, 'tasks.db');
-  const legacy = new DatabaseSync(path);
-  legacy.exec(`CREATE TABLE tasks (
-    id TEXT PRIMARY KEY, description TEXT, model TEXT, directory TEXT, trigger_type TEXT,
-    trigger_at TEXT, status TEXT, created_at TEXT, started_at TEXT, finished_at TEXT,
-    output TEXT DEFAULT '', error TEXT DEFAULT '');
-    INSERT INTO tasks (id, description, model, directory, trigger_type, status, created_at)
-    VALUES ('legacy', 'old task', 'openai/test', '/tmp', 'quota', 'succeeded', '2026-10-16T12:00:00.000Z');`);
-  legacy.close();
-
-  const migrated = new TaskStore(path);
-  assert.equal(migrated.get('legacy')?.description, 'old task');
-  assert.equal(migrated.get('legacy')?.sessionId, null);
-  assert.equal(migrated.claimContinuation('legacy', now), null);
-  const task = migrated.create(input, now);
-  migrated.claim(task.id, now);
-  migrated.setSession(task.id, 'session-root');
-  migrated.setSession(task.id, 'unrelated-child');
-  migrated.close();
+  const original = new TaskStore(path);
+  const task = original.create(input, now);
+  assert.equal(task.sessionId, null);
+  assert.equal(original.claimContinuation(task.id, now), null);
+  original.claim(task.id, now);
+  original.setSession(task.id, 'session-root');
+  original.setSession(task.id, 'unrelated-child');
+  original.close();
   const reopened = new TaskStore(path);
   t.after(() => reopened.close());
   assert.equal(reopened.get(task.id)?.sessionId, 'session-root');

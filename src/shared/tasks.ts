@@ -138,7 +138,7 @@ export interface TaskLogPageResponse extends Omit<TaskLogPage, 'chunks'> {
 
 export type TaskLogExportRecord =
   | { readonly type: 'run'; readonly run: TaskRun }
-  | { readonly type: 'chunk'; readonly runId: string; readonly encoding: 'base64'; readonly chunk: TaskLogBase64Chunk }
+  | { readonly type: 'chunk'; readonly runId: string; readonly encoding: 'utf8'; readonly chunk: Omit<TaskLogChunk, 'data'> & { readonly data: string } }
   | { readonly type: 'complete'; readonly taskId: string; readonly totalRuns: number; readonly totalBytes: number };
 
 export interface TaskModelsResponse {
@@ -147,19 +147,26 @@ export interface TaskModelsResponse {
 }
 
 export type TaskSessionPart =
-  | { readonly id: string; readonly type: 'text' | 'reasoning'; readonly text: string }
+  | { readonly id: string; readonly type: 'text'; readonly text: string; readonly synthetic?: boolean }
+  | { readonly id: string; readonly type: 'reasoning'; readonly text: string }
   | { readonly id: string; readonly type: 'tool'; readonly tool: string; readonly status: 'pending' | 'running' | 'completed' | 'error'; readonly input: string; readonly output: string; readonly error: string }
   | { readonly id: string; readonly type: 'unsupported'; readonly originalType: string };
 
-export interface TaskSessionMessage {
+interface TaskSessionMessageBase {
   readonly id: string;
-  readonly role: 'user' | 'assistant';
+  readonly time: { readonly created: number; readonly completed?: number };
   readonly parts: readonly TaskSessionPart[];
 }
+
+export type TaskSessionMessage = TaskSessionMessageBase & (
+  | { readonly role: 'user' }
+  | { readonly role: 'assistant'; readonly agent: string; readonly providerID: string; readonly modelID: string }
+);
 
 export interface TaskSessionTranscript {
   readonly sessionId: string;
   readonly title: string;
+  readonly time: { readonly created: number; readonly updated: number };
   readonly scope: 'root-only';
   readonly messages: readonly TaskSessionMessage[];
 }

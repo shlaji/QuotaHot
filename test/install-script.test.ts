@@ -88,6 +88,7 @@ test('安装到当前用户目录并生成匹配实际路径和端口的 systemd
   assert.match(service, new RegExp(`ExecStart="${join(f.home, 'tools', 'node')}" "${binary}"`));
   assert.match(service, new RegExp(`Environment="PATH=${expectedPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
   assert.match(service, /Environment=PORT=9000/);
+  assert.match(service, /^KillMode=process$/m);
   assert.match(await readFile(f.systemctlLog, 'utf8'), /--user is-enabled --quiet quotahot\.service\n--user daemon-reload\n--user enable quotahot\.service\n--user restart quotahot\.service\n/);
   assert.match(stdout, /http:\/\/localhost:9000/);
   assert.match(stdout, new RegExp(`构建产物目录：${dirname(f.source)}\n`));
@@ -209,6 +210,7 @@ test('手动 systemd 模板固定包含用户安装目录的 PATH', async () => 
     /Environment="PATH=%h\/\.quotahot\/bin:\/usr\/local\/sbin:\/usr\/local\/bin:\/usr\/sbin:\/usr\/bin:\/sbin:\/bin"/,
   );
   assert.match(service, /ExecStart=%h\/\.quotahot\/bin\/quotahot/);
+  assert.match(service, /^KillMode=process$/m);
   const f = await fixture();
   const sandboxTemplate = join(f.home, 'quotahot.service');
   await writeFile(sandboxTemplate, service.replace(/^ExecStart=.*$/m, `ExecStart="${f.source}"`));

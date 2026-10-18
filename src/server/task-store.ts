@@ -216,8 +216,12 @@ export class TaskStore {
     this.db.prepare(`UPDATE task_runs SET status = (SELECT status FROM tasks WHERE id = task_id),
       finished_at = (SELECT finished_at FROM tasks WHERE id = task_id),
       error = (SELECT error FROM tasks WHERE id = task_id), closed_at = ?,
-      archive_state = CASE WHEN archive_state IN ('legacy_unknown','incomplete') THEN archive_state ELSE ? END
-      WHERE id = ?`).run(new Date(result.finishedAt).toISOString(), result.archiveState ?? 'complete', runId);
+      archive_state = CASE WHEN archive_state IN ('legacy_unknown','incomplete') THEN archive_state
+        WHEN total_bytes = 0 AND (ordinal > 1 OR ? != '' OR EXISTS
+          (SELECT 1 FROM tasks WHERE id = task_id AND (session_id IS NOT NULL OR ? != ''))) THEN 'incomplete'
+        ELSE ? END
+      WHERE id = ?`).run(new Date(result.finishedAt).toISOString(), result.output, result.output,
+        result.archiveState ?? 'complete', runId);
   }
 
   cancel(id: string, now: number): ManagedTask | null {

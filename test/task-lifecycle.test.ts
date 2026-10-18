@@ -1,12 +1,15 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { TaskStore } from '../src/server/task-store.js';
 import type { TaskListResponse, ManagedTask } from '../src/shared/tasks.js';
+import { reserveLoopbackPort } from '../src/server/opencode-runtime-support.js';
+
+const serverPorts = new Map<string, number>();
 
 const liveBytes = Buffer.concat([Buffer.from('{"sessionID":"root"}\nlive output\n'), Buffer.alloc(100000, 120), Buffer.from([255, 0, 226])]);
 const finalBytes = Buffer.concat([Buffer.alloc(70000, 121), Buffer.from([128, 0, 255]), Buffer.from('\nfinal output\n')]);
@@ -33,7 +36,17 @@ async function waitFor(check: () => Promise<boolean>): Promise<void> {
 }
 
 async function serve(t: TestContext, directory: string) {
-  const child = spawn(process.execPath, ['--import', 'tsx', 'src/main.ts', 'serve'], {
+  const port = serverPorts.get(directory) ?? await reserveLoopbackPort();
+  serverPorts.set(directory, port);
+  const preload = join(directory, 'runtime-preload.mjs');
+  // 只在测试子进程替换协调器，不增加生产环境变量或端口配置入口。
+  writeFileSync(preload, `
+    import { mock } from 'node:test';
+    import { OpenCodeServer, sharedOpenCodeServer } from ${JSON.stringify(new URL('../src/server/opencode-server.ts', import.meta.url).href)};
+    const fixtureServer = new OpenCodeServer(${port});
+    mock.method(sharedOpenCodeServer, 'ensure', fixtureServer.ensure.bind(fixtureServer));
+  `);
+  const child = spawn(process.execPath, ['--import', 'tsx', '--import', preload, 'src/main.ts', 'serve'], {
     env: { ...process.env, PORT: '0', QUOTAHOT_HOST: '127.0.0.1', QUOTAHOT_DATA_DIR: directory,
       HOME: directory, XDG_CONFIG_HOME: directory, XDG_DATA_HOME: directory, CODEX_HOME: directory,
       QUOTAHOT_AUTH_USERNAME: '', QUOTAHOT_AUTH_PASSWORD: '', PATH: `${directory}:${process.env.PATH ?? ''}` },
@@ -64,12 +77,17 @@ async function serve(t: TestContext, directory: string) {
     assert.equal(response.status, 200);
     return response.json();
   };
-  return { base, stop, list };
+  return { base, stop, list, opencodeBase: `http://127.0.0.1:${port}` };
 }
 
 function sandbox(t: TestContext, proxy = ''): string {
   const directory = mkdtempSync(join(tmpdir(), 'task-lifecycle-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  t.after(() => {
+    const pidFile = join(directory, 'server-pid');
+    if (existsSync(pidFile)) process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGTERM');
+    serverPorts.delete(directory);
+    rmSync(directory, { recursive: true, force: true });
+  });
   writeFileSync(join(directory, 'config.json'), JSON.stringify({
     autoStart: false, usageRefreshMinutes: 0, clientCheckMinutes: 0, proxy, noProxy: ['localhost'],
   }));
@@ -79,17 +97,20 @@ function sandbox(t: TestContext, proxy = ''): string {
     const fs = require('node:fs');
     const http = require('node:http');
     if (process.argv[2] === 'serve') {
+      fs.writeFileSync(process.env.HOME + '/server-pid', String(process.pid));
+      fs.appendFileSync(process.env.HOME + '/server-launches', 'serve\\n');
       process.stdout.write('serve stdout must not be archived\\n');
       process.stderr.write('serve stderr must not be archived\\n');
       const server = http.createServer((request, response) => {
         const url = new URL(request.url, 'http://127.0.0.1');
         response.setHeader('content-type', 'application/json');
-        if (url.pathname === '/global/health') { response.end('{}'); return; }
+        if (url.pathname === '/global/health') { response.end(JSON.stringify({ healthy: true, version: 'fixture' })); return; }
         if (url.pathname === '/session/status') { response.end(JSON.stringify({ root: { type: 'idle' } })); return; }
         if (url.pathname.endsWith('/children')) { response.end('[]'); return; }
         if (url.pathname.endsWith('/message')) {
-          const done = process.cwd() + '/terminated';
-          response.end(fs.existsSync(done) || !fs.existsSync(process.cwd() + '/ready') ? JSON.stringify([{ info: { role: 'assistant', time: { completed: Date.now() }, finish: 'stop' } }]) : '[]'); return;
+          const directory = url.searchParams.get('directory');
+          const done = directory + '/terminated';
+          response.end(fs.existsSync(done) || !fs.existsSync(directory + '/ready') ? JSON.stringify([{ info: { role: 'assistant', time: { completed: Date.now() }, finish: 'stop' } }]) : '[]'); return;
         }
         if (request.method === 'POST' && url.pathname.endsWith('/abort')) { response.end('{}'); return; }
         response.statusCode = 404; response.end('{}');
@@ -191,6 +212,8 @@ test('real server terminates active processes before closing the task database o
 
   await server.stop();
 
+  assert.deepEqual(await (await fetch(`${server.opencodeBase}/global/health`)).json(), { healthy: true, version: 'fixture' });
+  assert.equal(readFileSync(join(directory, 'server-launches'), 'utf8'), 'serve\n');
   for (const workspace of workspaces) assert.equal(existsSync(join(workspace, 'terminated')), true);
   const store = new TaskStore(join(directory, 'tasks.db'));
   try {

@@ -7,7 +7,7 @@ const taskId = 'task /?#';
 const responses: readonly TaskSessionResponse[] = [
   { taskId, status: 'no_session' },
   { taskId, status: 'error', code: 'cli_unavailable', error: 'OpenCode unavailable' },
-  { taskId, status: 'ready', transcript: { sessionId: 'ses_root', title: 'Root session', scope: 'root-only', messages: [] } },
+  { taskId, status: 'ready', transcript: { sessionId: 'ses_root', title: 'Root session', time: { created: 1000, updated: 2000 }, scope: 'root-only', messages: [] } },
 ];
 
 for (const response of responses) {

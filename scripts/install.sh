@@ -122,6 +122,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+KillMode=process
 WorkingDirectory=$unit_data
 ExecStart="$unit_node" "$unit_binary"
 Restart=always
