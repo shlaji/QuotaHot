@@ -49,6 +49,10 @@ const lookupPromises = new Map();
 const deletedSessions = new Map();
 
 const RECOVERY_INTERVAL_MS = 600000;
+const NETWORK_RETRY_BASE_MS = 5000;
+const NETWORK_RETRY_MAX_MS = 300000;
+const MAX_RECOVERY_FAILURES = 5;
+const LOCK_RETRY_MS = 1000;
 const RESET_BUFFER_MS = 60000;
 const STATE_WATCH_RETRY_MS = 1000;
 const STATE_PATH = join(process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), ".quotahot"), "switch-state.json");
@@ -66,13 +70,20 @@ let lastCheckAt = null;
 let lastCheckResult = null;
 let recoveryRunning = false;
 let recoveryDelay = RECOVERY_INTERVAL_MS;
+let networkRetryDelay = NETWORK_RETRY_BASE_MS;
 let recoveryWaitUntil = 0;
+let recoveryRetryAt = 0;
+let recoveryHasLatestData = false;
+let recoveryFailures = 0;
+let recoveryCheckAfter = null;
 let stateWatcher;
 let stateSignature = "";
+let stateReceiptAt = 0;
 let stateResetAt = 0;
 let stateReading = false;
 let stateReadAgain = false;
 let pendingExternalRecovery = false;
+let initialRecoveryWave;
 
 function publishRecoveryStatus() {
   const sessions = [...waitingSessions.values()].map((entry) => ({
@@ -120,9 +131,15 @@ async function readRecoveryState() {
     const accounts = state?.accounts && typeof state.accounts === "object" ? state.accounts : {};
     const quotas = Object.entries(accounts).map(([id, memo]) => [id, memo?.usedPercent, memo?.resetAt, memo?.blockedUntil]);
     quotas.sort(([left], [right]) => left.localeCompare(right));
+    const receipt = state?.lastQuotaCheck;
+    const receiptAt = receipt?.provider === "codex" && Number.isFinite(receipt.completedAt) &&
+      typeof receipt.switched === "boolean" && typeof receipt.latestData === "boolean" &&
+      Number.isFinite(receipt.waitUntil) && ["switched", "available", "no_candidate", "network_error", "check_failed"].includes(receipt.outcome)
+      ? receipt.completedAt : 0;
     const now = Date.now();
     return {
       signature: JSON.stringify(quotas),
+      receiptAt,
       resetAt: quotas.reduce((earliest, [, , resetAt, blockedUntil]) => {
         const next = Number(blockedUntil) + RESET_BUFFER_MS > now ? Number(blockedUntil) : Number(resetAt);
         return Number.isFinite(next) && next > 0 && next + RESET_BUFFER_MS > now ? Math.min(earliest, next) : earliest;
@@ -143,10 +160,14 @@ async function refreshRecoveryState(external) {
     do {
       stateReadAgain = false;
       const state = await readRecoveryState();
-      const changed = state.signature !== stateSignature;
+      const quotaChanged = state.signature !== stateSignature;
+      const receiptChanged = state.receiptAt !== stateReceiptAt;
       stateSignature = state.signature;
+      stateReceiptAt = state.receiptAt;
       stateResetAt = state.resetAt;
-      if (external && changed && [...waitingSessions.values()].some((entry) => entry.queued)) {
+      if (external && (quotaChanged || receiptChanged) && [...waitingSessions.values()].some((entry) => entry.queued)) {
+        if (receiptChanged) recoveryCheckAfter = state.receiptAt;
+        else if (quotaChanged) recoveryFailures = 0;
         if (recoveryRunning) pendingExternalRecovery = true;
         else {
           clearTimeout(recoveryTimer);
@@ -212,10 +233,16 @@ function forget(entry) {
     stateWatchRetryTimer = undefined;
     nextCheckAt = null;
     recoveryDelay = RECOVERY_INTERVAL_MS;
+    networkRetryDelay = NETWORK_RETRY_BASE_MS;
     recoveryWaitUntil = 0;
+    recoveryRetryAt = 0;
+    recoveryHasLatestData = false;
+    recoveryFailures = 0;
+    recoveryCheckAfter = null;
     stateWatcher?.close();
     stateWatcher = undefined;
     stateSignature = "";
+    stateReceiptAt = 0;
     stateResetAt = 0;
     pendingExternalRecovery = false;
   }
@@ -267,7 +294,7 @@ async function resume(entry) {
     forget(entry);
     const response = await sdkRequest(() => entry.owner.client.session.promptAsync({
       path: { id: entry.sessionID },
-      body: { parts: [{ type: "text", text: "Continue the interrupted task from the existing conversation. Check what is already done before repeating actions." }] },
+      body: { parts: [{ type: "text", text: "从上次中断的位置继续执行任务" }] },
     }));
     if (!response) entry.owner.notify("QuotaHot: 自动续跑未确认成功，请手动检查会话", "warning");
   } finally {
@@ -280,24 +307,34 @@ function scheduleRecovery(delay) {
   const due = Math.min(recoveryWaitUntil > 0 && recoveryWaitUntil + RESET_BUFFER_MS > Date.now() ? recoveryWaitUntil + RESET_BUFFER_MS : Infinity,
     Number.isFinite(stateResetAt) && stateResetAt > 0 && stateResetAt + RESET_BUFFER_MS > Date.now()
       ? stateResetAt + RESET_BUFFER_MS : Infinity);
-  const wait = delay ?? (Number.isFinite(due) ? Math.max(0, due - Date.now()) : recoveryDelay);
+  const wait = recoveryRetryAt > Date.now() ? recoveryRetryAt - Date.now()
+    : delay ?? (Number.isFinite(due) ? Math.max(0, due - Date.now()) : recoveryDelay);
   recoveryTimer = setTimeout(async () => {
     recoveryTimer = undefined;
     nextCheckAt = null;
     recoveryRunning = true;
     publishRecoveryStatus();
     const entries = [...waitingSessions.values()].filter((entry) => entry.queued);
+    let owner;
+    let contended = false;
+    let retryDelay;
+    let checkAfter = recoveryCheckAfter ?? Date.now();
     try {
-      const owner = entries[0]?.owner;
+      owner = entries[0]?.owner;
       if (!owner) return;
       watchRecoveryState();
-      const result = await owner.run({ source: "opencode", recover: true, provider: "openai" });
+      const attempt = recoveryFailures + 1;
+      const result = await owner.run({ source: "opencode", recover: true, provider: "openai", quotaCheckAfter: checkAfter });
       const outcome = result?.switched ? "switched" : result?.outcome;
+      retryDelay = retryDelayFor(outcome);
+      contended = outcome === "lock_contended";
       lastCheckAt = Date.now();
-      lastCheckResult = ["switched", "available", "no_candidate", "check_failed"].includes(outcome) ? outcome : "unknown";
-      recoveryDelay = outcome === "switched" || outcome === "available"
+      lastCheckResult = ["switched", "available", "no_candidate", "network_error", "check_failed", "lock_contended"].includes(outcome) ? outcome : "unknown";
+      if (!contended && outcome !== "network_error") recoveryDelay = outcome === "switched" || outcome === "available"
         ? RECOVERY_INTERVAL_MS : Math.min(recoveryDelay * 2, 8 * RECOVERY_INTERVAL_MS);
       recoveryWaitUntil = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now() ? result.waitUntil : 0;
+      recoveryHasLatestData = result?.latestData === true;
+      recoveryFailures = recoveryHasLatestData || outcome === "switched" || outcome === "available" ? 0 : recoveryFailures + 1;
       await refreshRecoveryState(false);
       for (const entry of entries) {
         if (!active(entry)) continue;
@@ -305,12 +342,26 @@ function scheduleRecovery(delay) {
         entry.queued = !entry.ready;
       }
       publishRecoveryStatus();
+      owner.logRecovery("check attempt=" + attempt + "/" + MAX_RECOVERY_FAILURES + " outcome=" + lastCheckResult +
+        " latestData=" + recoveryHasLatestData + " waitUntil=" + (recoveryWaitUntil || "none"));
       await Promise.all(entries.map(resume));
     } finally {
       recoveryRunning = false;
       const followUp = pendingExternalRecovery;
       pendingExternalRecovery = false;
-      scheduleRecovery(followUp ? 0 : undefined);
+      if (contended) {
+        recoveryRetryAt = Date.now() + LOCK_RETRY_MS;
+        recoveryCheckAfter ??= checkAfter;
+      } else if (!followUp) recoveryCheckAfter = null;
+      if (followUp && recoveryCheckAfter !== null) {
+        scheduleRecovery(contended ? LOCK_RETRY_MS : 0);
+      } else if (recoveryHasLatestData) {
+        if (recoveryWaitUntil > Date.now() || stateResetAt > Date.now()) scheduleRecovery();
+      } else if (recoveryFailures < MAX_RECOVERY_FAILURES) {
+        scheduleRecovery(followUp ? Math.max(retryDelay ?? recoveryDelay, contended ? LOCK_RETRY_MS : 0) : retryDelay);
+      }
+      owner?.logRecovery("nextCheckAt=" + (nextCheckAt === null ? "none" : nextCheckAt) +
+        " failures=" + recoveryFailures);
       publishRecoveryStatus();
     }
   }, wait);
@@ -319,8 +370,42 @@ function scheduleRecovery(delay) {
   publishRecoveryStatus();
 }
 
+function retryDelayFor(outcome) {
+  if (outcome !== "network_error") {
+    networkRetryDelay = NETWORK_RETRY_BASE_MS;
+    return undefined;
+  }
+  const delay = networkRetryDelay;
+  networkRetryDelay = Math.min(networkRetryDelay * 2, NETWORK_RETRY_MAX_MS);
+  return delay;
+}
+
+async function runInitialRecovery(wave, owner, run, payload) {
+  if (!wave.check) {
+    wave.check = (async () => {
+      const attempt = recoveryFailures + 1;
+      const result = await run(payload);
+      const outcome = result?.switched ? "switched" : result?.outcome;
+      const retryDelay = retryDelayFor(outcome);
+      recoveryHasLatestData = result?.latestData === true;
+      recoveryFailures = recoveryHasLatestData || outcome === "switched" || outcome === "available" ? 0 : recoveryFailures + 1;
+      recoveryWaitUntil = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now() ? result.waitUntil : 0;
+      owner.logRecovery("check attempt=" + attempt + "/" + MAX_RECOVERY_FAILURES + " outcome=" + (outcome || "unknown") +
+        " latestData=" + recoveryHasLatestData + " waitUntil=" + (recoveryWaitUntil || "none"));
+      return { result, retryDelay };
+    })();
+  }
+  return wave.check;
+}
+
 function createRecovery(client, run, notify) {
-  const owner = { client, run, notify, disposed: false };
+  const owner = {
+    client, run, notify, disposed: false,
+    logRecovery(message) {
+      try { client?.app?.log?.({ body: { service: "quotahot", level: "info", message: "recovery " + message } })?.catch?.(() => {}); }
+      catch { /* Logging must not affect recovery. */ }
+    },
+  };
   return {
     dispose: async () => {
       owner.disposed = true;
@@ -333,7 +418,17 @@ function createRecovery(client, run, notify) {
       const info = event.properties?.info;
       if (event.type === "session.deleted" || event.properties?.error?.name === "MessageAbortedError" ||
            info?.error?.name === "MessageAbortedError") { forget(entry); return; }
-      if (event.type === "session.error" && classifyQuotaSignal(event) === null) { forget(entry); return; }
+      if (event.type === "session.error" && classifyQuotaSignal(event) === null) {
+        if (entry.queued) {
+          entry.terminal = true;
+          entry.status = "idle";
+          entry.revision += 1;
+          publishRecoveryStatus();
+          return;
+        }
+        forget(entry);
+        return;
+      }
       if (event.type === "message.updated") {
         entry.revision += 1;
         if (info?.role === "assistant" && info.id === entry.failureID && info.time?.completed && !info.error) {
@@ -377,27 +472,45 @@ function createRecovery(client, run, notify) {
       publishRecoveryStatus();
       if (entry.attempt) return entry.attempt;
       if (entry.queued || (entry.ready && entry.terminal)) return;
+      const wave = initialRecoveryWave ??= { participants: 0, check: null, checkAfter: Date.now() };
+      wave.participants += 1;
       const attempt = (async () => {
-        const provider = await retryProvider(client, sessionID);
-        if (!active(entry)) return;
-        if (provider !== "openai") { waitingSessions.delete(sessionID); publishRecoveryStatus(); return; }
-        const latest = [...(assistantMessages.get(sessionID)?.entries() || [])].sort((left, right) => right[1].created - left[1].created)[0];
-        entry.failureID ||= latest?.[0];
-        entry.failureCreated = latest?.[1].created;
-        entry.parentID = latest?.[1].parentID;
-        if (completedFailures.has(failureKey(entry)) || completedFailures.has(JSON.stringify([sessionID, null]))) { forget(entry); return; }
-        const result = await run({ source: "opencode", event });
-        if (!active(entry)) return;
-        entry.ready = result?.switched || result?.outcome === "switched" || result?.outcome === "available";
-        entry.queued = !entry.ready;
-        if (entry.queued) {
-          recoveryWaitUntil = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now() ? result.waitUntil : 0;
-          await refreshRecoveryState(false);
-          watchRecoveryState();
+        try {
+          const provider = await retryProvider(client, sessionID);
+          if (!active(entry)) return;
+          if (provider !== "openai") { waitingSessions.delete(sessionID); publishRecoveryStatus(); return; }
+          const latest = [...(assistantMessages.get(sessionID)?.entries() || [])].sort((left, right) => right[1].created - left[1].created)[0];
+          entry.failureID ||= latest?.[0];
+          entry.failureCreated = latest?.[1].created;
+          entry.parentID = latest?.[1].parentID;
+          if (completedFailures.has(failureKey(entry)) || completedFailures.has(JSON.stringify([sessionID, null]))) { forget(entry); return; }
+          const { result, retryDelay } = await runInitialRecovery(wave, owner, run, {
+            source: "opencode", event, quotaCheckAfter: wave.checkAfter,
+          });
+          if (!active(entry)) return;
+          recoveryCheckAfter = result?.outcome === "lock_contended" ? wave.checkAfter : null;
+          entry.ready = result?.switched || result?.outcome === "switched" || result?.outcome === "available";
+          entry.queued = !entry.ready;
+          if (entry.queued) {
+            await refreshRecoveryState(false);
+            watchRecoveryState();
+          }
+          if (result?.outcome === "lock_contended") {
+            recoveryRetryAt = Date.now() + LOCK_RETRY_MS;
+            clearTimeout(recoveryTimer);
+            recoveryTimer = undefined;
+          }
+          if (recoveryHasLatestData) {
+            if (recoveryWaitUntil > Date.now() || stateResetAt > Date.now()) scheduleRecovery();
+          } else if (recoveryFailures < MAX_RECOVERY_FAILURES) scheduleRecovery(retryDelay);
+          owner.logRecovery("nextCheckAt=" + (nextCheckAt === null ? "none" : nextCheckAt) +
+            " failures=" + recoveryFailures);
+          publishRecoveryStatus();
+          await resume(entry);
+        } finally {
+          wave.participants -= 1;
+          if (wave.participants === 0 && initialRecoveryWave === wave) initialRecoveryWave = undefined;
         }
-        scheduleRecovery();
-        publishRecoveryStatus();
-        await resume(entry);
       })();
       entry.attempt = attempt;
       try { await attempt; } finally { entry.attempt = null; }
@@ -572,6 +685,7 @@ export const QuotaHot = async ({ client }) => {
       lastOutcome = outcome;
       const messages = {
         switched: out?.message || "账户已切换",
+        network_error: "额度查询网络失败，将快速重试",
         check_failed: "账户检查或写入失败，请检查额度查询网络、凭证及文件权限",
         no_candidate: "本次未切换：暂无可用候选，或仍在切换冷却期",
         unknown: "切换钩子执行失败，请检查安装和运行环境",

@@ -301,17 +301,21 @@ async function recoveryFixture(t: TestContext) {
   });
   let now = 100;
   const timers = new Map<object, { at: number; callback: () => void }>();
-  const payloads: Array<{ source: string; recover?: boolean; provider?: string; event?: { properties: { sessionID: string } } }> = [];
-  const children: Array<{ finish(outcome: string, waitUntil?: number): void }> = [];
+  const payloads: Array<{ source: string; recover?: boolean; provider?: string; quotaCheckAfter?: number; event?: { properties: { sessionID: string } } }> = [];
+  const children: Array<{ finish(outcome: string, waitUntil?: number, latestData?: boolean): void }> = [];
   const watcherEvents: Array<(event: string, filename: string | null) => void> = [];
   const watcherInstances: Array<EventEmitter & { close(): void; unref(): void }> = [];
   let watchFailures = 0;
   let stateAccounts: Record<string, { usedPercent?: number | null; resetAt: number; blockedUntil: number; checkedAt?: number }> = {};
-  let readState = async () => JSON.stringify({ accounts: stateAccounts });
+  let lastQuotaCheckAt = 0;
+  let readState = async () => JSON.stringify({ accounts: stateAccounts, ...(lastQuotaCheckAt ? {
+    lastQuotaCheck: { provider: 'codex', completedAt: lastQuotaCheckAt, outcome: 'network_error', switched: false, latestData: false, waitUntil: 0 },
+  } : {}) });
   const prompts: Prompt[] = [];
   const histories = new Map<string, object[]>();
   const statuses: Record<string, { type: string }> = {};
   const notifications: string[] = [];
+  const logs: string[] = [];
   const sdk = {
     messages: async ({ path }: { path: { id: string } }): Promise<unknown> => ({ data: histories.get(path.id) || [] }),
     status: async (): Promise<unknown> => ({ data: statuses }),
@@ -347,11 +351,12 @@ async function recoveryFixture(t: TestContext) {
         stdin: Object.assign(new EventEmitter(), { end: (input: string) => payloads.push(JSON.parse(input)) }),
         kill: () => true,
       });
-      children.push({ finish: (outcome, waitUntil) => { child.stdout.emit('data', Buffer.from(JSON.stringify({ outcome, waitUntil }))); child.emit('close', 0); } });
+      children.push({ finish: (outcome, waitUntil, latestData) => { child.stdout.emit('data', Buffer.from(JSON.stringify({ outcome, waitUntil, latestData }))); child.emit('close', 0); } });
       return child;
     },
   });
-  const input = { client: { session: sdk, tui: { showToast: async ({ body }: { body: { message: string } }) => { notifications.push(body.message); } } } };
+  const input = { client: { session: sdk, app: { log: async ({ body }: { body: { message: string } }) => { logs.push(body.message); } },
+    tui: { showToast: async ({ body }: { body: { message: string } }) => { notifications.push(body.message); } } } };
   const plugin = await factory(input);
   t.after(() => plugin.dispose?.());
   const flush = async () => { for (let index = 0; index < 30; index += 1) await Promise.resolve(); };
@@ -374,8 +379,9 @@ async function recoveryFixture(t: TestContext) {
     children.at(-1)?.finish(outcome); await pending;
     await plugin.event(idle(sessionID));
   };
-  return { plugin, directory, sdk, histories, statuses, notifications, prompts, payloads, children, timers, advance, flush, seed, fail, settledStatus, watcherInstances,
+  return { plugin, directory, sdk, histories, statuses, notifications, logs, prompts, payloads, children, timers, advance, flush, seed, fail, settledStatus, watcherInstances,
     setAccounts: (accounts: Record<string, { usedPercent?: number | null; resetAt: number; blockedUntil: number; checkedAt?: number }>) => { stateAccounts = accounts; },
+    setQuotaCheckAt: (completedAt: number) => { lastQuotaCheckAt = completedAt; },
     setReadState: (reader: () => Promise<string>) => { readState = reader; },
     failNextWatch: () => { watchFailures += 1; },
     emitState: (filename: string | null = 'switch-state.json') => { for (const callback of [...watcherEvents]) callback('rename', filename); },
@@ -509,7 +515,7 @@ test('recovery checks at earliest future reset plus one minute even when initial
   assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['deadline']);
 });
 
-test('unknown reset at low clock waits for low-frequency backoff instead of a one-minute timer', async (t) => {
+test('unknown reset shares concurrent initial checks and waits for low-frequency backoff', async (t) => {
   const state = await recoveryFixture(t);
   let releaseRead: (contents: string) => void = () => {};
   state.setReadState(() => new Promise<string>((resolve) => { releaseRead = resolve; }));
@@ -518,9 +524,9 @@ test('unknown reset at low clock waits for low-frequency backoff instead of a on
   state.children.at(-1)?.finish('no_candidate'); await state.flush();
   await state.seed('second');
   const second = state.plugin.event(terminal('second')); await state.flush();
-  state.children.at(-1)?.finish('no_candidate'); await second;
+  await second;
   await state.advance(60_000);
-  assert.equal(state.payloads.length, 2);
+  assert.equal(state.payloads.length, 1);
   releaseRead('{"accounts":{}}'); await first;
 });
 
@@ -532,6 +538,8 @@ test('external quota update during a recovery child runs one follow-up check wit
   state.emitState(); await state.flush();
   state.children.at(-1)?.finish('no_candidate'); await state.flush();
   await state.advance(0);
+  assert.equal(state.payloads.length, 2);
+  await state.advance(20 * pollInterval);
   assert.equal(state.payloads.length, 3);
   state.setAccounts({ external: { resetAt: 240_100, blockedUntil: 240_100, checkedAt: 100 + pollInterval } });
   state.emitState(); await state.flush();
@@ -616,6 +624,230 @@ test('changed quota state wakes recovery when directory watcher omits the filena
   assert.equal(state.payloads[1]?.recover, true);
 });
 
+test('fresh quota data waits until its reset deadline then follows state file changes', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.seed('fresh-data');
+  const pending = state.plugin.event(terminal('fresh-data')); await state.flush();
+  state.children.at(-1)?.finish('no_candidate', 240_100, true); await pending;
+  await state.plugin.event(idle('fresh-data'));
+
+  await state.advance(300_000 - 1);
+  assert.equal(state.payloads.length, 1);
+  await state.advance(1);
+  assert.equal(state.payloads.length, 2);
+  state.children.at(-1)?.finish('no_candidate', 240_100, true); await state.flush();
+
+  state.setAccounts({ external: { resetAt: 240_100, blockedUntil: 240_100 } });
+  state.emitState(); await state.flush(); await state.advance(0);
+  assert.equal(state.payloads.length, 3);
+});
+
+test('fresh quota data with a reset deadline schedules one check after reset plus buffer', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.seed('fresh-deadline');
+  const pending = state.plugin.event(terminal('fresh-deadline')); await state.flush();
+  state.children.at(-1)?.finish('no_candidate', 120_100, true); await pending;
+  await state.plugin.event(idle('fresh-deadline'));
+
+  await state.advance(179_999);
+  assert.equal(state.payloads.length, 1);
+  await state.advance(1);
+  assert.equal(state.payloads.length, 2);
+});
+
+test('failure observed during an in-flight check cannot bypass the retry delay', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('watcher-failure');
+  await state.advance(pollInterval);
+  const child = state.children.at(-1);
+  state.setAccounts({ changed: { usedPercent: 100, resetAt: 1_000_000, blockedUntil: 1_000_000 } });
+  state.emitState(); await state.flush();
+  child?.finish('network_error', undefined, false); await state.flush();
+
+  await state.advance(0);
+  assert.equal(state.payloads.length, 2);
+  await state.advance(5_000);
+  assert.equal(state.payloads.length, 3);
+});
+
+test('non-network failure during an in-flight check uses ordinary backoff after a state change', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('watcher-no-candidate');
+  await state.advance(pollInterval);
+  const child = state.children.at(-1);
+  state.setAccounts({ changed: { usedPercent: 100, resetAt: 1_000_000, blockedUntil: 1_000_000 } });
+  state.emitState(); await state.flush();
+  child?.finish('no_candidate', undefined, false); await state.flush();
+
+  await state.advance(0);
+  assert.equal(state.payloads.length, 2);
+  await state.advance(20 * pollInterval);
+  assert.equal(state.payloads.length, 3);
+});
+
+test('receipt-only updates reuse the shared check once without restarting quota polling', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.fail('receipt-only', 'network_error');
+  const receiptAt = 101;
+  state.setQuotaCheckAt(receiptAt);
+  state.emitState(); await state.flush(); await state.advance(0);
+  assert.equal(state.children.length, 2, 'a published receipt should be consumed promptly');
+  assert.equal(state.payloads[1]?.quotaCheckAfter, receiptAt, 'the receipt should be reused instead of queried again');
+
+  state.emitState(); await state.flush(); await state.advance(0);
+  assert.equal(state.children.length, 2, 'duplicate watcher notifications must not reapply one receipt');
+
+  state.children.at(-1)?.finish('network_error', undefined, false); await state.flush();
+  await state.advance(9_999);
+  assert.equal(state.children.length, 2, 'receipt reuse must not bypass the next retry backoff');
+  await state.advance(1);
+  assert.equal(state.children.length, 3);
+  state.children.at(-1)?.finish('available'); await state.flush();
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['receipt-only']);
+});
+
+test('a receipt published during a recovery check is consumed before its retry backoff', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.fail('receipt-in-flight', 'network_error');
+  await state.advance(pollInterval);
+  assert.equal(state.children.length, 2);
+
+  const receiptAt = Date.now() + 1;
+  state.setQuotaCheckAt(receiptAt);
+  state.emitState(); await state.flush();
+  state.children.at(-1)?.finish('network_error', undefined, false); await state.flush();
+  await state.advance(1);
+
+  assert.equal(state.children.length, 3, 'the in-flight check must not discard a newly published receipt');
+  assert.equal(state.payloads[2]?.quotaCheckAfter, receiptAt);
+  state.children.at(-1)?.finish('available'); await state.flush();
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['receipt-in-flight']);
+});
+
+test('recovery stops quota polling after five attempts and waits for switch-state changes', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('bounded-recovery', 'network_error');
+  for (const delay of [5_000, 10_000, 20_000, 40_000]) {
+    await state.advance(delay);
+    state.children.at(-1)?.finish('network_error', undefined, false);
+    await state.flush();
+  }
+
+  assert.equal(state.payloads.length, 5);
+  assert.ok(state.logs.some((message) => message.includes('recovery check attempt=5/5 outcome=network_error')));
+  await state.advance(300_000);
+  assert.equal(state.payloads.length, 5);
+
+  state.setAccounts({ recovered: { usedPercent: 0, resetAt: 0, blockedUntil: 0 } });
+  state.emitState(); await state.flush(); await state.advance(0);
+  assert.equal(state.payloads.length, 6);
+});
+
+test('missing quota data keeps recovery checks scheduled until data is obtained', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.seed('missing-data');
+  const pending = state.plugin.event(terminal('missing-data')); await state.flush();
+  state.children.at(-1)?.finish('network_error', undefined, false); await pending;
+
+  await state.advance(5_000);
+  assert.equal(state.payloads.length, 2);
+  assert.equal(state.payloads[1]?.recover, true);
+});
+
+test('independent recovery processes retry lock_contended after one second instead of the weekly reset', async (t) => {
+  const first = await recoveryFixture(t);
+  const second = await recoveryFixture(t);
+  const weeklyReset = 7 * 24 * 60 * 60 * 1000 + 100;
+  for (const state of [first, second]) {
+    state.setAccounts({ weekly: { usedPercent: 100, resetAt: weeklyReset, blockedUntil: weeklyReset } });
+    await state.fail(state === first ? 'winner' : 'loser');
+    await state.settledStatus();
+    assert.equal((await snapshot(state.directory)).value.nextCheckAt, weeklyReset + 60_000);
+  }
+
+  for (const state of [first, second]) {
+    state.setAccounts({ weekly: { usedPercent: 34, resetAt: weeklyReset, blockedUntil: 0 } });
+    state.emitState(); await state.flush(); await state.advance(0);
+    assert.equal(state.children.length, 2);
+  }
+  first.children.at(-1)?.finish('available'); await first.flush();
+  second.children.at(-1)?.finish('lock_contended', weeklyReset); await second.flush();
+  await second.settledStatus();
+
+  assert.deepEqual(first.prompts.map((prompt) => prompt.path.id), ['winner']);
+  const waiting = (await snapshot(second.directory)).value;
+  assert.equal(waiting.queuedCount, 1);
+  assert.equal(waiting.nextCheckAt, 1100);
+  assert.equal(waiting.lastOutcome, 'lock_contended');
+  assert.equal(second.prompts.length, 0);
+  await second.advance(999); assert.equal(second.children.length, 2);
+  await second.advance(1); assert.equal(second.children.length, 3);
+  second.children.at(-1)?.finish('available'); await second.flush();
+  await second.plugin.event(idle('loser')); await second.advance(1000);
+  assert.deepEqual(second.prompts.map((prompt) => prompt.path.id), ['loser']);
+  assert.equal(second.children.length, 3);
+});
+
+test('initial lock_contended and repeated contention use a fixed delay without increasing ordinary backoff', async (t) => {
+  const state = await recoveryFixture(t);
+  state.setAccounts({ weekly: { resetAt: 604_800_100, blockedUntil: 604_800_100 } });
+  await state.fail('initial-contention', 'lock_contended');
+  const checkAfter = state.payloads[0]?.quotaCheckAfter;
+  assert.equal(typeof checkAfter, 'number');
+  await state.settledStatus();
+  assert.equal((await snapshot(state.directory)).value.nextCheckAt, 1100);
+
+  await state.advance(999); assert.equal(state.children.length, 1);
+  await state.advance(1); assert.equal(state.children.length, 2);
+  assert.equal(state.payloads[1]?.quotaCheckAfter, checkAfter);
+  state.children.at(-1)?.finish('lock_contended'); await state.flush();
+  await state.advance(999); assert.equal(state.children.length, 2);
+  await state.advance(1); assert.equal(state.children.length, 3);
+  assert.equal(state.payloads[2]?.quotaCheckAfter, checkAfter);
+  state.setAccounts({});
+  state.children.at(-1)?.finish('no_candidate'); await state.flush();
+  await state.settledStatus();
+  assert.equal((await snapshot(state.directory)).value.nextCheckAt, 2100 + pollInterval * 2);
+  assert.equal(state.prompts.length, 0);
+});
+
+test('lock contention reuses a quota check published by another process', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.fail('shared-state', 'lock_contended');
+  const checkAfter = state.payloads[0]?.quotaCheckAfter;
+  assert.equal(typeof checkAfter, 'number');
+
+  state.setQuotaCheckAt((checkAfter ?? 0) + 1);
+  state.emitState(); await state.flush();
+  await state.advance(999); assert.equal(state.payloads.length, 1);
+  await state.advance(1);
+
+  assert.equal(state.payloads.length, 2);
+  assert.equal(state.payloads[1]?.quotaCheckAfter, (checkAfter ?? 0) + 1);
+  state.children.at(-1)?.finish('no_candidate', Date.now() + 3_600_000, true); await state.flush();
+  await state.settledStatus();
+  assert.equal((await snapshot(state.directory)).value.lastOutcome, 'no_candidate');
+});
+
+test('watcher changes while lock_contended finishes cannot bypass the one-second retry', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('contention-race');
+  await state.advance();
+  let releaseRead: (contents: string) => void = () => {};
+  const pendingRead = new Promise<string>((resolve) => { releaseRead = resolve; });
+  let reads = 0;
+  state.setReadState(() => ++reads === 1 ? pendingRead : Promise.resolve(JSON.stringify({ accounts: {
+    changed: { usedPercent: 34, resetAt: 0, blockedUntil: 0 },
+  } })));
+
+  state.children.at(-1)?.finish('lock_contended'); await state.flush();
+  state.emitState(); await state.flush();
+  releaseRead('{"accounts":{}}'); await state.flush();
+  await state.advance(0); assert.equal(state.children.length, 2);
+  state.setReadState(async () => JSON.stringify({ accounts: { newer: { resetAt: 0, blockedUntil: 0 } } }));
+  state.emitState(); await state.flush();
+  await state.advance(999); assert.equal(state.children.length, 2);
+  await state.advance(1); assert.equal(state.children.length, 3);
+  state.children.at(-1)?.finish('available'); await state.flush();
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['contention-race']);
+});
+
 test('watcher errors are handled and the next recovery check reinstalls the watcher', async (t) => {
   const state = await recoveryFixture(t);
   await state.fail('watcher-error');
@@ -660,7 +892,10 @@ test('recovery shares one provider poll and continues each failed idle session o
   await state.advance(pollInterval - 1);
   assert.equal(state.payloads.length, 2);
   await state.advance(1);
-  assert.deepEqual(state.payloads[2], { source: 'opencode', recover: true, provider: 'openai' });
+  assert.equal(state.payloads[2]?.source, 'opencode');
+  assert.equal(state.payloads[2]?.recover, true);
+  assert.equal(state.payloads[2]?.provider, 'openai');
+  assert.equal(typeof state.payloads[2]?.quotaCheckAfter, 'number');
   state.children.at(-1)?.finish('available'); await state.flush();
 
   assert.deepEqual(state.prompts.map((prompt) => prompt.path.id).sort(), ['one', 'two']);
@@ -706,13 +941,18 @@ test('a recovery poll is independent of another session event child', async (t) 
   state.children[1]?.finish('no_candidate'); await pending;
 });
 
-test('different session event children keep distinct outcomes', async (t) => {
+test('simultaneous quota failures share one check and apply its result to every session', async (t) => {
   const state = await recoveryFixture(t); await state.seed('left'); await state.seed('right');
   const left = state.plugin.event(terminal('left')); const right = state.plugin.event(terminal('right')); await state.flush();
-  assert.equal(state.children.length, 2);
-  state.children[0]?.finish('switched'); state.children[1]?.finish('no_candidate'); await Promise.all([left, right]);
+  assert.equal(state.children.length, 1);
+  state.children[0]?.finish('available'); await Promise.all([left, right]);
   await state.plugin.event(idle('left')); await state.plugin.event(idle('right'));
-  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['left']);
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id).sort(), ['left', 'right']);
+
+  await state.seed('later');
+  const later = state.plugin.event(terminal('later')); await state.flush();
+  assert.equal(state.children.length, 2);
+  state.children[1]?.finish('available'); await later;
 });
 
 test('cancellation removes queued recovery on deletion, newer user, abort and disposal', async (t) => {
@@ -726,6 +966,47 @@ test('cancellation removes queued recovery on deletion, newer user, abort and di
     await state.advance();
     assert.equal(state.payloads.length, 1, kind); assert.equal(state.prompts.length, 0, kind);
   }
+});
+
+test('queued quota recovery survives a later non-quota session error', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('network-after-quota');
+  await state.settledStatus();
+  assert.equal((await snapshot(state.directory)).value.queuedCount, 1);
+  await state.plugin.event({ event: { type: 'session.error', properties: {
+    sessionID: 'network-after-quota', error: { name: 'APIConnectionError', message: 'Unable to connect' },
+  } } });
+
+  await state.settledStatus();
+  const waiting = (await snapshot(state.directory)).value;
+  assert.equal(waiting.waitingCount, 1);
+  assert.equal(waiting.queuedCount, 1);
+  assert.equal(state.prompts.length, 0);
+
+  await state.advance();
+  state.children.at(-1)?.finish('network_error'); await state.flush(); await state.settledStatus();
+  assert.equal((await snapshot(state.directory)).value.nextCheckAt, 600_100 + 5_000);
+
+  await state.advance(5_000);
+  assert.equal(state.payloads.length, 3);
+  state.children.at(-1)?.finish('network_error'); await state.flush(); await state.settledStatus();
+  assert.equal((await snapshot(state.directory)).value.nextCheckAt, 600_100 + 5_000 + 10_000);
+
+  await state.advance(9_999);
+  assert.equal(state.payloads.length, 3);
+  await state.advance(1);
+  assert.equal(state.payloads.length, 4);
+  state.children.at(-1)?.finish('available'); await state.flush();
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['network-after-quota']);
+});
+
+test('network errors without a queued quota failure do not trigger account recovery', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.plugin.event({ event: { type: 'session.error', properties: {
+    sessionID: 'network-only', error: { name: 'APIConnectionError', message: 'Unable to connect' },
+  } } });
+
+  assert.equal(state.payloads.length, 0);
+  assert.equal(state.timers.size, 0);
 });
 
 test('latest messages block continuation after unseen user input, success, abort or a different failure', async (t) => {
@@ -815,15 +1096,13 @@ test('plugin instances share polling while disposal cancels only the owning sess
   assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['second']);
 });
 
-test('a successful assistant completion or unrelated terminal error cancels recovery', async (t) => {
-  for (const reason of ['success', 'network']) {
-    const state = await recoveryFixture(t); await state.fail(reason);
-    await state.plugin.event({ event: reason === 'success' ? { type: 'message.updated', properties: { info: {
-      id: `failed-${reason}`, sessionID: reason, role: 'assistant', providerID: 'openai', time: { created: 10, completed: 200 },
-    } } } : { type: 'session.error', properties: { sessionID: reason, error: { message: 'network failed' } } } });
-    await state.advance();
-    assert.equal(state.payloads.length, 1, reason);
-  }
+test('a successful assistant completion cancels recovery', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('success');
+  await state.plugin.event({ event: { type: 'message.updated', properties: { info: {
+    id: 'failed-success', sessionID: 'success', role: 'assistant', providerID: 'openai', time: { created: 10, completed: 200 },
+  } } } });
+  await state.advance();
+  assert.equal(state.payloads.length, 1);
 });
 
 test('completed failure IDs retain recent dedupe while evicting the oldest bounded entries', async (t) => {

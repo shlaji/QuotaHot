@@ -9,9 +9,21 @@ export type AccountMemo = {
   readonly blockedUntil: number;
 };
 
+export type QuotaCheckOutcome = 'switched' | 'available' | 'no_candidate' | 'network_error' | 'check_failed';
+
+export type QuotaCheckReceipt = {
+  readonly provider: 'codex' | 'claude';
+  readonly completedAt: number;
+  readonly outcome: QuotaCheckOutcome;
+  readonly switched: boolean;
+  readonly latestData: boolean;
+  readonly waitUntil: number;
+};
+
 export type SwitchState = {
   readonly accounts: Record<string, AccountMemo>;
   readonly clients: Record<string, { readonly accountId: string; readonly email: string; readonly switchedAt: number }>;
+  readonly lastQuotaCheck?: QuotaCheckReceipt;
 };
 
 export const STATE_PATH = join(DATA_DIR, 'switch-state.json');
@@ -23,9 +35,14 @@ export async function readState(): Promise<SwitchState> {
     const parsed: unknown = JSON.parse(await readFile(STATE_PATH, 'utf8'));
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { accounts: {}, clients: {} };
     const record = parsed as Partial<SwitchState>;
+    const check = record.lastQuotaCheck;
+    const validCheck = check && (check.provider === 'codex' || check.provider === 'claude') &&
+      Number.isFinite(check.completedAt) && Number.isFinite(check.waitUntil) && typeof check.switched === 'boolean' &&
+      typeof check.latestData === 'boolean' && ['switched', 'available', 'no_candidate', 'network_error', 'check_failed'].includes(check.outcome);
     return {
       accounts: record.accounts && typeof record.accounts === 'object' ? record.accounts : {},
       clients: record.clients && typeof record.clients === 'object' ? record.clients : {},
+      ...(validCheck ? { lastQuotaCheck: check } : {}),
     };
   } catch {
     return { accounts: {}, clients: {} };

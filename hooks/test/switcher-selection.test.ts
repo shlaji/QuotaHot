@@ -142,3 +142,21 @@ test('recovery observes the current account when it is the only account', async 
   assert.equal(result.checked[0]?.usable, true);
   assert.deepEqual(observations.queried, ['a@x.com']);
 });
+
+test('another hook reuses a quota check completed after its request began', async () => {
+  reset();
+  usageByEmail.set('a@x.com', [usageWindow('primary', 100, 3_600_000)]);
+  usageByEmail.set('b@x.com', [usageWindow('primary', 20, 3_600_000)]);
+  const quotaCheckAfter = Date.now();
+
+  const winner = await switchWithUsage({ triggerClient: 'opencode', exhausted: true, minIntervalMs: 0,
+    cacheMs: 0, quotaCheckAfter });
+  const queriesAfterWinner = [...observations.queried];
+  const reused = await switchWithUsage({ triggerClient: 'opencode', exhausted: true, minIntervalMs: 0,
+    cacheMs: 0, quotaCheckAfter });
+
+  assert.equal(winner.switched, true);
+  assert.deepEqual(observations.queried, queriesAfterWinner);
+  assert.equal(reused.quotaCheck?.switched, true);
+  assert.equal(reused.quotaCheck?.outcome, 'switched');
+});

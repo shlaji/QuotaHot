@@ -1,11 +1,12 @@
 import { existsSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import { ACCOUNTS_DIR, loadConfig } from './config.js';
 import { accountIdOf, emailOf, loadAccounts } from './account-files.js';
 import { clientPath, readClientTokens, syncToClients } from './client-auth.js';
 import { ensureFresh } from './credentials.js';
 import type { NetworkConfig } from './network.js';
 import { queryHookUsage } from './usage.js';
-import { readState, STATE_PATH, withSwitchLock, writeState, type AccountMemo, type SwitchState } from './state.js';
+import { readState, STATE_PATH, withSwitchLock, writeState, type AccountMemo, type QuotaCheckOutcome, type QuotaCheckReceipt, type SwitchState } from './state.js';
 import type { Account, Provider, SyncResult, UsageResult, Window } from './types.js';
 
 export { STATE_PATH };
@@ -43,10 +44,12 @@ export type SwitchOptions = {
   readonly check: boolean;
   readonly dryRun: boolean;
   readonly usageQuery?: UsageQuery;
+  readonly quotaCheckAfter?: number;
 };
 
 export type SwitchResult = {
   readonly switched: boolean;
+  readonly lockContended?: true;
   readonly message: string;
   readonly reason: string;
   readonly from: string;
@@ -54,6 +57,7 @@ export type SwitchResult = {
   readonly written: readonly SyncResult[];
   readonly waitUntil: number;
   readonly checked: readonly AccountStatus[];
+  readonly quotaCheck?: QuotaCheckReceipt;
 };
 
 export function exhaustionOf(windows: readonly Window[], threshold: number, nowMs: number): { readonly exhausted: boolean; readonly resetAt: number } {
@@ -126,10 +130,42 @@ async function assess(account: Account, state: SwitchState, config: SwitchOption
 
 export async function switchAccount(partial: Partial<SwitchOptions> = {}): Promise<SwitchResult> {
   const config = options(partial);
+  if (config.triggerClient === 'opencode' && (config.provider === 'codex' || config.provider === 'claude') &&
+      Number.isFinite(config.quotaCheckAfter)) {
+    const receipt = (await readState()).lastQuotaCheck;
+    if (receipt?.provider === config.provider && receipt.completedAt >= (config.quotaCheckAfter ?? Infinity)) {
+      return result('复用最近一次额度查询结果', config.reason, {
+        switched: receipt.switched, waitUntil: receipt.waitUntil, quotaCheck: receipt,
+      });
+    }
+  }
   const appConfig = loadConfig();
   const network = { proxy: appConfig.proxy, noProxy: appConfig.noProxy };
-  const locked = config.dryRun ? await switchLocked(config, network) : await withSwitchLock(() => switchLocked(config, network));
-  return locked ?? result('另一处正在切换账户，这次跳过', config.reason);
+  const recordCheck = !config.dryRun && config.check && config.triggerClient === 'opencode' &&
+    (config.provider === 'codex' || config.provider === 'claude');
+  const locked = config.dryRun ? await switchLocked(config, network) : await withSwitchLock(async () => {
+    const result = await switchLocked(config, network);
+    if (!recordCheck) return result;
+    const state = await readState();
+    const outcome = quotaCheckOutcome(result, config.recover);
+    const receipt: QuotaCheckReceipt = {
+      provider: config.provider, completedAt: Date.now(), outcome,
+      switched: result.switched, latestData: result.checked.some((account) => account.source === 'live'),
+      waitUntil: result.waitUntil,
+    };
+    await writeState({ ...state, lastQuotaCheck: receipt });
+    return result;
+  });
+  return locked ?? result('另一处正在切换账户，这次跳过', config.reason, { lockContended: true });
+}
+
+export function quotaCheckOutcome(result: SwitchResult, recover: boolean): QuotaCheckOutcome {
+  if (result.switched) return 'switched';
+  const writeFailed = result.written.some((write) => write.error);
+  const networkFailed = result.checked.some((account) => account.error === 'usage_network_error' || account.error === 'usage_timeout');
+  const checkFailed = result.checked.some((account) => account.source === 'error');
+  if (recover && result.checked[0]?.usable) return 'available';
+  return writeFailed ? 'check_failed' : networkFailed ? 'network_error' : checkFailed ? 'check_failed' : 'no_candidate';
 }
 
 export async function surveyAccounts(
@@ -139,6 +175,7 @@ export async function surveyAccounts(
   const appConfig = loadConfig();
   const network = { proxy: appConfig.proxy, noProxy: appConfig.noProxy };
   const state = await readState();
+  const originalMemos = { ...state.accounts };
   const pool = (await loadAccounts(ACCOUNTS_DIR)).filter((account) => account.provider === provider && !account.disabled);
   const statuses: AccountStatus[] = [];
   for (const account of pool) statuses.push(await assess(account, state, options(config), network));
@@ -147,7 +184,15 @@ export async function surveyAccounts(
     const account = await currentAccount(client, pool);
     if (account) active[client] = account.email;
   }
-  await writeState(state);
+  await withSwitchLock(async () => {
+    const latest = await readState();
+    for (const [id, memo] of Object.entries(state.accounts)) {
+      if (memo !== originalMemos[id] && isDeepStrictEqual(latest.accounts[id], originalMemos[id])) {
+        latest.accounts[id] = memo;
+      }
+    }
+    await writeState(latest);
+  });
   return { statuses, active };
 }
 

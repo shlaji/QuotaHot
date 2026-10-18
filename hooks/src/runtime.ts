@@ -1,5 +1,5 @@
 /** OpenCode 事件入口：识别额度信号，交由 switcher 选择并同步账户。 */
-import { switchAccount, type SwitchOptions, type SwitchResult } from './switcher.js';
+import { quotaCheckOutcome, switchAccount, type SwitchOptions, type SwitchResult } from './switcher.js';
 import type { Window } from './types.js';
 import { queryHookUsage } from './usage.js';
 import { classifyQuotaSignal } from './quota-signal.js';
@@ -49,6 +49,8 @@ export type HookOutcome =
   | 'available'
   | 'skipped_no_signal'
   | 'no_candidate'
+  | 'lock_contended'
+  | 'network_error'
   | 'check_failed'
   | 'unknown';
 
@@ -86,15 +88,15 @@ export async function runHook(
       threshold: 100,
       cacheMs: 0,
       minIntervalMs: 0,
+      ...(typeof payload.quotaCheckAfter === 'number' && Number.isFinite(payload.quotaCheckAfter)
+        ? { quotaCheckAfter: payload.quotaCheckAfter } : {}),
       reason: 'OpenCode 额度恢复检查',
       usageQuery: opts.usageQuery ?? queryHookUsage,
     });
-    const outcome: HookOutcome = result.switched ? 'switched' : result.checked[0]?.usable ? 'available' :
-      result.checked.some((account) => account.source === 'error') || result.written.some((write) => write.error)
-        ? 'check_failed'
-        : 'no_candidate';
+    const latestData = result.quotaCheck?.latestData ?? result.checked.some((account) => account.source === 'live');
+    const outcome: HookOutcome = result.lockContended ? 'lock_contended' : result.quotaCheck?.outcome ?? quotaCheckOutcome(result, true);
     return {
-      stdout: JSON.stringify({ switched: result.switched, outcome, ...(result.waitUntil ? { waitUntil: result.waitUntil } : {}) }),
+      stdout: JSON.stringify({ switched: result.switched, outcome, latestData, ...(result.waitUntil ? { waitUntil: result.waitUntil } : {}) }),
       result, skipped: '', outcome,
     };
   }
@@ -109,13 +111,13 @@ export async function runHook(
     exhausted: true,
     cacheMs: 0,
     threshold: 100,
+    ...(typeof payload.quotaCheckAfter === 'number' && Number.isFinite(payload.quotaCheckAfter)
+      ? { quotaCheckAfter: payload.quotaCheckAfter } : {}),
     reason: signal.reason,
     usageQuery: opts.usageQuery ?? queryHookUsage,
   });
-  const outcome: HookOutcome = result.switched ? 'switched' :
-    result.checked.some((account) => account.source === 'error') || result.written.some((write) => write.error)
-      ? 'check_failed'
-      : 'no_candidate';
+  const latestData = result.quotaCheck?.latestData ?? result.checked.some((account) => account.source === 'live');
+  const outcome: HookOutcome = result.lockContended ? 'lock_contended' : result.quotaCheck?.outcome ?? quotaCheckOutcome(result, false);
   return {
       stdout: JSON.stringify({
         switched: result.switched,
@@ -124,6 +126,7 @@ export async function runHook(
         reason: result.reason,
         from: result.switched ? '[redacted]' : '',
         to: result.switched ? '[redacted]' : '',
+        latestData,
         ...(result.waitUntil ? { waitUntil: result.waitUntil } : {}),
     }),
     result,
