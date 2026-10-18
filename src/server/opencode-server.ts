@@ -53,12 +53,14 @@ export class OpenCodeServer {
   }
 
   private async healthy(base: string, fetcher: Fetcher, deadline: AbortSignal): Promise<boolean> {
+    const probeDeadline = AbortSignal.timeout(1000);
     let response: Response;
     try {
       response = await fetcher(`${base}/global/health`, {
-        signal: AbortSignal.any([deadline, AbortSignal.timeout(1000)]), redirect: 'error',
+        signal: AbortSignal.any([deadline, probeDeadline]), redirect: 'error',
       });
     } catch (error) {
+      if (probeDeadline.aborted && !deadline.aborted) return false;
       if (error instanceof TypeError && jsonObject(error.cause)?.code === 'ECONNREFUSED') return false;
       throw new Error(`Cannot verify a healthy OpenCode service at ${base}: ${errorText(error)}`);
     }
@@ -67,6 +69,7 @@ export class OpenCodeServer {
       const health = response.ok ? jsonObject(await response.json()) : null;
       if (health?.healthy === true && typeof health.version === 'string') return true;
     } catch (error) {
+      if (probeDeadline.aborted && !deadline.aborted) return false;
       if (!(error instanceof SyntaxError)) {
         throw new Error(`Cannot verify a healthy OpenCode service at ${base}: ${errorText(error)}`);
       }

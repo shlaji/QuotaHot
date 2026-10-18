@@ -75,6 +75,26 @@ test('starts detached with ignored stdio and unrefs the shared process', async (
   assert.equal(unref.mock.callCount(), 1);
 });
 
+test('starts OpenCode and waits through health probe timeouts', { timeout: 5000 }, async () => {
+  const port = await reserveLoopbackPort();
+  const child = new ChildProcess();
+  let probes = 0;
+  const base = await new OpenCodeServer(port).ensure({
+    ...options,
+    spawn: () => child,
+    fetch: async (_url, init) => {
+      if (probes++ < 2) {
+        await new Promise<never>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+        });
+      }
+      return Response.json({ healthy: true, version: 'fixture' });
+    },
+  }, new AbortController().signal);
+  assert.equal(base, `http://127.0.0.1:${port}`);
+  assert.equal(probes, 3);
+});
+
 test('reprobes and reuses a healthy service after a competing startup wins the port', async () => {
   const port = await reserveLoopbackPort();
   const child = new ChildProcess();
