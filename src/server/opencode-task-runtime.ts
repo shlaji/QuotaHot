@@ -4,10 +4,10 @@ import type { TaskOutcome } from './task-store.js';
 import { boundedText, TaskOutput } from './task-output.js';
 import { TaskOutputLines } from './task-output-lines.js';
 import { terminateProcessTree } from './opencode-process.js';
+import { sharedOpenCodeServer, type OpenCodeServer } from './opencode-server.js';
 import {
   createEnvironment,
   errorText,
-  reserveLoopbackPort,
   rootSessionId,
   jsonObject,
   requestUrl,
@@ -21,7 +21,8 @@ type SpawnProcess = typeof spawn;
 type RuntimeDependencies = {
   readonly fetch?: Fetcher;
   readonly spawn?: SpawnProcess;
-  readonly reservePort?: () => Promise<number>;
+  /** 测试注入独立协调器和临时端口；生产始终使用共享的 127.0.0.1:4096。 */
+  readonly server?: OpenCodeServer;
   readonly sleep?: SessionSleep;
   readonly abortTreeTimeoutMs?: number;
 };
@@ -55,9 +56,6 @@ export class OpenCodeTaskRuntime {
   private archiveError = '';
   private published = '';
   private processError = '';
-  private serverError = '';
-  private serverClosed = false;
-  private stopping = false;
   private rootClosed = false;
   private rootExitCode: number | null = null;
   private rootExitSignal: NodeJS.Signals | null = null;
@@ -79,10 +77,11 @@ export class OpenCodeTaskRuntime {
     if (this.signal.aborted) return { status: 'failed', output: '', error: 'Execution cancelled', archiveState: 'complete' };
     let error = '';
     try {
-      const port = await (this.options.reservePort ?? reserveLoopbackPort)();
-      this.base = `http://127.0.0.1:${port}`;
-      this.start(['serve', '--hostname', '127.0.0.1', '--port', String(port)], true);
-      await this.waitForHealth(this.base);
+      this.base = await (this.options.server ?? sharedOpenCodeServer).ensure({
+        executable: this.options.executable ?? 'opencode', cwd: this.task.directory,
+        env: this.env, spawn: this.spawnProcess, fetch: this.fetcher,
+      }, this.signal);
+      this.signal.throwIfAborted();
       const root = this.start([
         'run', '--attach', this.base, '--format', 'json', '--model', this.task.model, '--dir', this.task.directory,
         ...(this.options.sessionId === undefined ? [] : ['--session', this.options.sessionId]),
@@ -99,14 +98,13 @@ export class OpenCodeTaskRuntime {
         catch (abortError) { this.processError ||= errorText(abortError); }
       }
     }
-    this.stopping = true;
     try { await this.stopProcesses(); }
     catch (cleanupError) {
       this.processError ||= errorText(cleanupError);
       if (!this.rootClosed) this.failArchive(cleanupError);
     }
     if (this.cancellationSignal.aborted) error = `Execution cancelled${this.processError ? `: ${this.processError}` : ''}`;
-    else if (this.processError || this.serverError) error ||= this.processError || this.serverError;
+    else if (this.processError) error ||= this.processError;
     else if (this.rootExitCode !== 0) error ||= `OpenCode exited with ${this.rootExitSignal ?? this.rootExitCode}`;
     return this.finish(error);
   }
@@ -145,25 +143,19 @@ export class OpenCodeTaskRuntime {
     this.processes.push(child);
     this.closeEvents.set(child, new Promise<void>((resolve) => child.once('close', resolve)));
     child.stdout?.on('data', (chunk: Buffer) => {
-      if (args[0] === 'run') this.capture(chunk, 'stdout');
+      this.capture(chunk, 'stdout');
     });
-    child.stderr?.on('data', (chunk: Buffer) => { if (args[0] === 'run') this.capture(chunk, 'stderr'); });
+    child.stderr?.on('data', (chunk: Buffer) => { this.capture(chunk, 'stderr'); });
     for (const stream of [child.stdout, child.stderr]) {
-      stream?.on('error', (error: Error) => { if (args[0] === 'run') this.failArchive(error); });
+      stream?.on('error', (error: Error) => { this.failArchive(error); });
     }
     child.on('error', (error) => {
-      if (args[0] === 'run') this.processError = error.message;
-      else this.serverError = error.message;
+      this.processError = error.message;
     });
     child.on('close', (code, signal) => {
-      if (args[0] === 'run') {
-        this.rootClosed = true;
-        this.rootExitCode = code;
-        this.rootExitSignal = signal;
-      } else {
-        this.serverClosed = true;
-        if (!this.stopping && !this.signal.aborted && code !== 0) this.serverError = `OpenCode serve exited with ${signal ?? code}`;
-      }
+      this.rootClosed = true;
+      this.rootExitCode = code;
+      this.rootExitSignal = signal;
     });
     return child;
   }
@@ -204,21 +196,6 @@ export class OpenCodeTaskRuntime {
     if (captured === this.published) return;
     try { this.options.onOutput?.(captured); this.published = captured; }
     catch (error) { this.processError = `Task output update failed: ${errorText(error)}`; }
-  }
-
-  private async waitForHealth(base: string): Promise<void> {
-    while (!this.signal.aborted) {
-      if (this.serverClosed) throw new Error(this.serverError || 'OpenCode serve exited before becoming ready');
-      try {
-        const response = await this.fetcher(`${base}/global/health`, { signal: this.signal });
-        if (response.ok) return;
-      } catch (error) {
-        if (this.signal.aborted) throw error;
-        if (!(error instanceof TypeError)) throw error;
-      }
-      await this.sleep(POLL_MS, this.signal);
-    }
-    throw new Error('Execution cancelled');
   }
 
   private async waitForRoot(root: ChildProcess): Promise<void> {

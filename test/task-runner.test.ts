@@ -1,6 +1,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -8,11 +8,16 @@ import { runTask } from '../src/server/task-runner.js';
 import { TaskStore } from '../src/server/task-store.js';
 import { TaskScheduler } from '../src/server/task-scheduler.js';
 import type { CreateTaskInput, TaskOutputChunk } from '../src/shared/tasks.js';
+import { OpenCodeServer } from '../src/server/opencode-server.js';
+import { reserveLoopbackPort } from '../src/server/opencode-runtime-support.js';
 
-function fixture(t: TestContext, mode: string) {
+async function fixture(t: TestContext, mode: string) {
   const directory = mkdtempSync(join(tmpdir(), 'task-runtime-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
   const state = join(directory, 'state.json');
+  t.after(() => {
+    if (existsSync(state + '.server-pid')) process.kill(Number(readFileSync(state + '.server-pid', 'utf8')), 'SIGTERM');
+    rmSync(directory, { recursive: true, force: true });
+  });
   writeFileSync(state, JSON.stringify({ started: Date.now(), aborted: [] }));
   const executable = join(directory, 'fake-opencode');
   writeFileSync(executable, `#!${process.execPath}
@@ -23,12 +28,13 @@ function fixture(t: TestContext, mode: string) {
     const read = () => JSON.parse(fs.readFileSync(stateFile, 'utf8'));
     const write = (value) => fs.writeFileSync(stateFile, JSON.stringify(value));
     if (process.argv[2] === 'serve') {
+      fs.appendFileSync(stateFile + '.launches', 'serve\\n');
       fs.writeFileSync(stateFile + '.server-pid', String(process.pid));
       const server = http.createServer((request, response) => {
         const url = new URL(request.url, 'http://127.0.0.1');
         const state = read();
         response.setHeader('content-type', 'application/json');
-        if (url.pathname === '/global/health') { response.end('{}'); return; }
+        if (url.pathname === '/global/health') { response.end(JSON.stringify({ healthy: true, version: 'fixture' })); return; }
         if (url.pathname === '/session/status') {
           const elapsed = Date.now() - state.started;
           const nestedBusy = mode === 'nested' && elapsed < 1000;
@@ -56,6 +62,7 @@ function fixture(t: TestContext, mode: string) {
         if (url.pathname.endsWith('/message')) {
           const id = url.pathname.split('/')[2];
           const elapsed = Date.now() - state.started;
+          if (mode === 'shared-cancel' && id === 'held-root' && !state.aborted.includes(id)) { response.end('[]'); return; }
           if ((mode === 'no-message' && id === 'child') || (mode === 'root-signaled' && id === 'root')) { response.end('[]'); return; }
           if (mode === 'error' && id === 'child') { response.end(JSON.stringify([{ info: { role: 'assistant', time: { completed: Date.now() }, error: { message: 'child failed' }, finish: 'error' } }])); return; }
           if (mode === 'structured-error' && id === 'child') { response.end(JSON.stringify([{ info: { role: 'assistant', time: { completed: Date.now() }, error: { name: 'MessageAbortedError', data: { message: 'child aborted' } } } }])); return; }
@@ -74,13 +81,14 @@ function fixture(t: TestContext, mode: string) {
       });
       server.listen(Number(process.argv.at(-1)), '127.0.0.1');
     } else {
+      fs.appendFileSync(stateFile + '.attachments', process.argv[4] + '\\n');
       if (mode === 'resume') {
         const assert = require('node:assert/strict');
         assert.deepEqual(process.argv.slice(5), ['--format', 'json', '--model', 'openai/test', '--dir', process.cwd(), '--session', 'root', '--', 'follow up']);
         assert.equal(process.env.PWD, process.cwd());
       }
       if (mode === 'oversized-line') process.stdout.write(JSON.stringify({ sessionID: 'wrong', padding: 'x'.repeat(200000) }) + '\\n');
-      process.stdout.write(JSON.stringify({ sessionID: 'root' }) + '\\n');
+      process.stdout.write(JSON.stringify({ sessionID: mode === 'shared-cancel' && process.argv.at(-1) === 'hold' ? 'held-root' : 'root' }) + '\\n');
       process.stdout.write(JSON.stringify({ type: 'text', part: { text: process.argv.at(-1) } }) + '\\n');
       if (mode === 'raw-output') process.stderr.write(Buffer.from([0, 255, 254, 13, 10]));
       if (mode === 'sink-failure') {
@@ -89,21 +97,23 @@ function fixture(t: TestContext, mode: string) {
       }
       if (mode === 'root-failed') process.exitCode = 7;
       if (mode === 'root-signaled') process.kill(process.pid, 'SIGTERM');
+      if (mode === 'shared-cancel' && process.argv.at(-1) === 'hold') setInterval(() => {}, 1000);
     }
   `, { mode: 0o755 });
   const input: CreateTaskInput = { description: mode, model: 'openai/test', directory, trigger: { type: 'time', at: Date.now() } };
-  return { directory, executable, state, input };
+  const port = await reserveLoopbackPort();
+  return { directory, executable, state, input, port, server: new OpenCodeServer(port) };
 }
 
 for (const scenario of ['title', 'placeholder', 'blank', 'wrong-id', 'child', 'malformed', 'http-error', 'network-error', 'callback-error']) {
   test(`root title metadata is best effort: ${scenario}`, { timeout: 5000 }, async (t) => {
     const mode = scenario === 'title' ? 'success' : 'resume';
-    const data = fixture(t, mode);
+    const data = await fixture(t, mode);
     const titles: string[] = [];
     let requests = 0;
     let treeRead = false;
     const result = await runTask(data.input, new AbortController().signal, {
-      executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: mode },
+      server: data.server, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: mode },
       ...(mode === 'resume' ? { sessionId: 'root', prompt: 'follow up' } : {}),
       fetch: async (url, init) => {
         const parsed = new URL(url);
@@ -138,10 +148,10 @@ for (const scenario of ['title', 'placeholder', 'blank', 'wrong-id', 'child', 'm
 }
 
 test('keeps an idle child without a terminal assistant message running', { timeout: 5000 }, async (t) => {
-  const fixtureData = fixture(t, 'no-message');
+  const fixtureData = await fixture(t, 'no-message');
   const controller = new AbortController();
   let settled = false;
-  const running = runTask(fixtureData.input, controller.signal, { executable: fixtureData.executable, env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'no-message' } }).then((result) => { settled = true; return result; });
+  const running = runTask(fixtureData.input, controller.signal, { server: fixtureData.server, executable: fixtureData.executable, env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'no-message' } }).then((result) => { settled = true; return result; });
   await delay(700);
   assert.equal(settled, false);
   controller.abort();
@@ -149,24 +159,24 @@ test('keeps an idle child without a terminal assistant message running', { timeo
 });
 
 test('waits for a nested busy child and succeeds after every terminal message', { timeout: 5000 }, async (t) => {
-  const fixtureData = fixture(t, 'nested');
-  const result = await runTask(fixtureData.input, new AbortController().signal, { executable: fixtureData.executable, env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'nested' } });
+  const fixtureData = await fixture(t, 'nested');
+  const result = await runTask(fixtureData.input, new AbortController().signal, { server: fixtureData.server, executable: fixtureData.executable, env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'nested' } });
   assert.equal(result.status, 'succeeded', result.error);
   assert.match(result.output, /nested/);
 });
 
 test('fails when a recursive child reports an assistant error', { timeout: 5000 }, async (t) => {
-  const fixtureData = fixture(t, 'error');
-  const result = await runTask(fixtureData.input, new AbortController().signal, { executable: fixtureData.executable, env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'error' } });
+  const fixtureData = await fixture(t, 'error');
+  const result = await runTask(fixtureData.input, new AbortController().signal, { server: fixtureData.server, executable: fixtureData.executable, env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'error' } });
   assert.equal(result.status, 'failed');
   assert.match(result.error, /child failed/);
   assert.equal(result.archiveState, 'complete');
 });
 
 test('fails on structured OpenCode assistant errors without a string finish reason', { timeout: 5000 }, async (t) => {
-  const fixtureData = fixture(t, 'structured-error');
+  const fixtureData = await fixture(t, 'structured-error');
   const result = await runTask(fixtureData.input, new AbortController().signal, {
-    executable: fixtureData.executable,
+    server: fixtureData.server, executable: fixtureData.executable,
     env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'structured-error' },
   });
   assert.equal(result.status, 'failed');
@@ -174,10 +184,10 @@ test('fails on structured OpenCode assistant errors without a string finish reas
 });
 
 test('discovers a descendant created after the first candidate completion snapshot', { timeout: 5000 }, async (t) => {
-  const fixtureData = fixture(t, 'late-child');
+  const fixtureData = await fixture(t, 'late-child');
   const started = Date.now();
   const result = await runTask(fixtureData.input, new AbortController().signal, {
-    executable: fixtureData.executable,
+    server: fixtureData.server, executable: fixtureData.executable,
     env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'late-child' },
   });
   assert.equal(result.status, 'succeeded');
@@ -185,9 +195,9 @@ test('discovers a descendant created after the first candidate completion snapsh
 });
 
 test('reports a failed root process instead of waiting forever for missing messages', { timeout: 5000 }, async (t) => {
-  const fixtureData = fixture(t, 'root-failed');
+  const fixtureData = await fixture(t, 'root-failed');
   const result = await runTask(fixtureData.input, new AbortController().signal, {
-    executable: fixtureData.executable,
+    server: fixtureData.server, executable: fixtureData.executable,
     env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'root-failed' },
   });
   assert.equal(result.status, 'failed');
@@ -195,9 +205,9 @@ test('reports a failed root process instead of waiting forever for missing messa
 });
 
 test('reports a signaled root process instead of waiting forever for missing messages', { timeout: 5000 }, async (t) => {
-  const fixtureData = fixture(t, 'root-signaled');
+  const fixtureData = await fixture(t, 'root-signaled');
   const result = await runTask(fixtureData.input, new AbortController().signal, {
-    executable: fixtureData.executable,
+    server: fixtureData.server, executable: fixtureData.executable,
     env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'root-signaled' },
   });
   assert.equal(result.status, 'failed');
@@ -205,9 +215,9 @@ test('reports a signaled root process instead of waiting forever for missing mes
 });
 
 test('waits for running siblings to finish before reporting a child error', { timeout: 5000 }, async (t) => {
-  const fixtureData = fixture(t, 'sibling-error');
+  const fixtureData = await fixture(t, 'sibling-error');
   const started = Date.now();
-  const result = await runTask(fixtureData.input, new AbortController().signal, { executable: fixtureData.executable, env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'sibling-error' } });
+  const result = await runTask(fixtureData.input, new AbortController().signal, { server: fixtureData.server, executable: fixtureData.executable, env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'sibling-error' } });
   assert.equal(result.status, 'failed');
   assert.match(result.error, /child failed/);
   assert.ok(Date.now() - started >= 1000, 'task remains active until the sibling session finishes');
@@ -216,9 +226,9 @@ test('waits for running siblings to finish before reporting a child error', { ti
 });
 
 test('aborts descendants deepest-first, keeps the server until abort completes, and preserves directory', { timeout: 5000 }, async (t) => {
-  const fixtureData = fixture(t, 'nested');
+  const fixtureData = await fixture(t, 'nested');
   const controller = new AbortController();
-  const running = runTask(fixtureData.input, controller.signal, { executable: fixtureData.executable, env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'nested' } });
+  const running = runTask(fixtureData.input, controller.signal, { server: fixtureData.server, executable: fixtureData.executable, env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'nested' } });
   await delay(700);
   controller.abort();
   const result = await running;
@@ -227,16 +237,19 @@ test('aborts descendants deepest-first, keeps the server until abort completes, 
   assert.deepEqual(state.aborted, ['nested', 'child', 'root']);
   assert.match(result.output, /nested/);
   assert.ok(result.output.length >= 1);
+  assert.equal((await fetch(`http://127.0.0.1:${fixtureData.port}/global/health`)).status, 200);
 });
 
 test('re-discovers and aborts descendants created during cancellation', { timeout: 5000 }, async (t) => {
-  const fixtureData = fixture(t, 'cancel-late-child');
+  const fixtureData = await fixture(t, 'cancel-late-child');
   const controller = new AbortController();
+  const discovered = Promise.withResolvers<string>();
   const running = runTask(fixtureData.input, controller.signal, {
-    executable: fixtureData.executable,
+    server: fixtureData.server, executable: fixtureData.executable,
     env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'cancel-late-child' },
+    onSession: discovered.resolve,
   });
-  await delay(1200);
+  await discovered.promise;
   controller.abort();
   const result = await running;
   const state = JSON.parse(readFileSync(fixtureData.state, 'utf8')) as { readonly aborted: readonly string[] };
@@ -245,10 +258,10 @@ test('re-discovers and aborts descendants created during cancellation', { timeou
 });
 
 test('bounds cancellation when OpenCode keeps reporting a session busy', { timeout: 5000 }, async (t) => {
-  const fixtureData = fixture(t, 'abort-stuck');
+  const fixtureData = await fixture(t, 'abort-stuck');
   const controller = new AbortController();
   const running = runTask(fixtureData.input, controller.signal, {
-    executable: fixtureData.executable,
+    server: fixtureData.server, executable: fixtureData.executable,
     env: { FAKE_STATE: fixtureData.state, FAKE_MODE: 'abort-stuck' },
     abortTreeTimeoutMs: 50,
   });
@@ -260,11 +273,11 @@ test('bounds cancellation when OpenCode keeps reporting a session busy', { timeo
 });
 
 test('reports the initial session while the task is still running', { timeout: 5000 }, async (t) => {
-  const data = fixture(t, 'no-message');
+  const data = await fixture(t, 'no-message');
   const controller = new AbortController();
   const discovered = Promise.withResolvers<string>();
   const running = runTask(data.input, controller.signal, {
-    executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'no-message' },
+    server: data.server, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'no-message' },
     onSession: discovered.resolve,
   });
   assert.equal(await discovered.promise, 'root');
@@ -273,21 +286,73 @@ test('reports the initial session while the task is still running', { timeout: 5
 });
 
 test('resumes the exact session with the new prompt and original directory and model', { timeout: 5000 }, async (t) => {
-  const data = fixture(t, 'resume');
+  const data = await fixture(t, 'resume');
   const result = await runTask(data.input, new AbortController().signal, {
-    executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'resume' },
+    server: data.server, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'resume' },
     sessionId: 'root', prompt: 'follow up',
   });
   assert.equal(result.status, 'succeeded', result.error);
   assert.deepEqual(JSON.parse(result.output.trim().split('\n').at(-1) ?? ''), { type: 'text', part: { text: 'follow up' } });
   const serverPid = Number(readFileSync(data.state + '.server-pid', 'utf8'));
-  assert.throws(() => process.kill(serverPid, 0), (error: unknown) => error instanceof Error && 'code' in error && error.code === 'ESRCH');
+  process.kill(serverPid, 0);
+});
+
+test('parallel tasks start one shared server and later tasks reuse its healthy endpoint', { timeout: 5000 }, async (t) => {
+  const data = await fixture(t, 'success');
+  const options = { server: data.server, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'success' } };
+  const signal = new AbortController().signal;
+  const results = await Promise.all([runTask(data.input, signal, options), runTask(data.input, signal, options)]);
+  const reused = await runTask(data.input, signal, options);
+  for (const result of [...results, reused]) assert.equal(result.status, 'succeeded', result.error);
+  assert.equal(readFileSync(data.state + '.launches', 'utf8'), 'serve\n');
+  assert.deepEqual(readFileSync(data.state + '.attachments', 'utf8').trim().split('\n'), Array(3).fill(`http://127.0.0.1:${data.port}`));
+  assert.deepEqual(await (await fetch(`http://127.0.0.1:${data.port}/global/health`)).json(), { healthy: true, version: 'fixture' });
+});
+
+test('cancelling a startup waiter does not cancel shared startup or another task', { timeout: 5000 }, async (t) => {
+  const data = await fixture(t, 'success');
+  const probing = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const controller = new AbortController();
+  let first = true;
+  const options = {
+    server: data.server, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'success' },
+    fetch: async (url: string | URL, init?: RequestInit) => {
+      if (first) { first = false; probing.resolve(); await release.promise; }
+      return fetch(url, init);
+    },
+  };
+  const cancelled = runTask(data.input, controller.signal, options);
+  await probing.promise;
+  const survivor = runTask(data.input, new AbortController().signal, options);
+  controller.abort();
+  assert.match((await cancelled).error, /Execution cancelled/);
+  release.resolve();
+  assert.equal((await survivor).status, 'succeeded');
+  assert.equal(readFileSync(data.state + '.launches', 'utf8'), 'serve\n');
+  assert.deepEqual(JSON.parse(readFileSync(data.state, 'utf8')).aborted, []);
+});
+
+test('cancelling one task aborts only its session tree while a shared-server task succeeds', { timeout: 5000 }, async (t) => {
+  const data = await fixture(t, 'shared-cancel');
+  const controller = new AbortController();
+  const discovered = Promise.withResolvers<string>();
+  const options = { server: data.server, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'shared-cancel' } };
+  const held = runTask(data.input, controller.signal, { ...options, prompt: 'hold', onSession: discovered.resolve });
+  const survivor = runTask(data.input, new AbortController().signal, options);
+  assert.equal(await discovered.promise, 'held-root');
+  controller.abort();
+  assert.match((await held).error, /Execution cancelled/);
+  assert.equal((await survivor).status, 'succeeded');
+  assert.deepEqual(JSON.parse(readFileSync(data.state, 'utf8')).aborted, ['held-root']);
+  assert.equal(readFileSync(data.state + '.launches', 'utf8'), 'serve\n');
+  assert.equal((await fetch(`http://127.0.0.1:${data.port}/global/health`)).status, 200);
 });
 
 test('fails rather than accepting a different session during continuation', { timeout: 5000 }, async (t) => {
-  const data = fixture(t, 'resume-mismatch');
+  const data = await fixture(t, 'resume-mismatch');
   const result = await runTask(data.input, new AbortController().signal, {
-    executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'resume-mismatch' },
+    server: data.server, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'resume-mismatch' },
     sessionId: 'expected-root', prompt: 'follow up',
     onSession: () => assert.fail('must not persist a replacement session'),
     onSessionTitle: () => assert.fail('must not persist a replacement title'),
@@ -297,7 +362,7 @@ test('fails rather than accepting a different session during continuation', { ti
 });
 
 test('recovers the root session after an oversized JSON line', { timeout: 5000 }, async (t) => {
-  const data = fixture(t, 'oversized-line');
+  const data = await fixture(t, 'oversized-line');
   const sessions: string[] = [];
   const chunks: Buffer[] = [];
   const store = new TaskStore(':memory:');
@@ -307,7 +372,7 @@ test('recovers the root session after an oversized JSON line', { timeout: 5000 }
   assert.ok(claimed);
 
   const result = await runTask(data.input, new AbortController().signal, {
-    executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'oversized-line' },
+    server: data.server, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'oversized-line' },
     onSession: (id) => {
       assert.ok(Buffer.concat(chunks).includes(Buffer.from(JSON.stringify({ sessionID: 'root' }) + '\n')));
       sessions.push(id);
@@ -331,10 +396,10 @@ test('recovers the root session after an oversized JSON line', { timeout: 5000 }
 });
 
 test('captures original stdout and stderr bytes in callback arrival order', { timeout: 5000 }, async (t) => {
-  const data = fixture(t, 'raw-output');
+  const data = await fixture(t, 'raw-output');
   const chunks: TaskOutputChunk[] = [];
   const result = await runTask(data.input, new AbortController().signal, {
-    executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'raw-output' },
+    server: data.server, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'raw-output' },
     onOutputChunk: (chunk, stream) => chunks.push({ data: chunk, stream }),
   });
   const raw = Buffer.concat(chunks.map((chunk) => chunk.data));
@@ -349,12 +414,12 @@ test('captures original stdout and stderr bytes in callback arrival order', { ti
 });
 
 test('fails and closes an incomplete archive when the raw sink throws during a data event', { timeout: 5000 }, async (t) => {
-  const data = fixture(t, 'sink-failure');
+  const data = await fixture(t, 'sink-failure');
   const store = new TaskStore(':memory:');
   const scheduler = new TaskScheduler(store, {
     quota: async () => [],
     run: (task, signal, options) => runTask(task, signal, {
-      ...options, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'sink-failure' },
+      ...options, server: data.server, executable: data.executable, env: { FAKE_STATE: data.state, FAKE_MODE: 'sink-failure' },
     }),
   });
   t.after(async () => { await scheduler.stop(); store.close(); });
@@ -369,5 +434,5 @@ test('fails and closes an incomplete archive when the raw sink throws during a d
   assert.ok(store.listRuns(task.id)[0].closedAt);
   assert.deepEqual(JSON.parse(readFileSync(data.state, 'utf8')).aborted, ['child', 'root']);
   const serverPid = Number(readFileSync(data.state + '.server-pid', 'utf8'));
-  assert.throws(() => process.kill(serverPid, 0), { code: 'ESRCH' });
+  process.kill(serverPid, 0);
 });

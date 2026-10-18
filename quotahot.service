@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+KillMode=process
 WorkingDirectory=%h/.quotahot
 ExecStart=%h/.quotahot/bin/quotahot
 Restart=always

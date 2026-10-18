@@ -489,7 +489,9 @@ Qoder 不参与保活调度，但可以参与 API 转发。要让 Qoder 账户�
 
 归档 API：`GET /api/tasks/:id/session` 按任务数据库中的会话 ID 和工作目录导出原生会话快照；`GET /api/tasks/:id/runs` 获取轮次元数据；`GET /api/tasks/:id/runs/:runId/log` 使用字节游标分页读取有界 base64 块；`GET /api/tasks/:id/runs/:runId/download` 下载该轮原始 stdout/stderr 字节；`GET /api/tasks/:id/runs/:runId/messages/download` 下载该轮完整 stdout JSON 事件对象数组；`GET /api/tasks/:id/logs/download` 下载所有轮次的 JSONL 归档。分页参数为 `sequence`、`byteOffset`、`maxBytes`、`maxChunks`；每次最多读取 64 KiB 和 128 个块。所有端点沿用 Web 访问认证和跨站保护，并禁止缓存日志内容。
 
-任务执行时，QuotaHot 为每个任务启动一个仅监听 `127.0.0.1` 的 OpenCode `serve`，再用 `run --attach` 启动根会话。根命令退出不代表任务完成：QuotaHot 会递归读取根会话及所有子会话，只有每个会话都有已完成的 assistant terminal message 且没有 `busy` 或 `retry` 状态时才标记成功。子会话尚未产生消息、嵌套子会话仍在运行、或任一 assistant 报错都会阻止成功或使任务失败。取消和服务关闭会按最深层子会话优先调用 abort，确认会话树停止后才关闭任务级 OpenCode 服务；任务状态一旦取消不会被迟到的进程结果覆盖。
+任务执行时，QuotaHot 连接 `127.0.0.1:4096` 上的共享 OpenCode 服务，再用 `run --attach` 启动根会话；服务不存在时才启动一个脱离 QuotaHot 进程生命周期的 OpenCode `serve`，已经存在时直接复用。任务结束、取消或 QuotaHot 优雅停止、重启时都不会关闭这个共享服务。根命令退出不代表任务完成：QuotaHot 会递归读取根会话及所有子会话，只有每个会话都有已完成的 assistant terminal message 且没有 `busy` 或 `retry` 状态时才标记成功。子会话尚未产生消息、嵌套子会话仍在运行、或任一 assistant 报错都会阻止成功或使任务失败。取消和服务关闭仍会按最深层子会话优先调用 abort，停止对应任务的会话树，但保留共享服务；任务状态一旦取消不会被迟到的进程结果覆盖。
+
+Linux systemd 部署还需要单元中的 `KillMode=process`：默认的 `control-group` 会在停止 QuotaHot 时向同一 cgroup 内的子进程发送信号，即使 OpenCode 已以 detached 方式启动也会受影响。仓库模板和安装脚本生成的单元均包含该设置，只让 systemd 在停止服务时向 QuotaHot 主进程发送信号；它不会把 OpenCode 移出原 cgroup，也可能让其他未自行退出的子进程继续存活。已有安装需先更新实际安装的 `~/.config/systemd/user/quotahot.service`，再执行 `systemctl --user daemon-reload` 和 `systemctl --user restart quotahot.service` 才能应用新单元；只更新程序或仓库文件不会自动生效。安装脚本在用户执行升级安装时会覆盖单元并完成重新加载和重启。
 
 选择**等待额度**时，任务管理器每分钟只检查仍在等待额度的任务，不受保活调度是否启动和每日时段限制。经过 `include` / `exclude` 筛选且未禁用的账户中，只要任意一个账户有新鲜、已确认的可用额度，对应任务就可启动，不必等待其他任务结束。额度未知或查询失败不会触发任务。
 
