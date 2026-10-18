@@ -166,6 +166,45 @@ test('numeric quota options reject missing or invalid values instead of silently
   }
 });
 
+test('long numeric options accept concise aliases without changing command restrictions', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-cli-option-alias-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+
+  for (const args of [
+    ['status', '-c', '0', '--no-check'],
+    ['status', '-c=0', '--no-check'],
+    ['switch', '-c=0', '-i', '0', '--no-check', '--dry-run'],
+    ['switch', '--cache-seconds=0', '--min-interval-seconds=0', '--no-check', '--dry-run'],
+    ['run', 'opencode', '-i=0', '--dry-run'],
+    ['run', '-i', '0', 'opencode', '--dry-run'],
+  ]) {
+    const result = await cli(args, home);
+    assert.equal(result.code, 0, `${args.join(' ')}: ${result.stderr}`);
+  }
+
+  for (const item of [
+    { args: ['status', '-c', 'invalid'], error: '--cache-seconds' },
+    { args: ['status', '-c', '--no-check'], error: '--cache-seconds' },
+    { args: ['switch', '-i=-1', '--no-check'], error: '--min-interval-seconds' },
+    { args: ['run', 'opencode', '-c', '10'] },
+    { args: ['status', '-i', '10'] },
+    { args: ['install', '-c', '10'] },
+  ] as const) {
+    const result = await cli(item.args, home);
+    assert.equal(result.code, 2, item.args.join(' '));
+    if (item.error !== undefined) assert.match(result.stderr, new RegExp(item.error));
+  }
+
+  const statusHelp = (await cli(['status', '--help'], home)).stdout;
+  assert.match(statusHelp, /-c, --cache-seconds/);
+  assert.equal((await cli(['status', '-h'], home)).code, 0);
+  const switchHelp = (await cli(['switch', '--help'], home)).stdout;
+  assert.match(switchHelp, /-c, --cache-seconds/);
+  assert.match(switchHelp, /-i, --min-interval-seconds/);
+  const runHelp = (await cli(['run', '--help'], home)).stdout;
+  assert.match(runHelp, /-i, --min-interval-seconds/);
+});
+
 test('run accepts only meaningful options on either side of opencode', async (context) => {
   // Given: an empty event in a temporary home, so no account can be switched.
   const home = await mkdtemp(join(tmpdir(), 'quotahot-hook-valid-run-'));
@@ -228,6 +267,21 @@ test('recovery-status reports multiple local polling instances without querying 
   assert.equal(text.code, 0, text.stderr);
   assert.match(text.stdout, /session-a/);
   assert.match(text.stdout, /session-b/);
+});
+
+test('recovery is an alias for recovery-status, including help and JSON output', async (context) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-recovery-alias-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+
+  const canonical = await cli(['recovery-status', '--json'], home);
+  const alias = await cli(['recovery', '--json'], home);
+  assert.equal(alias.code, canonical.code);
+  assert.deepEqual(JSON.parse(alias.stdout), JSON.parse(canonical.stdout));
+
+  const help = await cli(['recovery', '--help'], home);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /用法：quotahot-hook recovery-status/);
+  assert.match((await cli(['help', 'recovery'], home)).stdout, /只读取本地 OpenCode 额度恢复快照/);
 });
 
 test('recovery-status separates expired snapshots from active polling instances', async (context) => {

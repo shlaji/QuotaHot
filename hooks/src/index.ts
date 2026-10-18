@@ -31,6 +31,7 @@ const HELP = `QuotaHot Hook - 独立的账户额度检查与切换命令，不�
   quotahot-hook switch [选项]          手动切换账户并同步客户端凭证
   quotahot-hook run opencode [选项]    OpenCode 插件的事件入口
   quotahot-hook recovery-status [--json]  查看本地额度恢复等待状态
+  quotahot-hook recovery [--json]         recovery-status 的简写
   quotahot-hook install [--print]      安装 OpenCode 插件，清理旧触发器
   quotahot-hook uninstall              移除 QuotaHot 的触发集成
   quotahot-hook help [命令]             查看全局或命令帮助
@@ -50,7 +51,7 @@ const COMMAND_HELP: Readonly<Record<string, string>> = {
 查询账户额度与本机客户端在用账户，默认查询 Codex；可能更新本地额度缓存。
   --provider <codex|claude>  选择账户类型（默认 codex）。
   --threshold <percent>     上游未明确给出可用结论时，用于判断额度用尽的已用百分比（0–100，默认 80）。
-  --cache-seconds <seconds> 优先使用指定秒数内的额度缓存（默认 300）。
+  -c, --cache-seconds <seconds> 优先使用指定秒数内的额度缓存（默认 300）。
   --no-check               不请求上游，仅使用本地缓存；未知用量会标为 skipped。
   --json                   输出完整的账户状态和客户端登录映射。
 `,
@@ -61,8 +62,8 @@ const COMMAND_HELP: Readonly<Record<string, string>> = {
   --client <名称列表>       指定逗号分隔的写回目标：codex-cli、opencode、claude-cli、pi-claude、pi-codex；
                             默认按 provider 同步对应客户端（Pi 仅在已有凭证时写入）。覆盖登录有风险。
   --threshold <percent>     上游未明确给出可用结论时，用于判断额度用尽的已用百分比（0–100，默认 80）。
-  --cache-seconds <seconds> 使用额度缓存的秒数（默认 300）。
-  --min-interval-seconds <seconds> 两次切换间的最短秒数（默认 60）。
+  -c, --cache-seconds <seconds> 使用额度缓存的秒数（默认 300）。
+  -i, --min-interval-seconds <seconds> 两次切换间的最短秒数（默认 60）。
   --reason <text>           设置切换原因（默认“手动触发”）。
   --exhausted              将当前账户直接标为额度用尽并冷却；无需额度证据，请谨慎使用。
   --no-check               不请求上游额度，可能按旧缓存或未知用量选错账户。
@@ -73,7 +74,7 @@ const COMMAND_HELP: Readonly<Record<string, string>> = {
 
 从标准输入读取 OpenCode 事件；只对 OpenAI/Codex 明确额度信号尝试切换，运行故障时不阻断插件。
 额度事件固定按 OpenCode 的来源、原因及额度阈值处理，不接受手动切换参数。
-  --min-interval-seconds <seconds> 切换间隔（默认 60）；设为 0 会绕过间隔保护。
+  -i, --min-interval-seconds <seconds> 切换间隔（默认 60）；设为 0 会绕过间隔保护。
   --no-check               不查询上游额度，可能按旧缓存或未知用量选错账户。
   --dry-run                只预览，不写切换状态或客户端凭证。
   --json                   标准输出仍是插件 JSON；诊断结果另写标准错误。
@@ -95,6 +96,14 @@ type Flags = {
   readonly positional: readonly string[];
 };
 
+function canonicalOptionName(name: string): string {
+  switch (name) {
+    case 'c': return 'cache-seconds';
+    case 'i': return 'min-interval-seconds';
+    default: return name;
+  }
+}
+
 function parseFlags(argv: readonly string[]): Flags {
   const values: Record<string, string> = {};
   const bools = new Set<string>();
@@ -106,25 +115,28 @@ function parseFlags(argv: readonly string[]): Flags {
       bools.add('help');
       continue;
     }
-    if (!argument.startsWith('--')) {
+    const prefixLength = argument.startsWith('--') ? 2 : argument.startsWith('-') ? 1 : 0;
+    if (prefixLength === 0) {
       positional.push(argument);
       continue;
     }
-    const separator = argument.indexOf('=');
+    const body = argument.slice(prefixLength);
+    const separator = body.indexOf('=');
     if (separator >= 0) {
-      values[argument.slice(2, separator)] = argument.slice(separator + 1);
+      values[canonicalOptionName(body.slice(0, separator))] = body.slice(separator + 1);
       continue;
     }
-    if (['help', 'json', 'no-check', 'dry-run', 'exhausted', 'print'].includes(argument.slice(2))) {
-      bools.add(argument.slice(2));
+    const name = canonicalOptionName(body);
+    if (['help', 'json', 'no-check', 'dry-run', 'exhausted', 'print'].includes(name)) {
+      bools.add(name);
       continue;
     }
     const next = argv[index + 1];
     if (next !== undefined && !next.startsWith('--')) {
-      values[argument.slice(2)] = next;
+      values[name] = next;
       index += 1;
     } else {
-      bools.add(argument.slice(2));
+      bools.add(name);
     }
   }
   return { values, bools, positional };
@@ -198,7 +210,8 @@ async function install(flags: Flags, remove: boolean): Promise<number> {
 }
 
 export async function run(argv: readonly string[]): Promise<number> {
-  const [command, ...rest] = argv;
+  const [rawCommand, ...rest] = argv;
+  const command = rawCommand === 'recovery' ? 'recovery-status' : rawCommand;
   const flags = parseFlags(rest);
   try {
     const supported: Readonly<Record<string, readonly string[]>> = {
@@ -213,11 +226,12 @@ export async function run(argv: readonly string[]): Promise<number> {
     const allowed = command === undefined ? undefined : supported[command];
     if (allowed) {
       for (const argument of rest) {
-        if (argument.startsWith('--')) {
-          const option = argument.slice(2).split('=', 1)[0];
-          if (!allowed.includes(option)) throw new UsageError(`${command} 不支持选项 --${option}`);
-        } else if (argument === '-h') continue;
-        else if (argument.startsWith('-')) throw new UsageError(`${command} 不支持选项 ${argument}`);
+        if (argument === '-h') continue;
+        if (argument.startsWith('-')) {
+          const prefixLength = argument.startsWith('--') ? 2 : 1;
+          const option = argument.slice(prefixLength).split('=', 1)[0];
+          if (!allowed.includes(canonicalOptionName(option))) throw new UsageError(`${command} 不支持选项 ${argument.split('=', 1)[0]}`);
+        }
       }
       for (const option of ['help', 'json', 'no-check', 'dry-run', 'exhausted', 'print']) {
         if (flags.values[option] !== undefined) throw new UsageError(`${command} 的 --${option} 不接受参数`);
@@ -237,7 +251,7 @@ export async function run(argv: readonly string[]): Promise<number> {
       return 0;
     }
     if (command === 'help' && flags.positional[0] !== undefined) {
-      const help = COMMAND_HELP[flags.positional[0]];
+      const help = COMMAND_HELP[flags.positional[0] === 'recovery' ? 'recovery-status' : flags.positional[0]];
       if (help === undefined) throw new UsageError(`Unknown command: ${flags.positional[0]}`);
       console.log(help);
       return 0;

@@ -53,10 +53,14 @@ quotahot-hook switch --provider claude # 手动切换 Claude 并同步 Claude Co
 quotahot-hook run opencode             # OpenCode 插件使用的事件入口
 quotahot-hook recovery-status         # 查看额度恢复轮询和等待会话
 quotahot-hook recovery-status --json  # 机器可读的本地轮询状态
+quotahot-hook recovery                # recovery-status 的简写
+quotahot-hook recovery --json         # 机器可读的本地轮询状态
 quotahot-hook install --help           # 仅打印帮助，不写文件
 ```
 
 `install` 不接收 `codex`、`pi`、`all` 等客户端目标；`run` 只接受 `opencode`。Codex/Pi 插件安装入口已移除，仅保留旧 QuotaHot 集成的归属识别与清理；凭证写回仍可使用。OpenCode 插件写入 `$XDG_CONFIG_HOME/opencode/plugin/quotahot.js`（若已有 `plugins/` 目录则使用它），文件由 QuotaHot 标记以便安全更新和卸载。
+
+长参数提供单字母简写：`-c` 等价于 `--cache-seconds`（`status`、`switch`）；`-i` 等价于 `--min-interval-seconds`（`switch`、`run`）。两组参数的值仍以秒为单位，默认值不变；旧参数名继续支持。值可写在空格后或用等号连接，例如 `quotahot-hook switch -c=300 -i=60`。
 
 额度错误后的自动切换仅响应 OpenCode 的 OpenAI（Codex）明确配额信号。OpenCode 仍在内部重试时不会重放任务；若请求因额度终止、会话进入空闲，且没有新用户消息或取消，插件会在额度恢复后至多自动续跑一次。等待期间插件监听数据目录中的 `switch-state.json`：其他进程更新账户额度或重置时间后立即重新检查；没有外部更新时，根据已知最早重置时间（包括初次切换返回的 `waitUntil`）加一分钟检查。没有有效重置时间时采用 10 分钟基础间隔的指数退避，上限 80 分钟；已过期的重置时间不会造成密集重试。多个插件实例共用监听和检查，销毁最后一个等待会话时关闭监听。该续跑不是原请求的断点恢复，模型必须核对先前完成的工具动作，避免重复执行。关闭或重载插件会取消进程内等待，不跨重启持久化；Claude 额度错误、上下文超长、网络错误和过载错误不会触发额度恢复流程。
 
