@@ -138,7 +138,7 @@ export interface TaskLogPageResponse extends Omit<TaskLogPage, 'chunks'> {
 
 export type TaskLogExportRecord =
   | { readonly type: 'run'; readonly run: TaskRun }
-  | { readonly type: 'chunk'; readonly runId: string; readonly encoding: 'base64'; readonly chunk: TaskLogBase64Chunk }
+  | { readonly type: 'chunk'; readonly runId: string; readonly encoding: 'utf8'; readonly chunk: Omit<TaskLogChunk, 'data'> & { readonly data: string } }
   | { readonly type: 'complete'; readonly taskId: string; readonly totalRuns: number; readonly totalBytes: number };
 
 export interface TaskModelsResponse {

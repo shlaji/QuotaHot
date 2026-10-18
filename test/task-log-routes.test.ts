@@ -184,11 +184,11 @@ for (const bundle of [false, true]) {
       const records: TaskLogExportRecord[] = downloaded.toString().trim().split('\n').map((line) => JSON.parse(line));
       assert.deepEqual(records[0], { type: 'run', run: snapshot[0] });
       assert.deepEqual(records.at(-1), { type: 'complete', taskId: task.id, totalRuns: 1, totalBytes: input.length });
-      assert.deepEqual(records.filter((record) => record.type === 'chunk').map((record) => record.chunk.stream),
-        ['stdout', 'stderr', 'stdout', 'stdout']);
-      raw = Buffer.concat(records.flatMap((record) => record.type === 'chunk' ? [Buffer.from(record.chunk.data, 'base64')] : []));
+      const chunks = records.filter((record) => record.type === 'chunk');
+      assert.deepEqual(chunks.map((record) => record.chunk.stream), ['stdout', 'stderr', 'stdout', 'stdout']);
+      assert.ok(chunks.every((record) => record.encoding === 'utf8'));
     } else assert.equal(response.headers.get('content-length'), String(input.length));
-    assert.equal(createHash('sha256').update(raw).digest('hex'), createHash('sha256').update(input).digest('hex'));
+    if (!bundle) assert.equal(createHash('sha256').update(raw).digest('hex'), createHash('sha256').update(input).digest('hex'));
   });
 }
 
@@ -214,7 +214,44 @@ test('exports all rounds including empty rounds and excludes rounds created afte
 
   assert.deepEqual(records.filter((record) => record.type === 'run').map((record) => record.run), snapshot);
   assert.deepEqual(records.at(-1), { type: 'complete', taskId: task.id, totalRuns: 2, totalBytes: 6 });
-  assert.equal(Buffer.concat(records.flatMap((record) => record.type === 'chunk' ? [Buffer.from(record.chunk.data, 'base64')] : [])).toString(), 'second');
+  assert.equal(Buffer.concat(records.flatMap((record) => record.type === 'chunk' ? [Buffer.from(record.chunk.data)] : [])).toString(), 'second');
+});
+
+test('exports readable Unicode JSONL chunks across UTF-8 chunk boundaries with stream metadata', async (t) => {
+  const { store, task, runId, base } = await fixture(t);
+  const stdout = Buffer.from('你好🙂');
+  const split = stdout.indexOf(Buffer.from('🙂')) + 2;
+  store.appendOutput(task.id, runId, stdout.subarray(0, split), 'stdout');
+  store.appendOutput(task.id, runId, stdout.subarray(split), 'stdout');
+  store.appendOutput(task.id, runId, Buffer.from('stderr ✓'), 'stderr');
+
+  const response = await fetch(`${base}/logs/download`, { headers });
+  const records: TaskLogExportRecord[] = (await response.text()).trim().split('\n').map((line) => JSON.parse(line));
+  const chunks = records.filter((record) => record.type === 'chunk');
+
+  assert.deepEqual(chunks.map((record) => record.type === 'chunk' && ({
+    runId: record.runId, encoding: record.encoding, sequence: record.chunk.sequence,
+    byteOffset: record.chunk.byteOffset, stream: record.chunk.stream, data: record.chunk.data,
+  })), [
+    { runId, encoding: 'utf8', sequence: 0, byteOffset: 0, stream: 'stdout', data: '你好' },
+    { runId, encoding: 'utf8', sequence: 1, byteOffset: split, stream: 'stdout', data: '🙂' },
+    { runId, encoding: 'utf8', sequence: 2, byteOffset: stdout.length, stream: 'stderr', data: 'stderr ✓' },
+  ]);
+});
+
+test('marks an empty archive incomplete when the task has an established session', async (t) => {
+  const { store, task, runId, base } = await fixture(t);
+  store.setSession(task.id, 'root-session');
+  store.finishRun(task.id, runId, { status: 'succeeded', output: '', error: '', finishedAt: 2000 });
+
+  const [metadata, download] = await Promise.all([
+    fetch(`${base}/runs`, { headers }), fetch(`${base}/runs/${runId}/download`, { headers }),
+  ]);
+
+  assert.equal((await metadata.json() as { runs: Array<{ archiveState: string }> }).runs[0]?.archiveState, 'incomplete');
+  assert.equal(download.headers.get('x-task-archive-state'), 'incomplete');
+  assert.equal(download.headers.get('content-length'), '0');
+  assert.equal((await download.arrayBuffer()).byteLength, 0);
 });
 
 for (const format of ['raw', 'JSONL', 'messages'] as const) for (const failure of ['delete', 'read'] as const) {
