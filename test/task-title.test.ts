@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { TaskStore } from '../src/server/task-store.js';
@@ -36,20 +35,16 @@ test('persists a trimmed root title across reopening without changing the prompt
   assert.equal(reopened.get(task.id)?.description, input.description);
 });
 
-test('migrates a database with current_run_id but no title column idempotently', (t) => {
-  const directory = mkdtempSync(join(tmpdir(), 'task-title-migrate-'));
+test('preserves a pending task with no title across repeated reopening', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'task-title-reopen-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const path = join(directory, 'tasks.db');
   const original = new TaskStore(path);
   const task = original.create(input, 1);
   original.close();
-  const legacy = new DatabaseSync(path);
-  legacy.exec('ALTER TABLE tasks DROP COLUMN session_title');
-  legacy.close();
-
-  const migrated = new TaskStore(path);
-  assert.deepEqual(migrated.get(task.id), task);
-  migrated.close();
+  const firstReopened = new TaskStore(path);
+  assert.deepEqual(firstReopened.get(task.id), task);
+  firstReopened.close();
   const reopened = new TaskStore(path);
   t.after(() => reopened.close());
   assert.deepEqual(reopened.get(task.id), task);

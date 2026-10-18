@@ -3,102 +3,75 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { TaskStore } from '../src/server/task-store.js';
 
 const now = Date.parse('2026-10-16T12:00:00.000Z');
 const input = { description: 'work', model: 'openai/test', directory: tmpdir(), trigger: { type: 'quota' } } as const;
 
-test('migrates legacy excerpts as unknown archives once without modifying existing rows', (t) => {
-  const directory = mkdtempSync(join(tmpdir(), 'task-log-migration-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const path = join(directory, 'tasks.db');
-  const legacy = new DatabaseSync(path);
-  legacy.exec(`CREATE TABLE tasks (
-    id TEXT PRIMARY KEY, description TEXT, model TEXT, directory TEXT, trigger_type TEXT,
-    trigger_at TEXT, status TEXT, created_at TEXT, started_at TEXT, finished_at TEXT,
-    output TEXT DEFAULT '', error TEXT DEFAULT '');`);
-  const excerpt = 'x'.repeat(70000) + '\n[... output omitted ...]\n' + '\0猫';
-  legacy.prepare(`INSERT INTO tasks VALUES ('legacy', 'old task', 'openai/test', '/tmp', 'quota',
-    NULL, 'succeeded', ?, ?, ?, ?, 'original error')`).run(
-    new Date(now).toISOString(), new Date(now + 1).toISOString(), new Date(now + 2).toISOString(), excerpt);
-  legacy.exec(`INSERT INTO tasks (id, description, model, directory, trigger_type, status, created_at)
-    VALUES ('pending', 'waiting', 'openai/test', '/tmp', 'quota', 'pending', '2026-10-16T12:00:00.000Z')`);
-  const original = legacy.prepare('SELECT * FROM tasks ORDER BY id').all();
-  legacy.close();
-  const first = new TaskStore(path);
-  const originalRuns = first.listRuns('legacy');
-  const newPending = first.create(input, now);
-  first.close();
+test('creates a fresh schema with validated task dependencies and foreign keys', (t) => {
+  const store = new TaskStore(':memory:');
+  t.after(() => store.close());
+  const predecessor = store.create(input, now);
 
-  const reopened = new TaskStore(path);
-  t.after(() => reopened.close());
+  const dependent = store.create({ ...input, trigger: { type: 'task', taskId: predecessor.id } }, now + 1);
 
-  assert.deepEqual(reopened.listRuns('legacy'), originalRuns);
-  const [run] = originalRuns;
-  assert.ok(run);
-  assert.equal(run.kind, 'legacy_unknown');
-  assert.equal(run.archiveState, 'legacy_unknown');
-  assert.equal(run.totalBytes, Buffer.byteLength(excerpt));
-  assert.equal(run.ordinal, 1);
-  assert.equal(run.startedAt, now + 1);
-  assert.equal(run.finishedAt, now + 2);
-  const page = reopened.readLogPage('legacy', run.id, { maxBytes: 200000 });
-  assert.ok(page);
-  assert.deepEqual(page.chunks.map((chunk) => chunk.stream), ['legacy', 'legacy']);
-  assert.equal(Buffer.concat(page.chunks.map((chunk) => chunk.data)).toString(), excerpt);
-  assert.deepEqual(reopened.listRuns('pending'), []);
-  assert.deepEqual(reopened.listRuns(newPending.id), []);
-  const db = new DatabaseSync(path);
-  t.after(() => db.close());
-  assert.deepEqual(db.prepare(`SELECT id, description, model, directory, trigger_type, trigger_at,
-    status, created_at, started_at, finished_at, output, error FROM tasks WHERE id IN ('legacy','pending') ORDER BY id`).all(), original);
-  const claimedPending = reopened.claim('pending', now + 3);
-  assert.ok(claimedPending);
-  assert.equal(reopened.listRuns('pending')[0]?.kind, 'initial');
-  assert.equal(reopened.listRuns('pending')[0]?.ordinal, 1);
+  assert.deepEqual(store.get(dependent.id)?.trigger, { type: 'task', taskId: predecessor.id });
+  assert.equal(store.claim(dependent.id, now + 2), null);
+  assert.throws(() => store['db'].prepare("UPDATE tasks SET trigger_type = 'invalid' WHERE id = ?").run(predecessor.id), /CHECK constraint failed/);
+  assert.throws(() => store['db'].prepare('UPDATE tasks SET trigger_task_id = NULL WHERE id = ?').run(dependent.id), /CHECK constraint failed/);
+  assert.throws(() => store['db'].prepare('UPDATE tasks SET trigger_task_id = ? WHERE id = ?').run(dependent.id, dependent.id), /CHECK constraint failed/);
+  assert.throws(() => store['db'].prepare('UPDATE tasks SET trigger_task_id = ? WHERE id = ?').run('missing', dependent.id), /FOREIGN KEY constraint failed/);
+  assert.throws(() => store['db'].prepare('DELETE FROM tasks WHERE id = ?').run(predecessor.id), /FOREIGN KEY constraint failed/);
+  assert.equal(store['db'].prepare('PRAGMA foreign_keys').get()?.foreign_keys, 1);
+  assert.deepEqual(store['db'].prepare('PRAGMA foreign_key_check').all(), []);
 });
 
-test('discards obsolete chunks once while preserving new chunks across reopen', (t) => {
-  const directory = mkdtempSync(join(tmpdir(), 'task-log-reset-'));
+test('retains current-schema tasks, sessions, dependencies, runs and raw archives across reopen', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'task-schema-reopen-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const path = join(directory, 'tasks.db');
   const original = new TaskStore(path);
   const task = original.create(input, now);
-  const running = original.claim(task.id, now + 1);
-  assert.ok(running);
-  original.appendOutput(task.id, running.currentRunId, Buffer.from('obsolete'), 'stdout');
-  const emptyTask = original.create(input, now);
-  original.claim(emptyTask.id, now + 1);
-  original.finish(emptyTask.id, { status: 'succeeded', output: '', error: '' }, now + 2);
-  const emptyRuns = original.listRuns(emptyTask.id);
+  const initial = original.claim(task.id, now + 1);
+  assert.ok(initial);
+  original.setSession(task.id, 'root-session');
+  original.setSessionTitle(initial, 'root-session', 'Root title');
+  original.appendOutput(task.id, initial.currentRunId, Buffer.alloc(70000, 255), 'stdout');
+  original.appendOutput(task.id, initial.currentRunId, Buffer.from([0, 129]), 'stderr');
+  original.finishRun(task.id, initial.currentRunId, { status: 'succeeded', output: 'preview', error: '', finishedAt: now + 2 });
+  const continuation = original.claimContinuation(task.id, now + 3);
+  assert.ok(continuation);
+  original.appendOutput(task.id, continuation.currentRunId, Buffer.from('continued'), 'stderr');
+  original.finishRun(task.id, continuation.currentRunId, { status: 'failed', output: 'latest preview', error: 'retained error', finishedAt: now + 4 });
+  const active = original.create({ ...input, trigger: { type: 'time', at: now + 5 } }, now);
+  const activeRun = original.claim(active.id, now + 5);
+  assert.ok(activeRun);
+  original.appendOutput(active.id, activeRun.currentRunId, Buffer.from('capturing'), 'stdout');
+  const dependent = original.create({ ...input, trigger: { type: 'task', taskId: task.id } }, now + 6);
+  const originalTasks = original.list();
+  const originalRuns = original.listRuns(task.id);
+  const activeRuns = original.listRuns(active.id);
+  const rows = original['db'].prepare('SELECT rowid, * FROM tasks ORDER BY rowid').all();
+  const chunks = original['db'].prepare('SELECT * FROM task_log_chunks ORDER BY run_id, sequence').all();
   original.close();
-  const obsolete = new DatabaseSync(path);
-  obsolete.exec('ALTER TABLE task_log_chunks DROP COLUMN stream');
-  obsolete.close();
 
-  const reset = new TaskStore(path);
-
-  const [run] = reset.listRuns(task.id);
-  assert.ok(run);
-  assert.equal(run.totalBytes, 0);
-  assert.equal(run.totalChunks, 0);
-  assert.equal(run.archiveState, 'incomplete');
-  assert.deepEqual(reset.readLogPage(task.id, run.id)?.chunks, []);
-  assert.deepEqual(reset.listRuns(emptyTask.id), emptyRuns);
-  const bytes = Buffer.from([255, 0, 129]);
-  reset.appendOutput(task.id, run.id, bytes, 'stderr');
-  reset.finishRun(task.id, run.id, { status: 'succeeded', output: '', error: '', finishedAt: now + 3 });
-  reset.close();
   const reopened = new TaskStore(path);
   t.after(() => reopened.close());
-  const page = reopened.readLogPage(task.id, run.id);
-  assert.ok(page);
-  assert.equal(page.totalBytes, bytes.length);
-  assert.equal(page.totalChunks, 1);
-  assert.deepEqual(page.chunks.map((chunk) => chunk.stream), ['stderr']);
-  assert.deepEqual(Buffer.concat(page.chunks.map((chunk) => chunk.data)), bytes);
-  assert.equal(reopened.listRuns(task.id)[0]?.archiveState, 'incomplete');
+
+  assert.deepEqual(reopened.list(), originalTasks);
+  assert.deepEqual(reopened.listRuns(task.id), originalRuns);
+  assert.deepEqual(reopened.listRuns(active.id), activeRuns);
+  assert.deepEqual(reopened.listRuns(dependent.id), []);
+  assert.deepEqual(reopened['db'].prepare('SELECT rowid, * FROM tasks ORDER BY rowid').all(), rows);
+  assert.deepEqual(reopened['db'].prepare('SELECT * FROM task_log_chunks ORDER BY run_id, sequence').all(), chunks);
+  const initialPage = reopened.readLogPage(task.id, initial.currentRunId, { maxBytes: 200000 });
+  assert.ok(initialPage);
+  assert.deepEqual(initialPage.chunks.map((chunk) => chunk.stream), ['stdout', 'stdout', 'stderr']);
+  assert.deepEqual(Buffer.concat(initialPage.chunks.map((chunk) => chunk.data)), Buffer.concat([Buffer.alloc(70000, 255), Buffer.from([0, 129])]));
+  assert.ok(reopened.claim(dependent.id, now + 8));
+  reopened.appendOutput(active.id, activeRun.currentRunId, Buffer.from(' after reopen'), 'stdout');
+  assert.equal(Buffer.concat(reopened.readLogPage(active.id, activeRun.currentRunId)?.chunks.map((chunk) => chunk.data) ?? []).toString(), 'capturing after reopen');
+  assert.deepEqual(reopened['db'].prepare('PRAGMA foreign_key_check').all(), []);
 });
 
 test('closes interrupted archives as incomplete without deleting committed bytes', (t) => {
