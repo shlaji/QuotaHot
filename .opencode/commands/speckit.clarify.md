@@ -1,31 +1,31 @@
 ---
-description: Identify underspecified areas in the current feature spec by asking up to 5 highly targeted clarification questions and encoding answers back into the spec.
+description: 最多提出 5 个针对性强的澄清问题，识别当前功能规格中定义不充分的部分，并将答案写回规格。
 handoffs:
-  - label: Build Technical Plan
+  - label: 制定技术计划
     agent: speckit.plan
-    prompt: Create a plan for the spec. I am building with...
+    prompt: 为该规格制定计划。我使用的技术是...
 ---
 
-## User Input
+## 用户输入
 
 ```text
 $ARGUMENTS
 ```
 
-You **MUST** consider the user input before proceeding (if not empty).
+继续之前，你**必须**考虑用户输入（如果非空）。
 
-## Pre-Execution Checks
+## 执行前检查
 
-**Check for extension hooks (before clarification)**:
-- Check if `.specify/extensions.yml` exists in the project root.
-- If it exists, read it and look for entries under the `hooks.before_clarify` key
-- If the YAML cannot be parsed or is invalid, do not skip silently: tell the user that `.specify/extensions.yml` could not be read (include the parser error) and that no hooks were checked, including any mandatory (`optional: false`) hooks registered there, then continue normally
-- Filter out hooks where `enabled` is explicitly `false`. Treat hooks without an `enabled` field as enabled by default.
-- For each remaining hook, do **not** attempt to interpret or evaluate hook `condition` expressions:
-  - If the hook has no `condition` field, or it is null/empty, treat the hook as executable
-  - If the hook defines a non-empty `condition`, skip the hook and leave condition evaluation to the HookExecutor implementation
-- For each executable hook, output the following based on its `optional` flag:
-  - **Optional hook** (`optional: true`):
+**检查扩展钩子（澄清之前）**：
+- 检查项目根目录中是否存在 `.specify/extensions.yml`。
+- 如果存在，读取该文件并查找 `hooks.before_clarify` 键下的条目。
+- 如果 YAML 无法解析或格式无效，不得静默跳过：告知用户无法读取 `.specify/extensions.yml`（附上解析器错误），且未检查任何钩子，包括其中注册的所有必选钩子（`optional: false`），然后正常继续。
+- 筛除 `enabled` 被显式设为 `false` 的钩子。没有 `enabled` 字段的钩子默认视为已启用。
+- 对于剩余的每个钩子，**不要**尝试解释或求值其 `condition` 表达式：
+  - 如果钩子没有 `condition` 字段，或该字段为 null/空值，将其视为可执行钩子。
+  - 如果钩子定义了非空的 `condition`，跳过该钩子，将条件求值留给 HookExecutor 实现处理。
+- 对于每个可执行钩子，根据其 `optional` 标志输出以下内容：
+  - **可选钩子**（`optional: true`）：
     ```
     ## Extension Hooks
 
@@ -36,7 +36,7 @@ You **MUST** consider the user input before proceeding (if not empty).
     Prompt: {prompt}
     To execute: `/{command}`
     ```
-  - **Mandatory hook** (`optional: false`):
+  - **必选钩子**（`optional: false`）：
     ```
     ## Extension Hooks
 
@@ -44,210 +44,210 @@ You **MUST** consider the user input before proceeding (if not empty).
     Executing: `/{command}`
     EXECUTE_COMMAND: {command}
 
-    Wait for the result of the hook command before proceeding to the Outline.
+    等待钩子命令返回结果后，再继续执行概要部分。
     ```
-    After emitting the block above you MUST actually invoke the hook and wait for it to finish before continuing. Run it the same way you would run the command yourself in this agent/session (the invocation may differ from the literal `{command}` id shown above, e.g. a skills-mode agent runs it as `/skill:speckit-...` or `$speckit-...`). Emitting the block alone does not run the hook.
-- If no hooks are registered or `.specify/extensions.yml` does not exist, skip silently
+    输出上述内容块后，你必须实际调用钩子，等待其完成后才能继续。调用方式应与你在当前代理/会话中自行运行该命令时一致（实际调用形式可能不同于上面显示的 `{command}` 字面标识符，例如技能模式代理使用 `/skill:speckit-...` 或 `$speckit-...`）。仅输出内容块并不会运行钩子。
+- 如果没有注册钩子，或 `.specify/extensions.yml` 不存在，则静默跳过。
 
-## Outline
+## 执行概要
 
-Goal: Detect and reduce ambiguity or missing decision points in the active feature specification and record the clarifications directly in the spec file.
+目标：识别并减少当前功能规格中的歧义或缺失的决策点，将澄清结果直接记录到规格文件中。
 
-Note: This clarification workflow is expected to run (and be completed) BEFORE invoking `/speckit.plan`. If the user explicitly states they are skipping clarification (e.g., exploratory spike), you may proceed, but must warn that downstream rework risk increases.
+注意：此澄清流程应在调用 `/speckit.plan` **之前**执行并完成。如果用户明确表示跳过澄清（例如进行探索性验证），可以继续，但必须提醒用户后续返工风险会增加。
 
-Execution steps:
+执行步骤：
 
-1. Run `python3 .specify/scripts/python/check_prerequisites.py --json --paths-only` from repo root **once** (combined `--json --paths-only` mode / `-Json -PathsOnly`). Parse minimal JSON payload fields:
+1. 在仓库根目录运行 `python3 .specify/scripts/python/check_prerequisites.py --json --paths-only`，**仅运行一次**（组合模式 `--json --paths-only` / `-Json -PathsOnly`）。解析 JSON 载荷中最少必需的字段：
    - `FEATURE_DIR`
    - `FEATURE_SPEC`
-   - (Optionally capture `IMPL_PLAN`, `TASKS` for future chained flows.)
-   - If JSON parsing fails, abort and instruct user to re-run `/speckit.specify` or verify feature branch environment.
-   - For single quotes in args like "I'm Groot", use escape syntax: e.g 'I'\''m Groot' (or double-quote if possible: "I'm Groot").
+   - （可选：同时获取 `IMPL_PLAN`、`TASKS`，供后续串联流程使用。）
+   - 如果 JSON 解析失败，中止并提示用户重新运行 `/speckit.specify`，或检查功能分支环境。
+   - 参数中包含单引号时，例如 "I'm Groot"，使用转义语法：如 'I'\''m Groot'（也可在允许时使用双引号："I'm Groot"）。
 
-2. **IF EXISTS**: Load `.specify/memory/constitution.md` for project principles and governance constraints.
+2. **如果存在**：加载 `.specify/memory/constitution.md`，了解项目原则与治理约束。
 
-3. Load the current spec file. Perform a structured ambiguity & coverage scan using this taxonomy. For each category, mark status: Clear / Partial / Missing. Produce an internal coverage map used for prioritization (do not output raw map unless no questions will be asked).
+3. 加载当前规格文件。按照以下分类进行结构化的歧义与覆盖度扫描。为每一类标记状态：Clear（清晰）/ Partial（部分明确）/ Missing（缺失）。生成内部覆盖图，用于确定优先级（除非无需提问，否则不要输出原始覆盖图）。
 
-   Functional Scope & Behavior:
-   - Core user goals & success criteria
-   - Explicit out-of-scope declarations
-   - User roles / personas differentiation
+   功能范围与行为：
+   - 核心用户目标与成功标准。
+   - 明确声明不在范围内的事项。
+   - 用户角色/用户画像的区分。
 
-   Domain & Data Model:
-   - Entities, attributes, relationships
-   - Identity & uniqueness rules
-   - Lifecycle/state transitions
-   - Data volume / scale assumptions
+   领域与数据模型：
+   - 实体、属性和关系。
+   - 身份标识与唯一性规则。
+   - 生命周期/状态转换。
+   - 数据量/规模假设。
 
-   Interaction & UX Flow:
-   - Critical user journeys / sequences
-   - Error/empty/loading states
-   - Accessibility or localization notes
+   交互与用户体验流程：
+   - 关键用户旅程/操作顺序。
+   - 错误、空白、加载状态。
+   - 无障碍或本地化说明。
 
-   Non-Functional Quality Attributes:
-   - Performance (latency, throughput targets)
-   - Scalability (horizontal/vertical, limits)
-   - Reliability & availability (uptime, recovery expectations)
-   - Observability (logging, metrics, tracing signals)
-   - Security & privacy (authN/Z, data protection, threat assumptions)
-   - Compliance / regulatory constraints (if any)
+   非功能质量属性：
+   - 性能（延迟、吞吐量目标）。
+   - 可扩展性（水平/垂直扩展、限制）。
+   - 可靠性与可用性（正常运行时间、恢复预期）。
+   - 可观测性（日志、指标、追踪信号）。
+   - 安全与隐私（认证/授权、数据保护、威胁假设）。
+   - 合规/监管约束（如有）。
 
-   Integration & External Dependencies:
-   - External services/APIs and failure modes
-   - Data import/export formats
-   - Protocol/versioning assumptions
+   集成与外部依赖：
+   - 外部服务/API 及其故障模式。
+   - 数据导入/导出格式。
+   - 协议/版本管理假设。
 
-   Edge Cases & Failure Handling:
-   - Negative scenarios
-   - Rate limiting / throttling
-   - Conflict resolution (e.g., concurrent edits)
+   边界情况与故障处理：
+   - 异常场景。
+   - 速率限制/节流。
+   - 冲突解决（例如并发编辑）。
 
-   Constraints & Tradeoffs:
-   - Technical constraints (language, storage, hosting)
-   - Explicit tradeoffs or rejected alternatives
+   约束与权衡：
+   - 技术约束（语言、存储、托管）。
+   - 明确的权衡或已否决的替代方案。
 
-   Terminology & Consistency:
-   - Canonical glossary terms
-   - Avoided synonyms / deprecated terms
+   术语与一致性：
+   - 术语表中的规范术语。
+   - 应避免的同义词/已弃用的术语。
 
-   Completion Signals:
-   - Acceptance criteria testability
-   - Measurable Definition of Done style indicators
+   完成判据：
+   - 验收标准的可测试性。
+   - 类似完成定义的可衡量指标。
 
-   Misc / Placeholders:
-   - TODO markers / unresolved decisions
-   - Ambiguous adjectives ("robust", "intuitive") lacking quantification
+   其他/占位内容：
+   - TODO 标记/未解决的决策。
+   - 缺少量化定义的模糊形容词（“稳健”“直观”）。
 
-   For each category with Partial or Missing status, add a candidate question opportunity unless:
-   - Clarification would not materially change implementation or validation strategy
-   - The item is specifically about implementation method, tech-stack comparison, or task breakdown (note internally)
+   对于状态为 Partial 或 Missing 的每一类，增加一个候选澄清问题，以下情况除外：
+   - 澄清结果不会实质性改变实现或验证策略。
+   - 该项专门涉及实现方式、技术栈比较或任务拆分（在内部记录）。
 
-4. Generate (internally) a prioritized queue of candidate clarification questions (maximum 5). Do NOT output them all at once. Apply these constraints:
-    - Maximum of 5 total questions across the whole session.
-    - Each question must be answerable with EITHER:
-       - A short multiple‑choice selection (2–5 distinct, mutually exclusive options), OR
-       - A one-word / short‑phrase answer (explicitly constrain: "Answer in <=5 words").
-    - Only include questions whose answers materially impact architecture, data modeling, task decomposition, test design, UX behavior, operational readiness, or compliance validation.
-    - Ensure category coverage balance: attempt to cover the highest impact unresolved categories first; avoid asking two low-impact questions when a single high-impact area (e.g., security posture) is unresolved.
-    - Exclude questions already answered, trivial stylistic preferences, or plan-level execution details (unless blocking correctness).
-    - Favor clarifications that reduce downstream rework risk or prevent misaligned acceptance tests.
-    - If more than 5 categories remain unresolved, select the top 5 by (Impact * Uncertainty) heuristic.
+4. 在内部生成按优先级排序的候选澄清问题队列（最多 5 个）。**不要**一次性全部输出。遵守以下约束：
+    - 整个会话最多提出 5 个问题。
+    - 每个问题必须能够通过以下任一方式回答：
+       - 从简短选项中选择（2 至 5 个不同且互斥的选项）；或
+       - 使用一个词或简短短语回答（明确限制：“回答不超过 5 个词”）。
+    - 只纳入答案会实质性影响架构、数据建模、任务拆分、测试设计、用户体验行为、上线准备或合规验证的问题。
+    - 平衡各类别的覆盖：优先覆盖影响最大的未解决类别；如果仍有一个高影响领域（例如安全防护要求）未解决，不要反而提出两个低影响问题。
+    - 排除已回答的问题、无关紧要的风格偏好，以及计划层面的执行细节（除非会阻碍正确实现）。
+    - 优先选择能够减少后续返工风险或避免验收测试偏离预期的澄清问题。
+    - 如果仍有超过 5 个类别未解决，按“影响程度 * 不确定性”的启发式方法选取前 5 个。
 
-5. Sequential questioning loop (interactive):
-    - Present EXACTLY ONE question at a time.
-    - **Question writing quality (applies to every question, MC or short-answer):**
-       - Lead with `**Question:**` followed by a full interrogative that ends with `?`. The question text before the `?` must make sense on its own.
-       - NEVER use a topic label, section heading, or requirement id as the question itself. For example, `Acceptance device/runtime matrix (FR-023)` is INVALID — it is a label, not a question.
-       - After the `?`, the only permitted suffix is an optional parenthesized requirement/question id. Exact format: `**Question:** <interrogative>?` or `**Question:** <interrogative>? (FR-023)`. Never put the id before the `?`, and never use the id (alone or with a topic label) as the whole prompt.
-       - Immediately after the question line, add one plain-language "Why it matters" sentence (the stake for acceptance or shipping) before the recommendation/options.
-       - Use everyday wording; introduce jargon only if defined in the same sentence. Self-check: a reader who does not know Spec Kit must be able to answer from the Question line alone. Terse is fine; cryptic labels are not.
-    - For multiple‑choice questions:
-       - **Analyze all options** and determine the **most suitable option** based on:
-          - Best practices for the project type
-          - Common patterns in similar implementations
-          - Risk reduction (security, performance, maintainability)
-          - Alignment with any explicit project goals or constraints visible in the spec
-       - Present your **recommended option prominently** at the top with clear reasoning (1-2 sentences explaining why this is the best choice).
-       - Format as: `**Recommended:** Option [X] - <reasoning>`
-       - Then render all options as a Markdown table:
+5. 依次提问循环（交互式）：
+    - 每次**只能提出一个**问题。
+    - **问题表述质量（适用于每个选择题或简答题）：**
+       - 以 `**Question:**` 开头，后接以 `?` 结尾的完整疑问句。`?` 之前的问题文本必须能独立表达清楚含义。
+       - **绝不能**直接把主题标签、章节标题或需求标识符当作问题。例如，`Acceptance device/runtime matrix (FR-023)` 是无效写法，因为它是标签，不是问题。
+       - `?` 后只允许选择性地附加用括号括起的需求/问题标识符。确切格式为 `**Question:** <interrogative>?` 或 `**Question:** <interrogative>? (FR-023)`。绝不能把标识符放在 `?` 前，也不能仅用标识符（单独或与主题标签组合）充当整个提问。
+       - 紧接问题行，在推荐内容/选项之前，用一句通俗的话说明“为什么这很重要”，即它对验收或发布的影响。
+       - 使用日常用语；只有在同一句中给出定义时才引入术语。自检：即使读者不了解 Spec Kit，也必须仅凭 Question 行就能回答。可以简洁，但不能使用晦涩的标签。
+    - 对于选择题：
+       - **分析所有选项**，依据以下因素确定**最合适的选项**：
+          - 此类项目的最佳实践。
+          - 类似实现中的常见模式。
+          - 风险降低（安全、性能、可维护性）。
+          - 与规格中明确可见的项目目标或约束保持一致。
+       - 在顶部**突出展示推荐选项**，并给出清晰理由（用 1 至 2 句话解释为什么这是最佳选择）。
+       - 格式为：`**Recommended:** Option [X] - <reasoning>`。
+       - 然后以 Markdown 表格呈现所有选项：
 
        | Option | Description |
        |--------|-------------|
        | A | <Option A description> |
        | B | <Option B description> |
-       | C | <Option C description> (add D/E as needed up to 5) |
-       | Short | Provide a different short answer (<=5 words) (Include only if free-form alternative is appropriate) |
+       | C | <Option C description>（按需添加 D/E，最多 5 个选项） |
+       | Short | 提供其他简短答案（不超过 5 个词）（仅在适合允许自由回答时包含此项） |
 
-       - After the table, add: `You can reply with the option letter (e.g., "A"), accept the recommendation by saying "yes" or "recommended", or provide your own short answer.`
-    - For short‑answer style (no meaningful discrete options):
-       - Provide your **suggested answer** based on best practices and context.
-       - Format as: `**Suggested:** <your proposed answer> - <brief reasoning>`
-       - Then output: `Format: Short answer (<=5 words). You can accept the suggestion by saying "yes" or "suggested", or provide your own answer.`
-    - After the user answers:
-       - If the user replies with "yes", "recommended", or "suggested", use your previously stated recommendation/suggestion as the answer.
-       - Otherwise, validate the answer maps to one option or fits the <=5 word constraint.
-       - If ambiguous, ask for a quick disambiguation (count still belongs to same question; do not advance).
-       - Once satisfactory, record it in working memory (do not yet write to disk) and move to the next queued question.
-    - Stop asking further questions when:
-       - All critical ambiguities resolved early (remaining queued items become unnecessary), OR
-       - User signals completion ("done", "good", "no more"), OR
-       - You reach 5 asked questions.
-    - Never reveal future queued questions in advance.
-    - If no valid questions exist at start, immediately report no critical ambiguities.
+       - 在表格后补充：“你可以回复选项字母（例如 "A"），回复 "yes" 或 "recommended" 接受推荐，也可以自行提供简短答案。”
+    - 对于简答题（没有合适的离散选项）：
+       - 根据最佳实践和上下文给出**建议答案**。
+       - 格式为：`**Suggested:** <your proposed answer> - <brief reasoning>`。
+       - 然后输出：“格式：简短回答（不超过 5 个词）。你可以回复 "yes" 或 "suggested" 接受建议，也可以自行作答。”
+    - 用户回答后：
+       - 如果用户回复 "yes"、"recommended" 或 "suggested"，使用你之前给出的推荐/建议作为答案。
+       - 否则，验证该答案是否对应某个选项，或满足不超过 5 个词的限制。
+       - 如果含义不明确，简短追问以消除歧义（仍计为同一个问题，不进入下一个问题）。
+       - 答案符合要求后，将其记录在工作记忆中（暂不写入磁盘），然后转到队列中的下一个问题。
+    - 满足以下任一条件时停止提问：
+       - 所有关键歧义已提前解决，队列中剩余问题已无必要；或
+       - 用户表示结束（"done"、"good"、"no more"）；或
+       - 已提出 5 个问题。
+    - 绝不能提前透露队列中的后续问题。
+    - 如果开始时就没有有效问题，立即报告不存在关键歧义。
 
-6. Integration after EACH accepted answer (incremental update approach):
-    - Maintain in-memory representation of the spec (loaded once at start) plus the raw file contents.
-    - For the first integrated answer in this session:
-       - Ensure a `## Clarifications` section exists (create it just after the highest-level contextual/overview section per the spec template if missing).
-       - Under it, create (if not present) a `### Session YYYY-MM-DD` subheading for today.
-    - Append a bullet line immediately after acceptance: `- Q: <question> → A: <final answer>`.
-    - Then immediately apply the clarification to the most appropriate section(s):
-       - Functional ambiguity → Update or add a bullet in Functional Requirements.
-       - User interaction / actor distinction → Update User Stories or Actors subsection (if present) with clarified role, constraint, or scenario.
-       - Data shape / entities → Update Data Model (add fields, types, relationships) preserving ordering; note added constraints succinctly.
-       - Non-functional constraint → Add/modify measurable criteria in Success Criteria > Measurable Outcomes (convert vague adjective to metric or explicit target).
-       - Edge case / negative flow → Add a new bullet under Edge Cases / Error Handling (or create such subsection if template provides placeholder for it).
-       - Terminology conflict → Normalize term across spec; retain original only if necessary by adding `(formerly referred to as "X")` once.
-    - If the clarification invalidates an earlier ambiguous statement, replace that statement instead of duplicating; leave no obsolete contradictory text.
-    - Save the spec file AFTER each integration to minimize risk of context loss (atomic overwrite).
-    - Preserve formatting: do not reorder unrelated sections; keep heading hierarchy intact.
-    - Keep each inserted clarification minimal and testable (avoid narrative drift).
+6. 在**每次**接受答案后整合结果（增量更新方式）：
+    - 在内存中维护规格的结构化表示（开始时仅加载一次），同时保留原始文件内容。
+    - 整合本次会话的第一个答案时：
+       - 确保存在 `## Clarifications` 部分（若缺失，按照规格模板，在最高层级的背景/概述部分之后创建）。
+       - 在其下创建当天的 `### Session YYYY-MM-DD` 子标题（如果尚不存在）。
+    - 接受答案后立即追加一条列表项：`- Q: <question> → A: <final answer>`。
+    - 然后立即将澄清结果应用到最合适的部分：
+       - 功能歧义 → 在 Functional Requirements 中更新或新增列表项。
+       - 用户交互/参与者区分 → 在 User Stories 或 Actors 子节（如有）中补充已明确的角色、约束或场景。
+       - 数据结构/实体 → 更新 Data Model（添加字段、类型、关系），保留原有顺序；简要注明新增约束。
+       - 非功能约束 → 在 Success Criteria > Measurable Outcomes 中新增/修改可衡量的标准，将模糊形容词转换为指标或明确目标。
+       - 边界情况/异常流程 → 在 Edge Cases / Error Handling 下新增列表项（如果模板为此提供了占位内容，也可创建相应子节）。
+       - 术语冲突 → 在整份规格中统一术语；仅在必要时保留原称，并只添加一次 `(formerly referred to as "X")`。
+    - 如果澄清结果使之前的模糊陈述失效，替换该陈述而不是重复添加；不得留下过时且矛盾的文本。
+    - **每次**整合之后都保存规格文件，以降低上下文丢失风险（原子覆盖）。
+    - 保留格式：不要调整无关部分的顺序；保持标题层级不变。
+    - 每条新增澄清都应尽量简短且可测试，避免偏离主题的叙述。
 
-7. Validation (performed after EACH write plus final pass):
-   - Clarifications session contains exactly one bullet per accepted answer (no duplicates).
-   - Total asked (accepted) questions ≤ 5.
-   - Updated sections contain no lingering vague placeholders the new answer was meant to resolve.
-   - No contradictory earlier statement remains (scan for now-invalid alternative choices removed).
-   - Markdown structure valid; only allowed new headings: `## Clarifications`, `### Session YYYY-MM-DD`.
-   - Terminology consistency: same canonical term used across all updated sections.
+7. 验证（**每次**写入后执行，并在最后再检查一遍）：
+   - Clarifications 会话中，每个已接受的答案恰好对应一个列表项，不得重复。
+   - 已提出并接受答案的问题总数 ≤ 5。
+   - 更新后的部分不再残留本应由新答案解决的模糊占位内容。
+   - 不再保留与澄清结果矛盾的旧陈述，扫描并确认已移除现已失效的备选方案。
+   - Markdown 结构有效；只允许新增以下标题：`## Clarifications`、`### Session YYYY-MM-DD`。
+   - 术语一致：所有更新部分使用相同的规范术语。
 
-8. Write the updated spec back to `FEATURE_SPEC`.
+8. 将更新后的规格写回 `FEATURE_SPEC`。
 
-9. **Re-validate Spec Quality Checklist** (if it exists):
-   - Check if `FEATURE_DIR/checklists/requirements.md` exists.
-   - If it does NOT exist, skip this step silently.
-   - If it exists:
-     1. Read the checklist file.
-     2. Identify all GitHub task-list checkbox lines — lines matching `- [ ]`, `- [x]`, or `- [X]` (case-insensitive, tolerant of leading whitespace for nested items) outside of code fences. Ignore all other content (headings, notes, non-checkbox bullets, metadata).
-     3. For each checkbox line, record its current marker state (checked or unchecked) and item text into a before-snapshot list.
-     4. Re-evaluate each checkbox item against the **updated** spec (the version just saved in step 7).
-     5. For each checkbox item, update only if the checked/unchecked state actually changes:
-        - If the item now passes and was unchecked: change `[ ]` to `[x]`.
-        - If the item now fails and was checked: change `[x]`/`[X]` to `[ ]`.
-        - If the state is unchanged: leave the marker as-is (preserve existing case to avoid cosmetic diffs).
-     6. Save the updated checklist file. **Only toggle the `[ ]`/`[x]` marker portion of checkbox lines whose state changed.** All other file content — headings, metadata, notes, line ordering, whitespace — must remain unchanged to avoid noisy diffs.
-     7. Compare the before-snapshot with the current state to compute three lists for the Completion Report:
-        - **Newly passing**: items that changed from unchecked to checked.
-        - **Regressions**: items that changed from checked to unchecked.
-        - **Still unchecked**: items that remain unchecked.
-     8. Record the before/after pass counts as checked/total checkbox items (e.g., "12/16 → 15/16 items passing").
+9. **重新验证规格质量检查清单**（如果存在）：
+   - 检查 `FEATURE_DIR/checklists/requirements.md` 是否存在。
+   - 如果**不存在**，静默跳过此步骤。
+   - 如果存在：
+     1. 读取检查清单文件。
+     2. 识别代码围栏之外的所有 GitHub 任务列表复选框行，即匹配 `- [ ]`、`- [x]` 或 `- [X]` 的行（不区分大小写，允许嵌套条目前有空白）。忽略所有其他内容（标题、注释、非复选框列表项、元数据）。
+     3. 对每个复选框行，将当前标记状态（已勾选或未勾选）和条目文本记录到变更前的快照列表中。
+     4. 根据**更新后的**规格（步骤 7 中刚保存的版本）重新评估每个复选框条目。
+     5. 对每个复选框条目，仅在勾选/未勾选状态确实发生变化时更新：
+        - 如果该项现在通过且原先未勾选：将 `[ ]` 改为 `[x]`。
+        - 如果该项现在不通过且原先已勾选：将 `[x]`/`[X]` 改为 `[ ]`。
+        - 如果状态不变：保留原标记，保留原有大小写，避免仅有形式变化的差异。
+     6. 保存更新后的检查清单文件。**只切换状态发生变化的复选框行中的 `[ ]`/`[x]` 标记部分。** 所有其他文件内容，包括标题、元数据、注释、行顺序和空白，都必须保持不变，避免无关差异。
+     7. 比较变更前快照与当前状态，计算完成报告所需的三个列表：
+        - **新增通过项**：从未勾选变为已勾选的条目。
+        - **退步项**：从已勾选变为未勾选的条目。
+        - **仍未勾选项**：仍然未勾选的条目。
+     8. 按“已勾选数/复选框总数”记录变更前后的通过数量（例如“通过项数：12/16 → 15/16”）。
 
-Behavior rules:
+行为规则：
 
-- If no meaningful ambiguities found (or all potential questions would be low-impact), respond: "No critical ambiguities detected worth formal clarification." and suggest proceeding.
-- If spec file missing, instruct user to run `/speckit.specify` first (do not create a new spec here).
-- Never exceed 5 total asked questions (clarification retries for a single question do not count as new questions).
-- Avoid speculative tech stack questions unless the absence blocks functional clarity.
-- Respect user early termination signals ("stop", "done", "proceed").
-- If no questions asked due to full coverage, output a compact coverage summary (all categories Clear) then suggest advancing.
-- If quota reached with unresolved high-impact categories remaining, explicitly flag them under Deferred with rationale.
+- 如果未发现有实际意义的歧义（或所有潜在问题的影响都很小），回复：“未发现值得正式澄清的关键歧义。”并建议继续。
+- 如果规格文件缺失，提示用户先运行 `/speckit.specify`，不要在此创建新规格。
+- 提问总数绝不能超过 5 个（对单个问题反复澄清不计为新问题）。
+- 避免提出推测性的技术栈问题，除非缺少相关信息会阻碍功能定义的明确性。
+- 尊重用户提前结束的信号（"stop"、"done"、"proceed"）。
+- 如果由于覆盖完整而未提问，输出简短的覆盖度摘要（所有类别均为 Clear），然后建议进入下一步。
+- 如果已达到提问上限，但仍有高影响类别未解决，在 Deferred 下明确标记并说明理由。
 
-Context for prioritization: $ARGUMENTS
+用于确定优先级的上下文：$ARGUMENTS
 
-## Mandatory Post-Execution Hooks
+## 必须检查的执行后钩子
 
-**You MUST complete this section before reporting completion to the user.**
+**向用户报告完成之前，你必须完成本节。**
 
-Check if `.specify/extensions.yml` exists in the project root.
-- If it does not exist, or no hooks are registered under `hooks.after_clarify`, skip to the Completion Report.
-- If it exists, read it and look for entries under the `hooks.after_clarify` key.
-- If the YAML cannot be parsed or is invalid, do not skip silently: tell the user that `.specify/extensions.yml` could not be read (include the parser error) and that no hooks were checked, including any mandatory (`optional: false`) hooks registered there, then continue to the Completion Report.
-- Filter out hooks where `enabled` is explicitly `false`. Treat hooks without an `enabled` field as enabled by default.
-- For each remaining hook, do **not** attempt to interpret or evaluate hook `condition` expressions:
-  - If the hook has no `condition` field, or it is null/empty, treat the hook as executable
-  - If the hook defines a non-empty `condition`, skip the hook and leave condition evaluation to the HookExecutor implementation
-- For each executable hook, output the following based on its `optional` flag:
-  - **Mandatory hook** (`optional: false`) — **You MUST emit `EXECUTE_COMMAND:` for each mandatory hook**:
+检查项目根目录中是否存在 `.specify/extensions.yml`。
+- 如果不存在，或 `hooks.after_clarify` 下没有注册钩子，跳至完成报告。
+- 如果存在，读取该文件并查找 `hooks.after_clarify` 键下的条目。
+- 如果 YAML 无法解析或格式无效，不得静默跳过：告知用户无法读取 `.specify/extensions.yml`（附上解析器错误），且未检查任何钩子，包括其中注册的所有必选钩子（`optional: false`），然后继续生成完成报告。
+- 筛除 `enabled` 被显式设为 `false` 的钩子。没有 `enabled` 字段的钩子默认视为已启用。
+- 对于剩余的每个钩子，**不要**尝试解释或求值其 `condition` 表达式：
+  - 如果钩子没有 `condition` 字段，或该字段为 null/空值，将其视为可执行钩子。
+  - 如果钩子定义了非空的 `condition`，跳过该钩子，将条件求值留给 HookExecutor 实现处理。
+- 对于每个可执行钩子，根据其 `optional` 标志输出以下内容：
+  - **必选钩子**（`optional: false`），**你必须为每个必选钩子输出 `EXECUTE_COMMAND:`**：
     ```
     ## Extension Hooks
 
@@ -255,8 +255,8 @@ Check if `.specify/extensions.yml` exists in the project root.
     Executing: `/{command}`
     EXECUTE_COMMAND: {command}
     ```
-    After emitting the block above you MUST actually invoke the hook and wait for it to finish before continuing. Run it the same way you would run the command yourself in this agent/session (the invocation may differ from the literal `{command}` id shown above, e.g. a skills-mode agent runs it as `/skill:speckit-...` or `$speckit-...`). Emitting the block alone does not run the hook.
-  - **Optional hook** (`optional: true`):
+    输出上述内容块后，你必须实际调用钩子，等待其完成后才能继续。调用方式应与你在当前代理/会话中自行运行该命令时一致（实际调用形式可能不同于上面显示的 `{command}` 字面标识符，例如技能模式代理使用 `/skill:speckit-...` 或 `$speckit-...`）。仅输出内容块并不会运行钩子。
+  - **可选钩子**（`optional: true`）：
     ```
     ## Extension Hooks
 
@@ -268,20 +268,20 @@ Check if `.specify/extensions.yml` exists in the project root.
     To execute: `/{command}`
     ```
 
-## Completion Report
+## 完成报告
 
-Report completion (after questioning loop ends or early termination):
-- Number of questions asked & answered.
-- Path to updated spec.
-- Sections touched (list names).
-- Spec quality checklist status (if `FEATURE_DIR/checklists/requirements.md` was re-validated): show before/after pass counts (e.g., "Spec Quality Checklist: 12/16 → 15/16 items passing") and list any items that changed state — both newly checked (unchecked → checked) and any regressions (checked → unchecked). If any items remain unchecked, list them as areas needing attention.
-- Coverage summary table listing each taxonomy category with Status: Resolved (was Partial/Missing and addressed), Deferred (exceeds question quota, or remaining item is specifically implementation method, tech-stack comparison, or task breakdown), Clear (already sufficient), Outstanding (still Partial/Missing but low impact).
-- If any Outstanding or Deferred remain, recommend whether to proceed to `/speckit.plan` or run `/speckit.clarify` again later post-plan.
-- Suggested next command.
+报告完成情况（提问循环结束或提前终止后）：
+- 已提出并回答的问题数量。
+- 更新后的规格路径。
+- 涉及的章节（列出名称）。
+- 规格质量检查清单状态（如果重新验证了 `FEATURE_DIR/checklists/requirements.md`）：显示变更前后的通过数量（例如“规格质量检查清单通过项数：12/16 → 15/16”），并列出所有状态发生变化的条目，包括新增勾选项（未勾选 → 已勾选）和退步项（已勾选 → 未勾选）。如果仍有未勾选项，将其列为需要关注的事项。
+- 覆盖度汇总表，列出每个分类类别及其 Status：Resolved（原为 Partial/Missing，现已解决）、Deferred（超出提问上限，或剩余项专门涉及实现方式、技术栈比较或任务拆分）、Clear（原本已足够明确）、Outstanding（仍为 Partial/Missing，但影响较小）。
+- 如果仍有 Outstanding 或 Deferred，建议是继续执行 `/speckit.plan`，还是在计划完成后再次运行 `/speckit.clarify`。
+- 建议执行的下一条命令。
 
-## Done When
+## 完成条件
 
-- [ ] Spec ambiguities identified and clarifications integrated into spec file
-- [ ] Spec quality checklist re-validated against updated spec (if `FEATURE_DIR/checklists/requirements.md` exists)
-- [ ] Extension hooks dispatched or skipped according to the rules in Mandatory Post-Execution Hooks above
-- [ ] Completion reported to user with questions answered, sections touched, checklist status, and coverage summary
+- [ ] 已识别规格歧义，并将澄清结果整合到规格文件中。
+- [ ] 已根据更新后的规格重新验证规格质量检查清单（如果 `FEATURE_DIR/checklists/requirements.md` 存在）。
+- [ ] 已按上方“必须检查的执行后钩子”中的规则派发或跳过扩展钩子。
+- [ ] 已向用户报告完成，包含已回答的问题、涉及的章节、检查清单状态和覆盖度摘要。

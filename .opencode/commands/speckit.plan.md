@@ -1,35 +1,35 @@
 ---
-description: Execute the implementation planning workflow using the plan template to generate design artifacts.
+description: 使用计划模板执行实施规划流程，生成设计产物。
 handoffs:
-  - label: Create Tasks
+  - label: 创建任务
     agent: speckit.tasks
-    prompt: Break the plan into tasks
+    prompt: 将计划拆分为任务
     send: true
-  - label: Create Checklist
+  - label: 创建检查清单
     agent: speckit.checklist
-    prompt: Create a checklist for the following domain...
+    prompt: 为以下领域创建检查清单...
 ---
 
-## User Input
+## 用户输入
 
 ```text
 $ARGUMENTS
 ```
 
-You **MUST** consider the user input before proceeding (if not empty).
+继续之前，你**必须**考虑用户输入（如果非空）。
 
-## Pre-Execution Checks
+## 执行前检查
 
-**Check for extension hooks (before planning)**:
-- Check if `.specify/extensions.yml` exists in the project root.
-- If it exists, read it and look for entries under the `hooks.before_plan` key
-- If the YAML cannot be parsed or is invalid, do not skip silently: tell the user that `.specify/extensions.yml` could not be read (include the parser error) and that no hooks were checked, including any mandatory (`optional: false`) hooks registered there, then continue normally
-- Filter out hooks where `enabled` is explicitly `false`. Treat hooks without an `enabled` field as enabled by default.
-- For each remaining hook, do **not** attempt to interpret or evaluate hook `condition` expressions:
-  - If the hook has no `condition` field, or it is null/empty, treat the hook as executable
-  - If the hook defines a non-empty `condition`, skip the hook and leave condition evaluation to the HookExecutor implementation
-- For each executable hook, output the following based on its `optional` flag:
-  - **Optional hook** (`optional: true`):
+**检查扩展钩子（规划之前）**：
+- 检查项目根目录中是否存在 `.specify/extensions.yml`。
+- 如果存在，读取该文件并查找 `hooks.before_plan` 键下的条目。
+- 如果 YAML 无法解析或格式无效，不得静默跳过：告知用户无法读取 `.specify/extensions.yml`（附上解析器错误），且未检查任何钩子，包括其中注册的所有必选钩子（`optional: false`），然后正常继续。
+- 筛除 `enabled` 被显式设为 `false` 的钩子。没有 `enabled` 字段的钩子默认视为已启用。
+- 对于剩余的每个钩子，**不要**尝试解释或求值其 `condition` 表达式：
+  - 如果钩子没有 `condition` 字段，或该字段为 null/空值，将其视为可执行钩子。
+  - 如果钩子定义了非空的 `condition`，跳过该钩子，将条件求值留给 HookExecutor 实现处理。
+- 对于每个可执行钩子，根据其 `optional` 标志输出以下内容：
+  - **可选钩子**（`optional: true`）：
     ```
     ## Extension Hooks
 
@@ -40,7 +40,7 @@ You **MUST** consider the user input before proceeding (if not empty).
     Prompt: {prompt}
     To execute: `/{command}`
     ```
-  - **Mandatory hook** (`optional: false`):
+  - **必选钩子**（`optional: false`）：
     ```
     ## Extension Hooks
 
@@ -48,39 +48,39 @@ You **MUST** consider the user input before proceeding (if not empty).
     Executing: `/{command}`
     EXECUTE_COMMAND: {command}
 
-    Wait for the result of the hook command before proceeding to the Outline.
+    等待钩子命令返回结果后，再继续执行概要部分。
     ```
-    After emitting the block above you MUST actually invoke the hook and wait for it to finish before continuing. Run it the same way you would run the command yourself in this agent/session (the invocation may differ from the literal `{command}` id shown above, e.g. a skills-mode agent runs it as `/skill:speckit-...` or `$speckit-...`). Emitting the block alone does not run the hook.
-- If no hooks are registered or `.specify/extensions.yml` does not exist, skip silently
+    输出上述内容块后，你必须实际调用钩子，等待其完成后才能继续。调用方式应与你在当前代理/会话中自行运行该命令时一致（实际调用形式可能不同于上面显示的 `{command}` 字面标识符，例如技能模式代理使用 `/skill:speckit-...` 或 `$speckit-...`）。仅输出内容块并不会运行钩子。
+- 如果没有注册钩子，或 `.specify/extensions.yml` 不存在，则静默跳过。
 
-## Outline
+## 执行概要
 
-1. **Setup**: Run `python3 .specify/scripts/python/setup_plan.py --json` from repo root and parse JSON for FEATURE_SPEC, IMPL_PLAN, FEATURE_DIR, BRANCH. For single quotes in args like "I'm Groot", use escape syntax: e.g 'I'\''m Groot' (or double-quote if possible: "I'm Groot").
+1. **初始化**：在仓库根目录运行 `python3 .specify/scripts/python/setup_plan.py --json`，解析 JSON 中的 FEATURE_SPEC、IMPL_PLAN、FEATURE_DIR、BRANCH。参数中包含单引号时，例如 "I'm Groot"，使用转义语法：如 'I'\''m Groot'（也可在允许时使用双引号："I'm Groot"）。
 
-2. **Load context**: Read FEATURE_SPEC and `.specify/memory/constitution.md`. Load IMPL_PLAN template (already copied).
+2. **加载上下文**：读取 FEATURE_SPEC 和 `.specify/memory/constitution.md`。加载 IMPL_PLAN 模板（已复制）。
 
-3. **Execute plan workflow**: Follow the structure in IMPL_PLAN template to:
-   - Fill Technical Context (mark unknowns as "NEEDS CLARIFICATION")
-   - Fill Constitution Check section from constitution
-   - Evaluate gates (ERROR if violations unjustified)
-   - Phase 0: Generate research.md (resolve all NEEDS CLARIFICATION)
-   - Phase 1: Generate data-model.md, contracts/, quickstart.md
-   - Re-evaluate Constitution Check post-design
+3. **执行规划流程**：按照 IMPL_PLAN 模板的结构完成以下工作：
+   - 填写 Technical Context，将未知项标记为 "NEEDS CLARIFICATION"。
+   - 根据项目章程填写 Constitution Check 部分。
+   - 评估门禁条件，若存在无法合理解释的违规项则报错（ERROR）。
+   - 阶段 0：生成 research.md，解决所有 NEEDS CLARIFICATION。
+   - 阶段 1：生成 data-model.md、contracts/、quickstart.md。
+   - 设计完成后重新评估 Constitution Check。
 
-## Mandatory Post-Execution Hooks
+## 必须检查的执行后钩子
 
-**You MUST complete this section before reporting completion to the user.**
+**向用户报告完成之前，你必须完成本节。**
 
-Check if `.specify/extensions.yml` exists in the project root.
-- If it does not exist, or no hooks are registered under `hooks.after_plan`, skip to the Completion Report.
-- If it exists, read it and look for entries under the `hooks.after_plan` key.
-- If the YAML cannot be parsed or is invalid, do not skip silently: tell the user that `.specify/extensions.yml` could not be read (include the parser error) and that no hooks were checked, including any mandatory (`optional: false`) hooks registered there, then continue to the Completion Report.
-- Filter out hooks where `enabled` is explicitly `false`. Treat hooks without an `enabled` field as enabled by default.
-- For each remaining hook, do **not** attempt to interpret or evaluate hook `condition` expressions:
-  - If the hook has no `condition` field, or it is null/empty, treat the hook as executable
-  - If the hook defines a non-empty `condition`, skip the hook and leave condition evaluation to the HookExecutor implementation
-- For each executable hook, output the following based on its `optional` flag:
-  - **Mandatory hook** (`optional: false`) — **You MUST emit `EXECUTE_COMMAND:` for each mandatory hook**:
+检查项目根目录中是否存在 `.specify/extensions.yml`。
+- 如果不存在，或 `hooks.after_plan` 下没有注册钩子，跳至完成报告。
+- 如果存在，读取该文件并查找 `hooks.after_plan` 键下的条目。
+- 如果 YAML 无法解析或格式无效，不得静默跳过：告知用户无法读取 `.specify/extensions.yml`（附上解析器错误），且未检查任何钩子，包括其中注册的所有必选钩子（`optional: false`），然后继续生成完成报告。
+- 筛除 `enabled` 被显式设为 `false` 的钩子。没有 `enabled` 字段的钩子默认视为已启用。
+- 对于剩余的每个钩子，**不要**尝试解释或求值其 `condition` 表达式：
+  - 如果钩子没有 `condition` 字段，或该字段为 null/空值，将其视为可执行钩子。
+  - 如果钩子定义了非空的 `condition`，跳过该钩子，将条件求值留给 HookExecutor 实现处理。
+- 对于每个可执行钩子，根据其 `optional` 标志输出以下内容：
+  - **必选钩子**（`optional: false`），**你必须为每个必选钩子输出 `EXECUTE_COMMAND:`**：
     ```
     ## Extension Hooks
 
@@ -88,8 +88,8 @@ Check if `.specify/extensions.yml` exists in the project root.
     Executing: `/{command}`
     EXECUTE_COMMAND: {command}
     ```
-    After emitting the block above you MUST actually invoke the hook and wait for it to finish before continuing. Run it the same way you would run the command yourself in this agent/session (the invocation may differ from the literal `{command}` id shown above, e.g. a skills-mode agent runs it as `/skill:speckit-...` or `$speckit-...`). Emitting the block alone does not run the hook.
-  - **Optional hook** (`optional: true`):
+    输出上述内容块后，你必须实际调用钩子，等待其完成后才能继续。调用方式应与你在当前代理/会话中自行运行该命令时一致（实际调用形式可能不同于上面显示的 `{command}` 字面标识符，例如技能模式代理使用 `/skill:speckit-...` 或 `$speckit-...`）。仅输出内容块并不会运行钩子。
+  - **可选钩子**（`optional: true`）：
     ```
     ## Extension Hooks
 
@@ -101,20 +101,20 @@ Check if `.specify/extensions.yml` exists in the project root.
     To execute: `/{command}`
     ```
 
-## Completion Report
+## 完成报告
 
-Command ends after Phase 1 design. Report branch, IMPL_PLAN path, and generated artifacts.
+命令在阶段 1 设计完成后结束。报告分支、IMPL_PLAN 路径以及生成的产物。
 
-## Phases
+## 阶段
 
-### Phase 0: Outline & Research
+### 阶段 0：概要与研究
 
-1. **Extract unknowns from Technical Context** above:
-   - For each NEEDS CLARIFICATION → research task
-   - For each dependency → best practices task
-   - For each integration → patterns task
+1. **从上面的 Technical Context 中提取未知项**：
+   - 每个 NEEDS CLARIFICATION → 研究任务。
+   - 每个依赖项 → 最佳实践任务。
+   - 每个集成点 → 模式研究任务。
 
-2. **Generate and dispatch research agents**:
+2. **创建并派发研究代理**：
 
    ```text
    For each unknown in Technical Context:
@@ -123,44 +123,44 @@ Command ends after Phase 1 design. Report branch, IMPL_PLAN path, and generated 
      Task: "Find best practices for {tech} in {domain}"
    ```
 
-3. **Consolidate findings** in `research.md` using format:
+3. 在 `research.md` 中**汇总研究结果**，使用以下格式：
    - Decision: [what was chosen]
    - Rationale: [why chosen]
    - Alternatives considered: [what else evaluated]
 
-**Output**: research.md with all NEEDS CLARIFICATION resolved
+**输出**：research.md，其中所有 NEEDS CLARIFICATION 均已解决。
 
-### Phase 1: Design & Contracts
+### 阶段 1：设计与契约
 
-**Prerequisites:** `research.md` complete
+**前置条件：** `research.md` 已完成。
 
-1. **Extract entities from feature spec** → `data-model.md`:
-   - Entity name, fields, relationships
-   - Validation rules from requirements
-   - State transitions if applicable
+1. **从功能规格中提取实体** → `data-model.md`：
+   - 实体名称、字段和关系。
+   - 需求中规定的校验规则。
+   - 状态转换（如适用）。
 
-2. **Define interface contracts** (if project has external interfaces) → `/contracts/`:
-   - Identify what interfaces the project exposes to users or other systems
-   - Document the contract format appropriate for the project type
-   - Examples: public APIs for libraries, command schemas for CLI tools, endpoints for web services, grammars for parsers, UI contracts for applications
-   - Skip if project is purely internal (build scripts, one-off tools, etc.)
+2. **定义接口契约**（如果项目有外部接口）→ `/contracts/`：
+   - 明确项目向用户或其他系统暴露哪些接口。
+   - 采用适合项目类型的契约格式编写文档。
+   - 示例：库的公共 API、CLI 工具的命令模式、Web 服务的端点、解析器的文法、应用程序的 UI 契约。
+   - 如果项目仅供内部使用（构建脚本、一次性工具等），则跳过。
 
-3. **Create quickstart validation guide** → `quickstart.md`:
-   - Document runnable validation scenarios that prove the feature works end-to-end
-   - Include prerequisites, setup commands, test/run commands, and expected outcomes
-   - Use links or references to contracts and data model details instead of duplicating them
-   - Do not include full implementation code, model/service/controller bodies, migrations, or complete test suites
-   - Keep this artifact as a validation/run guide; implementation details belong in `tasks.md` and the implementation phase
+3. **创建快速入门验证指南** → `quickstart.md`：
+   - 记录可运行的验证场景，证明功能端到端正常工作。
+   - 包含前置条件、初始化命令、测试/运行命令以及预期结果。
+   - 通过链接或引用指向契约和数据模型的详细内容，不要重复编写。
+   - 不得包含完整实现代码、模型/服务/控制器的实现体、迁移代码或完整测试套件。
+   - 此产物应仅作为验证/运行指南；实现细节应放在 `tasks.md` 中，并留到实施阶段处理。
 
-**Output**: data-model.md, /contracts/*, quickstart.md
+**输出**：data-model.md、/contracts/*、quickstart.md。
 
-## Key rules
+## 关键规则
 
-- Use absolute paths for filesystem operations; use project-relative paths for references in documentation
-- ERROR on gate failures or unresolved clarifications
+- 文件系统操作使用绝对路径；文档中的引用使用项目相对路径。
+- 门禁检查失败或仍有未解决的澄清项时，必须报错（ERROR）。
 
-## Done When
+## 完成条件
 
-- [ ] Plan workflow executed and design artifacts generated
-- [ ] Extension hooks dispatched or skipped according to the rules in Mandatory Post-Execution Hooks above
-- [ ] Completion reported to user with branch, plan path, and generated artifacts
+- [ ] 已执行规划流程并生成设计产物。
+- [ ] 已按上方“必须检查的执行后钩子”中的规则派发或跳过扩展钩子。
+- [ ] 已向用户报告完成，包含分支、计划路径和生成的产物。
