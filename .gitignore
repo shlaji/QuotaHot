@@ -46,3 +46,5 @@ release/
 .playwright-mcp
 diagrams
 docs
+
+.specify/scripts/python/__pycache__
