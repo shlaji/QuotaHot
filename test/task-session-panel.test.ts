@@ -79,6 +79,7 @@ test('renders one Markdown source surface with chronological messages and native
   assert.ok(ordered.every((text) => html.includes(text)));
   assert.deepEqual(ordered.map((text) => html.indexOf(text)), ordered.map((text) => html.indexOf(text)).sort((first, second) => first - second));
   assert.equal((html.match(/<pre /g) ?? []).length, 1);
+  assert.match(html, /<button[^>]*>复制会话内容<\/button>/);
   assert.doesNotMatch(html, /内部合成消息|role="listitem"|download|<a /);
 });
 
@@ -118,6 +119,7 @@ test('shows an empty-session state when the export has no messages', () => {
   const html = renderView({ ...ready, transcript: { ...ready.transcript, messages: [] } });
 
   assert.match(html, /role="status">会话暂无消息/);
+  assert.match(html, /<button[^>]*>复制会话内容<\/button>/);
   assert.doesNotMatch(html, /role="listitem"/);
 });
 
@@ -131,7 +133,7 @@ test('shows loading feedback without stale messages when a fetch starts', () => 
   const html = renderView({ status: 'loading' });
 
   assert.match(html, /role="status">正在加载会话内容/);
-  assert.doesNotMatch(html, /<pre|<button/);
+  assert.doesNotMatch(html, /<pre|复制会话内容/);
 });
 
 test('shows a refresh action when the linked session is no longer available', () => {
@@ -139,6 +141,7 @@ test('shows a refresh action when the linked session is no longer available', ()
 
   assert.match(html, /role="status">任务暂无可用的 OpenCode 会话/);
   assert.match(html, /<button[^>]*>刷新会话<\/button>/);
+  assert.doesNotMatch(html, /复制会话内容/);
 });
 
 test('shows a safe local error and retry action when loading fails', () => {
@@ -148,4 +151,5 @@ test('shows a safe local error and retry action when loading fails', () => {
   assert.match(html, /会话加载失败：&lt;unavailable&gt;/);
   assert.match(html, /<button[^>]*>重试<\/button>/);
   assert.doesNotMatch(html, /<pre|<unavailable>/);
+  assert.doesNotMatch(html, /复制会话内容/);
 });

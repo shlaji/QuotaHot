@@ -24,6 +24,12 @@ export function TaskSessionView({ state, onRefresh }: {
   readonly state: TaskSessionLoadState;
   readonly onRefresh: () => void;
 }) {
+  const [copyState, setCopyState] = useState<{
+    readonly snapshot: Extract<TaskSessionLoadState, { status: 'ready' }>;
+    readonly status: 'loading' | 'copied' | 'error';
+    readonly error: string;
+  } | null>(null);
+
   switch (state.status) {
     case 'loading':
       return <p className="task-feedback" role="status">正在加载会话内容…</p>;
@@ -43,14 +49,34 @@ export function TaskSessionView({ state, onRefresh }: {
       );
     case 'ready': {
       const { transcript, fetchedAt, taskStatus } = state;
+      const markdown = formatTaskSessionTranscript(transcript);
+      const currentCopy = copyState?.snapshot === state ? copyState : null;
+      const copying = currentCopy?.status === 'loading';
+      const copyTranscript = async () => {
+        setCopyState({ snapshot: state, status: 'loading', error: '' });
+        try {
+          await navigator.clipboard.writeText(markdown);
+          setCopyState((current) => current?.snapshot === state ? { snapshot: state, status: 'copied', error: '' } : current);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setCopyState((current) => current?.snapshot === state ? { snapshot: state, status: 'error', error: message } : current);
+        }
+      };
       const unsupportedTypes = [...new Set(transcript.messages.flatMap((message) => message.parts
         .filter((part) => part.type === 'unsupported').map((part) => part.originalType)))];
       return (
         <>
-          <div className="task-output-toolbar">
+          <div className="task-output-toolbar" aria-busy={copying}>
             <span className="task-field-note">OpenCode 原生会话</span>
+            <button className="link task-output-copy" type="button" disabled={copying} onClick={() => void copyTranscript()}>
+              {copying ? '正在复制…' : '复制会话内容'}
+            </button>
+            {currentCopy?.status === 'copied' && <span className="task-output-feedback" role="status">已复制会话内容。</span>}
             <button className="link" type="button" onClick={onRefresh}>刷新会话</button>
           </div>
+          {currentCopy?.status === 'error' && (
+            <p className="task-feedback task-feedback-error" role="alert">剪贴板写入失败：{currentCopy.error}。请重试复制。</p>
+          )}
           <p className="task-feedback task-field-note">{SNAPSHOT_LABELS[taskStatus]}</p>
           <p className="task-feedback task-field-note">导出范围：仅根会话（含追加消息），不递归包含子会话；与每轮输出日志独立。</p>
           <p className="task-feedback task-field-note">
@@ -58,7 +84,7 @@ export function TaskSessionView({ state, onRefresh }: {
           </p>
           <p className="task-feedback task-field-note">会话：{transcript.title || transcript.sessionId}</p>
           {transcript.messages.length === 0 && <p className="task-feedback" role="status">会话暂无消息。</p>}
-          <pre tabIndex={0} aria-label="会话 Markdown">{formatTaskSessionTranscript(transcript)}</pre>
+          <pre tabIndex={0} aria-label="会话 Markdown">{markdown}</pre>
           {unsupportedTypes.map((type) => (
             <p className="task-feedback task-field-note" key={type}>暂不支持的内容类型：<code>{type}</code></p>
           ))}
