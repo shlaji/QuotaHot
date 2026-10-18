@@ -1,0 +1,72 @@
+installed:
+  - assess
+  - bug
+settings:
+  auto_execute_hooks: true
+hooks:
+  after_specify:
+    - extension: documentation-commit
+      command: speckit.commit-node specify
+      enabled: true
+      optional: false
+      description: 规格说明成功完成后，本地提交本节点生成的规格文档。
+  after_clarify:
+    - extension: documentation-commit
+      command: speckit.commit-node clarify
+      enabled: true
+      optional: false
+      description: 规格澄清成功完成后，本地提交本节点更新的规格文档。
+  after_plan:
+    - extension: documentation-commit
+      command: speckit.commit-node plan
+      enabled: true
+      optional: false
+      description: 规划成功完成后，本地提交本节点生成的计划与设计文档。
+  after_tasks:
+    - extension: documentation-commit
+      command: speckit.commit-node tasks
+      enabled: true
+      optional: false
+      description: 任务生成成功完成后，本地提交本节点生成的 tasks.md。
+  after_checklist:
+    - extension: documentation-commit
+      command: speckit.commit-node checklist
+      enabled: true
+      optional: false
+      description: 自定义检查清单生成成功后，本地提交本节点生成的清单文档。
+  after_converge:
+    - extension: documentation-commit
+      command: speckit.commit-node converge
+      enabled: true
+      optional: false
+      description: 收敛成功且更新任务后，本地提交本节点新增的任务文档内容。
+  after_constitution:
+    - extension: documentation-commit
+      command: speckit.commit-node constitution
+      enabled: true
+      optional: false
+      description: 项目章程更新成功后，本地提交 constitution.md。
+  after_implement:
+    - extension: documentation-commit
+      command: speckit.commit-node implement
+      enabled: true
+      optional: false
+      description: 实施成功并通过验证后，本地提交本次实施产生的代码、测试与文档。
+  after_bug_assess:
+    - extension: documentation-commit
+      command: speckit.commit-node bug-assess
+      enabled: true
+      optional: false
+      description: 缺陷评估报告成功写出后，本地提交 assessment.md。
+  after_bug_fix:
+    - extension: documentation-commit
+      command: speckit.commit-node bug-fix
+      enabled: true
+      optional: false
+      description: 缺陷修复成功后，本地仅提交 fix.md 报告，不提交代码。
+  after_bug_test:
+    - extension: documentation-commit
+      command: speckit.commit-node bug-test
+      enabled: true
+      optional: false
+      description: 缺陷验证报告成功写出后，本地提交 test.md。

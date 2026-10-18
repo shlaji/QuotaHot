@@ -35,7 +35,6 @@ build/
 .vscode/
 .history
 
-
 .omo
 .serena
 .headroom
@@ -46,3 +45,9 @@ release/
 .playwright-mcp
 diagrams
 docs
+
+### python ###
+/_pycache/
+*.pyc*
+__pycache__/
+.specify/scripts/python/__pycache__
