@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import type { TaskSessionMessage, TaskSessionPart, TaskSummary } from '../../shared/tasks.js';
+import type { TaskSummary } from '../../shared/tasks.js';
+import { formatTaskSessionTranscript } from '../../shared/task-session-transcript.js';
 import { INITIAL_SESSION_STATE, loadTaskSession, type TaskSessionLoader, type TaskSessionLoadState } from '../task-session-loader.js';
 
 interface Props {
@@ -7,8 +8,6 @@ interface Props {
   readonly active: boolean;
 }
 
-const ROLE_LABELS = { user: '用户', assistant: '助手' } as const satisfies Record<TaskSessionMessage['role'], string>;
-const TOOL_STATUS_LABELS = { pending: '等待中', running: '执行中', completed: '已完成', error: '失败' } as const;
 const SNAPSHOT_LABELS = {
   pending: '待执行任务的根会话快照。',
   running: '执行中的会话快照；运行尚未结束，请刷新获取最新内容。',
@@ -19,40 +18,6 @@ const SNAPSHOT_LABELS = {
 
 function assertNever(value: never): never {
   throw new TypeError(`Unexpected session content: ${String(value)}`);
-}
-
-function SessionPart({ part }: { readonly part: TaskSessionPart }) {
-  switch (part.type) {
-    case 'text':
-      return <pre tabIndex={0} aria-label="消息正文">{part.text}</pre>;
-    case 'reasoning':
-      return (
-        <details className="task-output">
-          <summary>推理内容</summary>
-          <pre tabIndex={0} aria-label="推理内容">{part.text}</pre>
-        </details>
-      );
-    case 'tool':
-      return (
-        <details className="task-output">
-          <summary className="task-field-note">工具：{part.tool} · {TOOL_STATUS_LABELS[part.status]}</summary>
-          <p className="task-feedback task-field-note">输入</p>
-          <pre tabIndex={0} aria-label="工具输入">{part.input || '（无）'}</pre>
-          <p className="task-feedback task-field-note">输出</p>
-          <pre tabIndex={0} aria-label="工具输出">{part.output || '（无）'}</pre>
-          {part.error !== '' && (
-            <>
-              <p className="task-feedback task-feedback-error">工具错误</p>
-              <pre tabIndex={0} aria-label="工具错误">{part.error}</pre>
-            </>
-          )}
-        </details>
-      );
-    case 'unsupported':
-      return <p className="task-feedback task-field-note">暂不支持的内容类型：<code>{part.originalType}</code></p>;
-    default:
-      return assertNever(part);
-  }
 }
 
 export function TaskSessionView({ state, onRefresh }: {
@@ -78,6 +43,8 @@ export function TaskSessionView({ state, onRefresh }: {
       );
     case 'ready': {
       const { transcript, fetchedAt, taskStatus } = state;
+      const unsupportedTypes = [...new Set(transcript.messages.flatMap((message) => message.parts
+        .filter((part) => part.type === 'unsupported').map((part) => part.originalType)))];
       return (
         <>
           <div className="task-output-toolbar">
@@ -90,17 +57,11 @@ export function TaskSessionView({ state, onRefresh }: {
             快照读取时间：<time dateTime={new Date(fetchedAt).toISOString()}>{new Date(fetchedAt).toLocaleString('zh-CN')}</time>
           </p>
           <p className="task-feedback task-field-note">会话：{transcript.title || transcript.sessionId}</p>
-          {transcript.messages.length === 0 ? <p className="task-feedback" role="status">会话暂无消息。</p> : (
-            <div className="task-output-controls" role="list" aria-label="会话消息">
-              {transcript.messages.map((message, index) => (
-                <div className="task-output" role="listitem" key={message.id}>
-                  <p className="task-feedback"><strong>第 {index + 1} 条 · {ROLE_LABELS[message.role]}</strong></p>
-                  {message.parts.length === 0 && <p className="task-feedback task-field-note">此消息暂无可显示内容。</p>}
-                  {message.parts.map((part) => <SessionPart key={part.id} part={part} />)}
-                </div>
-              ))}
-            </div>
-          )}
+          {transcript.messages.length === 0 && <p className="task-feedback" role="status">会话暂无消息。</p>}
+          <pre tabIndex={0} aria-label="会话 Markdown">{formatTaskSessionTranscript(transcript)}</pre>
+          {unsupportedTypes.map((type) => (
+            <p className="task-feedback task-field-note" key={type}>暂不支持的内容类型：<code>{type}</code></p>
+          ))}
         </>
       );
     }

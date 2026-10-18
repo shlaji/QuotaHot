@@ -17,6 +17,11 @@ function string(value: unknown): string {
   return value;
 }
 
+function timestamp(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || Math.abs(value) > 8.64e15) return invalid();
+  return value;
+}
+
 function partProjection(value: unknown, owner: { readonly sessionId: string; readonly messageId: string }): TaskSessionPart {
   const part = jsonObject(value);
   if (!part || part.sessionID !== owner.sessionId || part.messageID !== owner.messageId) return invalid();
@@ -24,7 +29,10 @@ function partProjection(value: unknown, owner: { readonly sessionId: string; rea
   const type = string(part.type);
   if (!id || !type) return invalid();
   switch (type) {
-    case 'text':
+    case 'text': {
+      if (part.synthetic !== undefined && typeof part.synthetic !== 'boolean') return invalid();
+      return { id, type, text: string(part.text), ...(part.synthetic === undefined ? {} : { synthetic: part.synthetic }) };
+    }
     case 'reasoning': return { id, type, text: string(part.text) };
     case 'tool': {
       const state = jsonObject(part.state);
@@ -61,20 +69,32 @@ export function parseSessionExport(payload: string, sessionId: string): TaskSess
   }
   const root = jsonObject(raw);
   const info = jsonObject(root?.info);
-  if (!root || !info || info.id !== sessionId || (info.parentID != null && info.parentID !== '')
+  const sessionTime = jsonObject(info?.time);
+  if (!root || !info || !sessionTime || info.id !== sessionId || (info.parentID != null && info.parentID !== '')
     || !Array.isArray(root.messages)) return invalid();
   if (root.messages.length > 2000) throw new SessionExportError('limit_exceeded', 'Session export exceeds 2000 messages');
+  const time = { created: timestamp(sessionTime.created), updated: timestamp(sessionTime.updated) };
   let partCount = 0;
   const messages: TaskSessionMessage[] = root.messages.map((value: unknown) => {
     const message = jsonObject(value);
     const metadata = jsonObject(message?.info);
-    if (!message || !metadata || metadata.sessionID !== sessionId || !Array.isArray(message.parts)) return invalid();
+    const messageTime = jsonObject(metadata?.time);
+    if (!message || !metadata || !messageTime || metadata.sessionID !== sessionId || !Array.isArray(message.parts)) return invalid();
     const id = string(metadata.id);
     const role = metadata.role;
     if (!id || (role !== 'user' && role !== 'assistant')) return invalid();
     partCount += message.parts.length;
     if (partCount > 10000) throw new SessionExportError('limit_exceeded', 'Session export exceeds 10000 parts');
-    return { id, role, parts: message.parts.map((part: unknown) => partProjection(part, { sessionId, messageId: id })) };
+    const common = {
+      id,
+      time: { created: timestamp(messageTime.created),
+        ...(messageTime.completed === undefined ? {} : { completed: timestamp(messageTime.completed) }) },
+      parts: message.parts.map((part: unknown) => partProjection(part, { sessionId, messageId: id })),
+    };
+    switch (role) {
+      case 'user': return { ...common, role };
+      case 'assistant': return { ...common, role, agent: string(metadata.agent), providerID: string(metadata.providerID), modelID: string(metadata.modelID) };
+    }
   });
-  return { sessionId, title: string(info.title), scope: 'root-only', messages };
+  return { sessionId, title: string(info.title), time, scope: 'root-only', messages };
 }

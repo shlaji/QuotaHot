@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { TaskSessionPart, TaskSummary } from '../src/shared/tasks.js';
+import type { TaskSummary } from '../src/shared/tasks.js';
 import { TaskCard } from '../src/web/components/TaskCard.js';
 import { TaskSessionPanel, TaskSessionView } from '../src/web/components/TaskSessionPanel.js';
 import type { TaskSessionLoadState } from '../src/web/task-session-loader.js';
@@ -15,12 +15,15 @@ const task: TaskSummary = {
 const ready: Extract<TaskSessionLoadState, { status: 'ready' }> = {
   status: 'ready', fetchedAt: 1_700_000_000_000, taskStatus: 'succeeded',
   transcript: {
-    sessionId: 'ses_root', title: '<Root session>', scope: 'root-only',
+    sessionId: 'ses_root', title: '<Root session>', time: { created: 1000, updated: 5000 }, scope: 'root-only',
     messages: [
-      { id: 'z-user', role: 'user', parts: [{ id: 'z-text', type: 'text', text: '  用户正文\n<script>literal</script>  ' }] },
-      { id: 'a-assistant', role: 'assistant', parts: [
+      { id: 'z-user', role: 'user', time: { created: 2000 }, parts: [
+        { id: 'z-text', type: 'text', text: '  用户正文\n<script>literal</script>  ' },
+        { id: 'synthetic', type: 'text', text: '内部合成消息', synthetic: true },
+      ] },
+      { id: 'a-assistant', role: 'assistant', time: { created: 3000, completed: 4500 }, agent: 'build', providerID: 'openai', modelID: 'test-model', parts: [
         { id: 'z-reason', type: 'reasoning', text: '<reasoning>private</reasoning>' },
-        { id: 'm-tool', type: 'tool', tool: '<bash>', status: 'error', input: '<input>command</input>', output: '<img src=x>', error: '<error>failure</error>' },
+        { id: 'm-tool', type: 'tool', tool: '<bash>', status: 'error', input: '{\n  "command": "<input>"\n}', output: '', error: '<error>failure</error>' },
         { id: 'a-text', type: 'text', text: '助手正文' },
         { id: 'unsupported', type: 'unsupported', originalType: '<file>' },
       ] },
@@ -69,42 +72,36 @@ for (const sessionId of [null, '', '   ']) {
   });
 }
 
-test('preserves message and part order when IDs are not sorted', () => {
+test('renders one Markdown source surface with chronological messages and native part order', () => {
   const html = renderView(ready);
 
-  const ordered = ['第 1 条 · 用户', '用户正文', '第 2 条 · 助手', '推理内容', '工具：', '助手正文', '暂不支持的内容类型'];
+  const ordered = ['# &lt;Root session&gt;', '**Session ID:** ses_root', '## User', '用户正文', '## Assistant (Build · test-model · 1.5s)', '_Thinking:_', '**Tool:', '**Input:**', '**Error:**', '助手正文', '暂不支持的内容类型'];
   assert.ok(ordered.every((text) => html.includes(text)));
   assert.deepEqual(ordered.map((text) => html.indexOf(text)), ordered.map((text) => html.indexOf(text)).sort((first, second) => first - second));
-  assert.equal((html.match(/role="listitem"/g) ?? []).length, 2);
+  assert.equal((html.match(/<pre /g) ?? []).length, 1);
+  assert.doesNotMatch(html, /内部合成消息|role="listitem"|download|<a /);
 });
 
 test('escapes all transcript strings when text resembles HTML', () => {
   const html = renderView(ready);
 
-  assert.match(html, /<pre tabindex="0" aria-label="消息正文">  用户正文\n&lt;script&gt;literal&lt;\/script&gt;  <\/pre>/);
-  for (const escaped of ['&lt;reasoning&gt;', '&lt;bash&gt;', '&lt;input&gt;', '&lt;img src=x&gt;', '&lt;error&gt;', '&lt;file&gt;', '&lt;Root session&gt;']) {
+  assert.match(html, /<pre tabindex="0" aria-label="会话 Markdown"># /);
+  assert.ok(html.includes('  用户正文\n&lt;script&gt;literal&lt;/script&gt;  \n\n'));
+  for (const escaped of ['&lt;reasoning&gt;', '&lt;bash&gt;', '&lt;input&gt;', '&lt;error&gt;', '&lt;file&gt;', '&lt;Root session&gt;']) {
     assert.ok(html.includes(escaped));
   }
   assert.doesNotMatch(html, /<script|<img|<reasoning|<input|<error|<file/);
 });
 
-test('keeps reasoning and tool input, output, and errors in closed details when ready', () => {
+test('includes default reasoning, tool details and metadata while keeping unsupported notices outside Markdown', () => {
   const html = renderView(ready);
 
-  assert.match(html, /<details class="task-output"><summary>推理内容<\/summary><pre[^>]*>[^]*?<\/pre><\/details>/);
-  assert.match(html, /<details class="task-output"><summary[^>]*>工具：&lt;bash&gt; · 失败<\/summary>[^]*?aria-label="工具输入"[^]*?aria-label="工具输出"[^]*?aria-label="工具错误"[^]*?<\/details>/);
-  assert.doesNotMatch(html, /<details[^>]* open/);
-  assert.match(html, /暂不支持的内容类型：<code>&lt;file&gt;<\/code>/);
+  assert.ok(html.includes('## Assistant (Build · test-model · 1.5s)\n\n_Thinking:_\n\n&lt;reasoning&gt;private&lt;/reasoning&gt;\n\n'));
+  assert.ok(html.includes('**Input:**\n```json\n{\n  &quot;command&quot;: &quot;&lt;input&gt;&quot;\n}\n```\n'));
+  assert.ok(html.includes('**Error:**\n```\n&lt;error&gt;failure&lt;/error&gt;\n```\n'));
+  assert.match(html, /<\/pre><p[^>]*>暂不支持的内容类型：<code>&lt;file&gt;<\/code>/);
+  assert.doesNotMatch(html, /<details|<h[12]/);
 });
-
-for (const [status, label] of [['pending', '等待中'], ['running', '执行中'], ['completed', '已完成'], ['error', '失败']] as const) {
-  test(`shows tool status ${label} when the export reports ${status}`, () => {
-    const part: TaskSessionPart = { id: 'tool', type: 'tool', tool: 'bash', status, input: '', output: '', error: '' };
-    const html = renderView({ ...ready, transcript: { ...ready.transcript, messages: [{ id: 'message', role: 'assistant', parts: [part] }] } });
-
-    assert.ok(html.includes(`>工具：bash · ${label}</summary>`));
-  });
-}
 
 for (const [taskStatus, label] of [['running', '执行中的会话快照'], ['succeeded', '已完成任务的根会话记录'], ['failed', '失败任务的根会话记录'], ['cancelled', '已取消任务的根会话记录']] as const) {
   test(`labels the root-only snapshot for a ${taskStatus} task with its read time`, () => {
@@ -124,10 +121,10 @@ test('shows an empty-session state when the export has no messages', () => {
   assert.doesNotMatch(html, /role="listitem"/);
 });
 
-test('represents empty messages when the export has no supported parts', () => {
-  const html = renderView({ ...ready, transcript: { ...ready.transcript, messages: [{ id: 'empty', role: 'assistant', parts: [] }] } });
+test('represents empty messages with a Markdown heading and separator', () => {
+  const html = renderView({ ...ready, transcript: { ...ready.transcript, messages: [{ id: 'empty', role: 'user', time: { created: 2000 }, parts: [] }] } });
 
-  assert.match(html, /此消息暂无可显示内容/);
+  assert.ok(html.includes('## User\n\n---\n\n</pre>'));
 });
 
 test('shows loading feedback without stale messages when a fetch starts', () => {

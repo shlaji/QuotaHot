@@ -7,7 +7,7 @@ import { loadTaskSession, type TaskSessionLoadState, type TaskSessionSelection }
 const task = { id: 'task-1', sessionId: 'ses_root', status: 'running' } as const satisfies TaskSessionSelection;
 
 function sessionResponse(title = 'Root session'): Extract<TaskSessionResponse, { status: 'ready' }> {
-  return { taskId: task.id, status: 'ready', transcript: { sessionId: task.sessionId, title, scope: 'root-only', messages: [] } };
+  return { taskId: task.id, status: 'ready', transcript: { sessionId: task.sessionId, title, time: { created: 1000, updated: 2000 }, scope: 'root-only', messages: [] } };
 }
 
 function pendingResponse() {

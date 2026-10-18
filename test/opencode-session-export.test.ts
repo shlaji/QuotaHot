@@ -8,12 +8,13 @@ import { parseSessionExport, SessionExportError } from '../src/server/opencode-e
 import type { TaskSessionTranscript } from '../src/shared/tasks.js';
 
 export const nativeExport = {
-  info: { id: 'ses_root', title: 'Native session', directory: '/ignored', version: '1.19.3' },
+  info: { id: 'ses_root', title: 'Native session', time: { created: 1000, updated: 4000 }, directory: '/ignored', version: '1.19.3' },
   messages: [
-    { info: { id: 'msg_user', sessionID: 'ses_root', role: 'user' }, parts: [
-      { id: 'prt_user', sessionID: 'ses_root', messageID: 'msg_user', type: 'text', text: 'hello\n' },
+    { info: { id: 'msg_user', sessionID: 'ses_root', role: 'user', time: { created: 2000 } }, parts: [
+      { id: 'prt_user', sessionID: 'ses_root', messageID: 'msg_user', type: 'text', text: 'hello\n', synthetic: false },
+      { id: 'prt_synthetic', sessionID: 'ses_root', messageID: 'msg_user', type: 'text', text: 'internal', synthetic: true },
     ] },
-    { info: { id: 'msg_assistant', sessionID: 'ses_root', role: 'assistant' }, parts: [
+    { info: { id: 'msg_assistant', sessionID: 'ses_root', role: 'assistant', time: { created: 3000, completed: 4000 }, agent: 'build', providerID: 'openai', modelID: 'test' }, parts: [
       { id: 'prt_reason', sessionID: 'ses_root', messageID: 'msg_assistant', type: 'reasoning', text: 'Thinking' },
       { id: 'prt_tool', sessionID: 'ses_root', messageID: 'msg_assistant', type: 'tool', tool: 'task',
         state: { status: 'completed', input: { prompt: 'child work' }, output: 'child reference only', metadata: { sessionId: 'ses_child' } } },
@@ -24,9 +25,12 @@ export const nativeExport = {
 };
 
 const projected: TaskSessionTranscript = {
-  sessionId: 'ses_root', title: 'Native session', scope: 'root-only', messages: [
-    { id: 'msg_user', role: 'user', parts: [{ id: 'prt_user', type: 'text', text: 'hello\n' }] },
-    { id: 'msg_assistant', role: 'assistant', parts: [
+  sessionId: 'ses_root', title: 'Native session', time: { created: 1000, updated: 4000 }, scope: 'root-only', messages: [
+    { id: 'msg_user', role: 'user', time: { created: 2000 }, parts: [
+      { id: 'prt_user', type: 'text', text: 'hello\n', synthetic: false },
+      { id: 'prt_synthetic', type: 'text', text: 'internal', synthetic: true },
+    ] },
+    { id: 'msg_assistant', role: 'assistant', time: { created: 3000, completed: 4000 }, agent: 'build', providerID: 'openai', modelID: 'test', parts: [
       { id: 'prt_reason', type: 'reasoning', text: 'Thinking' },
       { id: 'prt_tool', type: 'tool', tool: 'task', status: 'completed', input: '{"prompt":"child work"}', output: 'child reference only', error: '' },
       { id: 'prt_text', type: 'text', text: 'answer\n' },
@@ -85,10 +89,10 @@ for (const payload of [
   {}, { info: nativeExport.info, messages: {} },
   { ...nativeExport, info: { ...nativeExport.info, id: 'ses_other' } },
   { ...nativeExport, info: { ...nativeExport.info, parentID: 'ses_parent' } },
-  { ...nativeExport, messages: [{ info: { id: 'msg', sessionID: 'ses_child', role: 'user' }, parts: [] }] },
-  { ...nativeExport, messages: [{ info: { id: 'msg', sessionID: 'ses_root', role: 'system' }, parts: [] }] },
-  { ...nativeExport, messages: [{ info: { id: 'msg', sessionID: 'ses_root', role: 'user' }, parts: [{ id: 'prt', sessionID: 'ses_root', messageID: 'wrong', type: 'text', text: 'x' }] }] },
-  { ...nativeExport, messages: [{ info: { id: 'msg', sessionID: 'ses_root', role: 'user' }, parts: [{ id: 'prt', sessionID: 'ses_root', messageID: 'msg', type: 'text', text: 3 }] }] },
+  { ...nativeExport, messages: [{ info: { id: 'msg', sessionID: 'ses_child', role: 'user', time: { created: 2000 } }, parts: [] }] },
+  { ...nativeExport, messages: [{ info: { id: 'msg', sessionID: 'ses_root', role: 'system', time: { created: 2000 } }, parts: [] }] },
+  { ...nativeExport, messages: [{ info: { id: 'msg', sessionID: 'ses_root', role: 'user', time: { created: 2000 } }, parts: [{ id: 'prt', sessionID: 'ses_root', messageID: 'wrong', type: 'text', text: 'x' }] }] },
+  { ...nativeExport, messages: [{ info: { id: 'msg', sessionID: 'ses_root', role: 'user', time: { created: 2000 } }, parts: [{ id: 'prt', sessionID: 'ses_root', messageID: 'msg', type: 'text', text: 3 }] }] },
 ]) {
   test('rejects malformed or cross-session native structure', () => {
     const serialized = JSON.stringify(payload);
@@ -98,6 +102,42 @@ for (const payload of [
     assert.throws(action, { code: 'invalid_output' });
   });
 }
+
+for (const field of ['created', 'updated'] as const) {
+  for (const value of [undefined, null, '1000', 1e100]) {
+    test(`rejects invalid session ${field} timestamp ${String(value)}`, () => {
+      const payload = { ...nativeExport, info: { ...nativeExport.info, time: { ...nativeExport.info.time, [field]: value } } };
+
+      const action = () => parseSessionExport(JSON.stringify(payload), 'ses_root');
+
+      assert.throws(action, { code: 'invalid_output' });
+    });
+  }
+}
+
+for (const metadata of [
+  { time: undefined }, { time: { created: '3000' } }, { time: { created: 3000, completed: null } },
+  { time: { created: 3000, completed: '4000' } }, { time: { created: 1e100 } },
+  { agent: undefined }, { agent: 123 }, { providerID: null }, { modelID: {} },
+]) {
+  test(`rejects malformed message metadata ${JSON.stringify(metadata)}`, () => {
+    const message = nativeExport.messages[1];
+    const payload = { ...nativeExport, messages: [{ ...message, info: { ...message.info, ...metadata } }] };
+
+    const action = () => parseSessionExport(JSON.stringify(payload), 'ses_root');
+
+    assert.throws(action, { code: 'invalid_output' });
+  });
+}
+
+test('rejects a non-boolean synthetic flag instead of hiding native text', () => {
+  const message = nativeExport.messages[0];
+  const payload = { ...nativeExport, messages: [{ ...message, parts: [{ ...message.parts[0], synthetic: 'false' }] }] };
+
+  const action = () => parseSessionExport(JSON.stringify(payload), 'ses_root');
+
+  assert.throws(action, { code: 'invalid_output' });
+});
 
 test('rejects message count overflow rather than truncating the transcript', () => {
   const serialized = JSON.stringify({ ...nativeExport, messages: Array.from({ length: 2001 }, () => nativeExport.messages[0]) });
@@ -109,7 +149,7 @@ test('rejects message count overflow rather than truncating the transcript', () 
 
 test('reports a typed limit when native tool input is too deeply nested to project', () => {
   const input = '{"nested":'.repeat(20000) + '{}' + '}'.repeat(20000);
-  const serialized = `{"info":{"id":"ses_root","title":"Deep"},"messages":[{"info":{"id":"msg","sessionID":"ses_root","role":"assistant"},"parts":[{"id":"prt","sessionID":"ses_root","messageID":"msg","type":"tool","tool":"test","state":{"status":"running","input":${input}}}]}]}`;
+  const serialized = `{"info":{"id":"ses_root","title":"Deep","time":{"created":1000,"updated":2000}},"messages":[{"info":{"id":"msg","sessionID":"ses_root","role":"assistant","time":{"created":1000},"agent":"build","providerID":"openai","modelID":"test"},"parts":[{"id":"prt","sessionID":"ses_root","messageID":"msg","type":"tool","tool":"test","state":{"status":"running","input":${input}}}]}]}`;
 
   const action = () => parseSessionExport(serialized, 'ses_root');
 

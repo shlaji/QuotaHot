@@ -14,7 +14,7 @@ import type { SessionExporter, SessionExportSource } from '../src/server/opencod
 import { exportSession } from '../src/server/opencode-session-export.js';
 import type { TaskSessionResponse, TaskSessionTranscript } from '../src/shared/tasks.js';
 
-const transcript: TaskSessionTranscript = { sessionId: 'ses_stored', title: 'Saved', scope: 'root-only', messages: [] };
+const transcript: TaskSessionTranscript = { sessionId: 'ses_stored', title: 'Saved', time: { created: 1000, updated: 2000 }, scope: 'root-only', messages: [] };
 
 async function fixture(context: TestContext, exporter: SessionExporter) {
   const store = new TaskStore(':memory:');
@@ -101,7 +101,10 @@ for (const mode of ['valid', 'invalid']) {
     chmodSync(executable, 0o755);
     const { store, task, base } = await fixture(context, (source) => exportSession(source, {
       executable, env: { EXPORT_DIRECTORY: source.directory, EXPORT_MODE: mode,
-        EXPORT_PAYLOAD: JSON.stringify({ info: { id: 'ses_root', title: 'Live export' }, messages: [] }) },
+        EXPORT_PAYLOAD: JSON.stringify({ info: { id: 'ses_root', title: 'Live export', time: { created: 1000, updated: 2000 } }, messages: [
+          { info: { id: 'msg', sessionID: 'ses_root', role: 'assistant', time: { created: 1500, completed: 2000 }, agent: 'build', providerID: 'openai', modelID: 'test' },
+            parts: [{ id: 'prt', sessionID: 'ses_root', messageID: 'msg', type: 'text', text: 'internal', synthetic: true }] },
+        ] }) },
     }));
     store.claim(task.id, 1001);
     store.setSession(task.id, 'ses_root');
@@ -111,7 +114,12 @@ for (const mode of ['valid', 'invalid']) {
     assert.equal(response.status, mode === 'valid' ? 200 : 502);
     const body = await response.json();
     assert.equal(body.status, mode === 'valid' ? 'ready' : 'error');
-    if (mode === 'valid') assert.deepEqual(body.transcript, { sessionId: 'ses_root', title: 'Live export', scope: 'root-only', messages: [] });
+    if (mode === 'valid') assert.deepEqual(body.transcript, {
+      sessionId: 'ses_root', title: 'Live export', time: { created: 1000, updated: 2000 }, scope: 'root-only', messages: [
+        { id: 'msg', role: 'assistant', time: { created: 1500, completed: 2000 }, agent: 'build', providerID: 'openai', modelID: 'test',
+          parts: [{ id: 'prt', type: 'text', text: 'internal', synthetic: true }] },
+      ],
+    });
     else assert.equal(body.code, 'invalid_output');
   });
 }
