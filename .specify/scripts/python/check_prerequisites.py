@@ -127,6 +127,10 @@ def _dir_has_entries(path: Path) -> bool:
 
 def _available_docs(paths: FeaturePaths, include_tasks: bool) -> list[str]:
     docs: list[str] = []
+    if paths.feature_spec.is_file():
+        docs.append("spec.md")
+    if paths.impl_plan.is_file():
+        docs.append("plan.md")
     if paths.research.is_file():
         docs.append("research.md")
     if paths.data_model.is_file():
@@ -194,6 +198,8 @@ def _check_dir(path: Path, description: str) -> None:
 def _print_text_results(paths: FeaturePaths, include_tasks: bool) -> None:
     print(f"FEATURE_DIR:{paths.feature_dir}")
     print("AVAILABLE_DOCS:")
+    _check_file(paths.feature_spec, "spec.md")
+    _check_file(paths.impl_plan, "plan.md")
     _check_file(paths.research, "research.md")
     _check_file(paths.data_model, "data-model.md")
     _check_dir(paths.contracts_dir, "contracts/")

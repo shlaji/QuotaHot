@@ -170,6 +170,8 @@ fi
 
 # Build list of available documents
 docs=()
+[[ -f "$FEATURE_SPEC" ]] && docs+=("spec.md")
+[[ -f "$IMPL_PLAN" ]] && docs+=("plan.md")
 
 # Always check these optional docs
 [[ -f "$RESEARCH" ]] && docs+=("research.md")
@@ -238,6 +240,8 @@ else
     echo "AVAILABLE_DOCS:"
 
     # Show status of each potential document
+    check_file "$FEATURE_SPEC" "spec.md"
+    check_file "$IMPL_PLAN" "plan.md"
     check_file "$RESEARCH" "research.md"
     check_file "$DATA_MODEL" "data-model.md"
     check_dir "$CONTRACTS_DIR" "contracts/"
