@@ -1,10 +1,11 @@
 <!--
 Sync Impact Report
-Version change: 1.2.0 -> 2.0.0 (bounded exemption from mandatory unit tests)
-Modified principles: III. 契约与行为可验证 (simple, low-risk methods may use documented AI static analysis)
-Added sections: none; Development and Review Process aligns the submission gate with Principle III
+Version change: 2.0.0 -> 2.1.0 (add Chinese-language documentation and code-comment requirement)
+Modified principles: none
+Added principles: VI. 中文文档与代码注释
+Added sections: none
 Removed sections: none
-Follow-up TODO: confirm the original ratification date
+Follow-up TODO: confirm the original ratification date (TODO(RATIFICATION_DATE))
 -->
 # QuotaHot Constitution
 
@@ -24,6 +25,9 @@ Follow-up TODO: confirm the original ratification date
 
 ### V. 控制复杂度并保持可维护性
 实现 MUST 优先复用现有架构和依赖，新增抽象、配置项或兼容分支 MUST 有明确需求依据。模块、类型和测试 MUST 围绕稳定职责组织；当文件或模块承担多种独立职责时，MUST 在相关变更范围内拆分。不得为未证实的场景引入迁移层、回退路径或额外机制。
+
+### VI. 中文文档与代码注释
+项目新增或修改的文档和代码注释 MUST 使用中文编写。命令、路径、代码标识符、API 名称、品牌名称及原始错误或日志引文 MUST 保持原文；代码注释应说明中文语境下需要表达的设计意图或约束，不得翻译或改写这些标识符与原始文本。此要求统一项目的维护语言，同时保留技术名称和可检索原文。
 
 ## 技术约束
 
@@ -46,4 +50,4 @@ Follow-up TODO: confirm the original ratification date
 
 版本遵循语义化版本规则：MAJOR 表示不兼容地移除或重新定义原则；MINOR 表示新增原则或实质扩展治理要求；PATCH 表示不改变治理含义的澄清和文字修订。
 
-**Version**: 2.0.0 | **Ratified**: TODO(RATIFICATION_DATE): 原始批准日期未知，需维护者确认 | **Last Amended**: 2026-10-18
+**Version**: 2.1.0 | **Ratified**: TODO(RATIFICATION_DATE): 原始批准日期未知，需维护者确认 | **Last Amended**: 2026-10-19
