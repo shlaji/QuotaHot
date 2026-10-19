@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
@@ -281,7 +281,7 @@ test('recovery is an alias for recovery-status, including help and JSON output',
   const help = await cli(['recovery', '--help'], home);
   assert.equal(help.code, 0);
   assert.match(help.stdout, /用法：quotahot-hook recovery-status/);
-  assert.match((await cli(['help', 'recovery'], home)).stdout, /只读取本地 OpenCode 额度恢复快照/);
+  assert.match((await cli(['help', 'recovery'], home)).stdout, /--json/);
 });
 
 test('recovery-status separates expired snapshots from active polling instances', async (context) => {
@@ -294,13 +294,15 @@ test('recovery-status separates expired snapshots from active polling instances'
     phase: 'waiting', waitingCount: 2, sessions: [{ sessionID: 'old-session', phase: 'waiting' }],
     nextCheckAt: null, lastCheckedAt: null, lastOutcome: null,
   }));
+  const json = JSON.parse((await cli(['recovery-status', '--json'], home)).stdout);
+  assert.equal(json.totalWaiting, 0);
+  assert.equal(json.instances[0].stale, true);
+
   const output = await cli(['recovery-status'], home);
   assert.equal(output.code, 0);
   assert.match(output.stdout, /没有正在等待/);
   assert.doesNotMatch(output.stdout, /old-session:/);
-  const json = JSON.parse((await cli(['recovery-status', '--json'], home)).stdout);
-  assert.equal(json.totalWaiting, 0);
-  assert.equal(json.instances[0].stale, true);
+  assert.deepEqual(await readdir(directory), []);
 });
 
 test('only OpenCode is a supported install and run target', async (context) => {

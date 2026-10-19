@@ -1,8 +1,16 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readSync } from 'node:fs';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readSync,
+  unlinkSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR } from './config.js';
 
-const MAX_FILES = 128;
 const MAX_BYTES = 64 * 1024;
 const STALE_AFTER_MS = 180_000;
 
@@ -80,7 +88,7 @@ export function readRecoveryStatus(dataDir: string = DATA_DIR): RecoveryStatus {
   let filenames: string[];
   try {
     if (!lstatSync(directory).isDirectory()) return { instances, totalWaiting: 0 };
-    filenames = readdirSync(directory).filter((name) => name.endsWith('.json')).sort().slice(0, MAX_FILES);
+    filenames = readdirSync(directory).filter((name) => name.endsWith('.json')).sort();
   } catch {
     return { instances, totalWaiting: 0 };
   }
@@ -93,12 +101,27 @@ export function readRecoveryStatus(dataDir: string = DATA_DIR): RecoveryStatus {
       if (!metadata.isFile() || metadata.size > MAX_BYTES) continue;
       const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
-        if (!fstatSync(fd).isFile()) continue;
+        const openedMetadata = fstatSync(fd, { bigint: true });
+        if (!openedMetadata.isFile()) continue;
         const buffer = Buffer.alloc(MAX_BYTES + 1);
         const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
         if (bytesRead > MAX_BYTES) continue;
+        const readMetadata = fstatSync(fd, { bigint: true });
+        if (openedMetadata.dev !== readMetadata.dev || openedMetadata.ino !== readMetadata.ino ||
+            openedMetadata.size !== readMetadata.size || openedMetadata.mtimeNs !== readMetadata.mtimeNs ||
+            openedMetadata.ctimeNs !== readMetadata.ctimeNs) continue;
         const parsed = parseInstance(JSON.parse(buffer.toString('utf8', 0, bytesRead)), now);
-        if (parsed) instances.push(parsed);
+        if (parsed) {
+          instances.push(parsed);
+          if (parsed.stale) {
+            const currentMetadata = lstatSync(path, { bigint: true });
+            if (currentMetadata.isFile() && currentMetadata.dev === readMetadata.dev &&
+                currentMetadata.ino === readMetadata.ino && currentMetadata.size === readMetadata.size &&
+                currentMetadata.mtimeNs === readMetadata.mtimeNs && currentMetadata.ctimeNs === readMetadata.ctimeNs) {
+              unlinkSync(path);
+            }
+          }
+        }
       } finally {
         closeSync(fd);
       }

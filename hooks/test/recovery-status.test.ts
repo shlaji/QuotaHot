@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -62,7 +62,7 @@ test('aggregates separate instances and exposes only allowed fields when snapsho
   assert.doesNotMatch(JSON.stringify(result), /secret-token|secret-credential/);
 });
 
-test('marks an old snapshot stale without probing its process', (context) => {
+test('marks and removes an old snapshot without probing its process', (context) => {
   const dataDir = fixture(context);
   writeSnapshot(dataDir, 'old.json', snapshot('old', { updatedAt: Date.now() - 180_001 }));
 
@@ -70,6 +70,7 @@ test('marks an old snapshot stale without probing its process', (context) => {
 
   assert.equal(result.instances[0]?.stale, true);
   assert.equal(result.totalWaiting, 0);
+  assert.deepEqual(readdirSync(join(dataDir, 'recovery-status')), []);
 });
 
 test('ignores malformed, unknown-version, and invalid-shape snapshots', (context) => {
@@ -101,7 +102,7 @@ test('ignores symlinks, directories, unrelated files, and oversized snapshots', 
   assert.deepEqual(result.instances.map((instance) => instance.id), ['target']);
 });
 
-test('limits directory reads to 128 JSON files', (context) => {
+test('reads all JSON snapshots beyond the former 128-file cap', (context) => {
   const dataDir = fixture(context);
   for (let index = 0; index < 130; index += 1) {
     writeSnapshot(dataDir, `${String(index).padStart(3, '0')}.json`, snapshot(`instance-${index}`));
@@ -109,8 +110,26 @@ test('limits directory reads to 128 JSON files', (context) => {
 
   const result = readRecoveryStatus(dataDir);
 
-  assert.equal(result.instances.length, 128);
-  assert.equal(result.totalWaiting, 256);
+  assert.equal(result.instances.length, 130);
+  assert.equal(result.totalWaiting, 260);
+});
+
+test('finds a live snapshot after stale files and removes the stale files', (context) => {
+  const dataDir = fixture(context);
+  const directory = join(dataDir, 'recovery-status');
+  const staleUpdatedAt = Date.now() - 180_001;
+  for (let index = 0; index < 129; index += 1) {
+    writeSnapshot(dataDir, `stale-${String(index).padStart(3, '0')}.json`, snapshot(`stale-${index}`, {
+      updatedAt: staleUpdatedAt,
+    }));
+  }
+  writeSnapshot(dataDir, 'zzz-live.json', snapshot('live', { waitingCount: 1 }));
+
+  const result = readRecoveryStatus(dataDir);
+
+  assert.equal(result.totalWaiting, 1);
+  assert.equal(result.instances.some((instance) => instance.id === 'live'), true);
+  assert.deepEqual(readdirSync(directory), ['zzz-live.json']);
 });
 
 test('missing snapshot directory returns an empty status without creating it', (context) => {
