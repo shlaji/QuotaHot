@@ -47,6 +47,7 @@ export type SwitchOptions = {
 
 export type SwitchResult = {
   readonly switched: boolean;
+  readonly lockContended?: true;
   readonly message: string;
   readonly reason: string;
   readonly from: string;
@@ -129,7 +130,7 @@ export async function switchAccount(partial: Partial<SwitchOptions> = {}): Promi
   const appConfig = loadConfig();
   const network = { proxy: appConfig.proxy, noProxy: appConfig.noProxy };
   const locked = config.dryRun ? await switchLocked(config, network) : await withSwitchLock(() => switchLocked(config, network));
-  return locked ?? result('另一处正在切换账户，这次跳过', config.reason);
+  return locked ?? result('另一处正在切换账户，这次跳过', config.reason, { lockContended: true });
 }
 
 export async function surveyAccounts(

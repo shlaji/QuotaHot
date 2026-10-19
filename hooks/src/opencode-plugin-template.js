@@ -49,6 +49,7 @@ const lookupPromises = new Map();
 const deletedSessions = new Map();
 
 const RECOVERY_INTERVAL_MS = 600000;
+const LOCK_RETRY_MS = 1000;
 const RESET_BUFFER_MS = 60000;
 const STATE_WATCH_RETRY_MS = 1000;
 const STATE_PATH = join(process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), ".quotahot"), "switch-state.json");
@@ -67,6 +68,7 @@ let lastCheckResult = null;
 let recoveryRunning = false;
 let recoveryDelay = RECOVERY_INTERVAL_MS;
 let recoveryWaitUntil = 0;
+let recoveryRetryAt = 0;
 let stateWatcher;
 let stateSignature = "";
 let stateResetAt = 0;
@@ -213,6 +215,7 @@ function forget(entry) {
     nextCheckAt = null;
     recoveryDelay = RECOVERY_INTERVAL_MS;
     recoveryWaitUntil = 0;
+    recoveryRetryAt = 0;
     stateWatcher?.close();
     stateWatcher = undefined;
     stateSignature = "";
@@ -280,22 +283,25 @@ function scheduleRecovery(delay) {
   const due = Math.min(recoveryWaitUntil > 0 && recoveryWaitUntil + RESET_BUFFER_MS > Date.now() ? recoveryWaitUntil + RESET_BUFFER_MS : Infinity,
     Number.isFinite(stateResetAt) && stateResetAt > 0 && stateResetAt + RESET_BUFFER_MS > Date.now()
       ? stateResetAt + RESET_BUFFER_MS : Infinity);
-  const wait = delay ?? (Number.isFinite(due) ? Math.max(0, due - Date.now()) : recoveryDelay);
+  const wait = recoveryRetryAt > Date.now() ? recoveryRetryAt - Date.now()
+    : delay ?? (Number.isFinite(due) ? Math.max(0, due - Date.now()) : recoveryDelay);
   recoveryTimer = setTimeout(async () => {
     recoveryTimer = undefined;
     nextCheckAt = null;
     recoveryRunning = true;
     publishRecoveryStatus();
     const entries = [...waitingSessions.values()].filter((entry) => entry.queued);
+    let contended = false;
     try {
       const owner = entries[0]?.owner;
       if (!owner) return;
       watchRecoveryState();
       const result = await owner.run({ source: "opencode", recover: true, provider: "openai" });
       const outcome = result?.switched ? "switched" : result?.outcome;
+      contended = outcome === "lock_contended";
       lastCheckAt = Date.now();
-      lastCheckResult = ["switched", "available", "no_candidate", "check_failed"].includes(outcome) ? outcome : "unknown";
-      recoveryDelay = outcome === "switched" || outcome === "available"
+      lastCheckResult = ["switched", "available", "no_candidate", "check_failed", "lock_contended"].includes(outcome) ? outcome : "unknown";
+      if (!contended) recoveryDelay = outcome === "switched" || outcome === "available"
         ? RECOVERY_INTERVAL_MS : Math.min(recoveryDelay * 2, 8 * RECOVERY_INTERVAL_MS);
       recoveryWaitUntil = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now() ? result.waitUntil : 0;
       await refreshRecoveryState(false);
@@ -310,6 +316,7 @@ function scheduleRecovery(delay) {
       recoveryRunning = false;
       const followUp = pendingExternalRecovery;
       pendingExternalRecovery = false;
+      if (contended) recoveryRetryAt = Date.now() + LOCK_RETRY_MS;
       scheduleRecovery(followUp ? 0 : undefined);
       publishRecoveryStatus();
     }
@@ -394,6 +401,11 @@ function createRecovery(client, run, notify) {
           recoveryWaitUntil = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now() ? result.waitUntil : 0;
           await refreshRecoveryState(false);
           watchRecoveryState();
+        }
+        if (result?.outcome === "lock_contended") {
+          recoveryRetryAt = Date.now() + LOCK_RETRY_MS;
+          clearTimeout(recoveryTimer);
+          recoveryTimer = undefined;
         }
         scheduleRecovery();
         publishRecoveryStatus();

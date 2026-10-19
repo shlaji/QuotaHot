@@ -15,12 +15,18 @@ let reply: SwitchResult = {
   checked: [],
 };
 
+const state = await import('../src/state.js');
+mock.module('../src/state.js', {
+  exports: { ...state, withSwitchLock: async () => null },
+});
+let useContendedSwitch = false;
 const real = await import('../src/switcher.js');
 mock.module('../src/switcher.js', {
   exports: {
     ...real,
     switchAccount: async (opts: Partial<SwitchOptions>): Promise<SwitchResult> => {
       calls.push(opts);
+      if (useContendedSwitch) return real.switchAccount(opts);
       return { ...reply, reason: opts.reason ?? '' };
     },
   },
@@ -147,9 +153,39 @@ test('OpenCode recovery exposes safe wait time when all accounts are exhausted',
   const waitUntil = Date.now() + 60_000;
   reply = { ...reply, switched: false, checked: [], written: [], waitUntil };
   const out = await runHook('opencode', JSON.stringify({ source: 'opencode', recover: true, provider: 'openai' }));
+  assert.equal(out.outcome, 'no_candidate');
   assert.deepEqual(JSON.parse(out.stdout), { switched: false, outcome: 'no_candidate', waitUntil });
   reply = { ...reply, waitUntil: 0 };
 });
+
+for (const [path, payload] of [
+  ['恢复轮询', { source: 'opencode', recover: true, provider: 'openai' }],
+  ['首次额度事件', { source: 'opencode', event: { error: { status: 429 } } }],
+] as const) {
+  test(`OpenCode ${path}将切换锁竞争传播为 lock_contended`, async () => {
+    useContendedSwitch = true;
+    try {
+      const out = await runHook('opencode', JSON.stringify(payload));
+
+      assert.equal(out.outcome, 'lock_contended');
+      assert.equal(JSON.parse(out.stdout).outcome, 'lock_contended');
+      assert.equal(JSON.parse(out.stdout).switched, false);
+    } finally {
+      useContendedSwitch = false;
+    }
+  });
+
+  test(`OpenCode ${path}不根据提示文案将无候选误判为锁竞争`, async () => {
+    reply = { ...reply, switched: false, checked: [], written: [], waitUntil: 0,
+      message: '另一处正在切换账户，这次跳过', from: 'private@example.invalid', to: 'private-token' };
+
+    const out = await runHook('opencode', JSON.stringify(payload));
+
+    assert.equal(out.outcome, 'no_candidate');
+    assert.equal(JSON.parse(out.stdout).outcome, 'no_candidate');
+    assert.doesNotMatch(out.stdout, /private@example|private-token/);
+  });
+}
 
 test('OpenCode 撞上 429 时切换，结果按插件认得的形状返回', async () => {
   calls = [];

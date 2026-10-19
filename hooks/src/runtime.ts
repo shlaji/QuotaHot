@@ -49,6 +49,7 @@ export type HookOutcome =
   | 'available'
   | 'skipped_no_signal'
   | 'no_candidate'
+  | 'lock_contended'
   | 'check_failed'
   | 'unknown';
 
@@ -89,7 +90,7 @@ export async function runHook(
       reason: 'OpenCode 额度恢复检查',
       usageQuery: opts.usageQuery ?? queryHookUsage,
     });
-    const outcome: HookOutcome = result.switched ? 'switched' : result.checked[0]?.usable ? 'available' :
+    const outcome: HookOutcome = result.lockContended ? 'lock_contended' : result.switched ? 'switched' : result.checked[0]?.usable ? 'available' :
       result.checked.some((account) => account.source === 'error') || result.written.some((write) => write.error)
         ? 'check_failed'
         : 'no_candidate';
@@ -112,7 +113,7 @@ export async function runHook(
     reason: signal.reason,
     usageQuery: opts.usageQuery ?? queryHookUsage,
   });
-  const outcome: HookOutcome = result.switched ? 'switched' :
+  const outcome: HookOutcome = result.lockContended ? 'lock_contended' : result.switched ? 'switched' :
     result.checked.some((account) => account.source === 'error') || result.written.some((write) => write.error)
       ? 'check_failed'
       : 'no_candidate';

@@ -616,6 +616,81 @@ test('changed quota state wakes recovery when directory watcher omits the filena
   assert.equal(state.payloads[1]?.recover, true);
 });
 
+test('independent recovery processes retry lock_contended after one second instead of the weekly reset', async (t) => {
+  const first = await recoveryFixture(t);
+  const second = await recoveryFixture(t);
+  const weeklyReset = 7 * 24 * 60 * 60 * 1000 + 100;
+  for (const state of [first, second]) {
+    state.setAccounts({ weekly: { usedPercent: 100, resetAt: weeklyReset, blockedUntil: weeklyReset } });
+    await state.fail(state === first ? 'winner' : 'loser');
+    await state.settledStatus();
+    assert.equal((await snapshot(state.directory)).value.nextCheckAt, weeklyReset + 60_000);
+  }
+
+  for (const state of [first, second]) {
+    state.setAccounts({ weekly: { usedPercent: 34, resetAt: weeklyReset, blockedUntil: 0 } });
+    state.emitState(); await state.flush(); await state.advance(0);
+    assert.equal(state.children.length, 2);
+  }
+  first.children.at(-1)?.finish('available'); await first.flush();
+  second.children.at(-1)?.finish('lock_contended', weeklyReset); await second.flush();
+  await second.settledStatus();
+
+  assert.deepEqual(first.prompts.map((prompt) => prompt.path.id), ['winner']);
+  const waiting = (await snapshot(second.directory)).value;
+  assert.equal(waiting.queuedCount, 1);
+  assert.equal(waiting.nextCheckAt, 1100);
+  assert.equal(waiting.lastOutcome, 'lock_contended');
+  assert.equal(second.prompts.length, 0);
+  await second.advance(999); assert.equal(second.children.length, 2);
+  await second.advance(1); assert.equal(second.children.length, 3);
+  second.children.at(-1)?.finish('available'); await second.flush();
+  await second.plugin.event(idle('loser')); await second.advance(1000);
+  assert.deepEqual(second.prompts.map((prompt) => prompt.path.id), ['loser']);
+  assert.equal(second.children.length, 3);
+});
+
+test('initial lock_contended and repeated contention use a fixed delay without increasing ordinary backoff', async (t) => {
+  const state = await recoveryFixture(t);
+  state.setAccounts({ weekly: { resetAt: 604_800_100, blockedUntil: 604_800_100 } });
+  await state.fail('initial-contention', 'lock_contended');
+  await state.settledStatus();
+  assert.equal((await snapshot(state.directory)).value.nextCheckAt, 1100);
+
+  await state.advance(999); assert.equal(state.children.length, 1);
+  await state.advance(1); assert.equal(state.children.length, 2);
+  state.children.at(-1)?.finish('lock_contended'); await state.flush();
+  await state.advance(999); assert.equal(state.children.length, 2);
+  await state.advance(1); assert.equal(state.children.length, 3);
+  state.setAccounts({});
+  state.children.at(-1)?.finish('no_candidate'); await state.flush();
+  await state.settledStatus();
+  assert.equal((await snapshot(state.directory)).value.nextCheckAt, 2100 + pollInterval * 2);
+  assert.equal(state.prompts.length, 0);
+});
+
+test('watcher changes while lock_contended finishes cannot bypass the one-second retry', async (t) => {
+  const state = await recoveryFixture(t); await state.fail('contention-race');
+  await state.advance();
+  let releaseRead: (contents: string) => void = () => {};
+  const pendingRead = new Promise<string>((resolve) => { releaseRead = resolve; });
+  let reads = 0;
+  state.setReadState(() => ++reads === 1 ? pendingRead : Promise.resolve(JSON.stringify({ accounts: {
+    changed: { usedPercent: 34, resetAt: 0, blockedUntil: 0 },
+  } })));
+
+  state.children.at(-1)?.finish('lock_contended'); await state.flush();
+  state.emitState(); await state.flush();
+  releaseRead('{"accounts":{}}'); await state.flush();
+  await state.advance(0); assert.equal(state.children.length, 2);
+  state.setReadState(async () => JSON.stringify({ accounts: { newer: { resetAt: 0, blockedUntil: 0 } } }));
+  state.emitState(); await state.flush();
+  await state.advance(999); assert.equal(state.children.length, 2);
+  await state.advance(1); assert.equal(state.children.length, 3);
+  state.children.at(-1)?.finish('available'); await state.flush();
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['contention-race']);
+});
+
 test('watcher errors are handled and the next recovery check reinstalls the watcher', async (t) => {
   const state = await recoveryFixture(t);
   await state.fail('watcher-error');
