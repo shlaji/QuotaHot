@@ -270,7 +270,7 @@ async function resume(entry) {
     forget(entry);
     const response = await sdkRequest(() => entry.owner.client.session.promptAsync({
       path: { id: entry.sessionID },
-      body: { parts: [{ type: "text", text: "Continue the interrupted task from the existing conversation. Check what is already done before repeating actions." }] },
+      body: { parts: [{ type: "text", text: "从上次中断的位置继续执行任务" }] },
     }));
     if (!response) entry.owner.notify("QuotaHot: 自动续跑未确认成功，请手动检查会话", "warning");
   } finally {
