@@ -1,16 +1,3 @@
-<!-- headroom:memory-instructions -->
-## 记忆
-
-使用 `headroom_memory` MCP 服务保存跨会话复用的持久知识。
-
-在回答有关过往决策、约定、项目上下文、架构、用户偏好、组织信息、代号、
-调试历史或其他历史会话内容的问题前，先调用 `memory_search`。
-
-在形成长期有效的决策、发现稳定约定或获得重要事实后，调用 `memory_save`，
-将信息保存给后续会话使用。
-
-对于当前对话中不可见的信息，记忆库是第一事实来源。
-
 ## 仓库结构
 
 - 根目录包是 Hono/React QuotaHot Web 服务，命令为 `quotahot`。`src/main.ts` 是 CLI 入口；`src/server/main.ts` 启动 HTTP/SSE 服务；`src/web/` 存放 React 界面；`src/shared/` 存放共享类型、调度逻辑和工具函数。
@@ -29,6 +16,7 @@
 ## 工作约束
 
 - 新增或修改的项目文档统一使用中文；命令、路径、代码标识符、API 名称、品牌名称及原始错误或日志引文保持原文。
+- AI 开发功能时，相关单元测试通过后自动创建本地 Git commit；commit 按功能主题归类，避免拆分过细。
 - 根目录 `tsconfig.json` 只包含 `src/**/*.ts`、`src/**/*.tsx` 和 `vite.config.ts`。Hook 代码由 `hooks/tsconfig.json` 检查，因此修改 `hooks/` 后必须单独执行 hook 的检查命令。
 - 应用会在自己的数据目录中持久化状态和账户副本。不要直接编辑或复用上游客户端的凭证文件；请使用 `README.md` 中说明的导入和同步流程。
 - `scripts/install.sh` 会在 Linux 上安装根服务为 systemd 用户服务，不需要 `sudo`；`hooks/scripts/install.sh` 会注册 OpenCode 插件并清理 QuotaHot 自有的旧 Codex/Pi 触发集成，不修改凭证文件。两个安装脚本都会修改用户配置且直接覆盖旧文件、不留备份，检查行为时优先使用 dry-run 或 help 模式。
