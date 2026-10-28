@@ -11,6 +11,8 @@
   --warn: #f0b429;
   --danger: #f2555a;
   --radius: 10px;
+  --task-space-1: 4px;
+  --task-space-10: 40px;
   /* 每家上游一个色：卡片分组的组头和 provider 徽章共用，同一家在页面各处颜色一致 */
   --p-claude: #e08b63;
   --p-codex: #2bbd97;
@@ -68,13 +70,18 @@ body {
  * .grid 之类自带 display，UA 的 [hidden] 规则压不住，所以这里显式写一条。 */
 .tab-panel[hidden] { display: none; }
 
-.tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--line); }
 .tab {
+  min-height: calc(var(--task-space-10) + var(--task-space-1));
   background: none; border: none; border-bottom: 2px solid transparent;
   border-radius: 0; color: var(--muted); padding: 9px 14px; margin-bottom: -1px;
   display: flex; align-items: center; gap: 7px;
 }
 .tab:hover:not(.on) { color: var(--text); }
+.tab:focus-visible {
+  outline: calc(var(--task-space-1) / 2) solid var(--accent-strong);
+  outline-offset: calc(var(--task-space-1) / 2);
+}
 .tab.on { color: var(--text); border-bottom-color: var(--accent); }
 /* 未保存的改动在别的页上也得看得见 */
 .tab-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }

@@ -20,6 +20,7 @@ import type { AccountOrder } from '../shared/account-order.js';
 export const DATA_DIR = process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), '.quotahot');
 const CONFIG_PATH = join(DATA_DIR, 'config.json');
 export const DB_PATH = join(DATA_DIR, 'state.db');
+export const WECHAT_DB_PATH = join(DATA_DIR, 'wechat', 'wechat.db');
 /** 程序自己的账户目录；凭证从别处导入后就只在这里读写。 */
 export const ACCOUNTS_DIR = join(DATA_DIR, 'accounts');
 export const DEFAULT_CONFIG: AppConfig = {

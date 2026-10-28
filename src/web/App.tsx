@@ -18,6 +18,7 @@ import { LogPane } from './components/LogPane.js';
 import { RunBar } from './components/RunBar.js';
 import { SchedulePane } from './components/SchedulePane.js';
 import { TaskPane } from './components/TaskPane.js';
+import { WechatPane } from './components/WechatPane.js';
 import { RequestLogDialog } from './components/RequestLogDialog.js';
 import { UsageDialog } from './components/UsageDialog.js';
 
@@ -38,9 +39,9 @@ const PROVIDER_GROUPS: { provider: string; label: string; note?: string }[] = [
  * 页面分成四页：账户（卡片和作用在卡片上的操作）、调度任务（起停、谁在跑、下次/上次发送）、
  * 任务管理（一次性 OpenCode 任务）、配置（所有参数）。
  */
-type Tab = 'accounts' | 'schedule' | 'tasks' | 'config';
+type Tab = 'accounts' | 'schedule' | 'tasks' | 'wechat' | 'config';
 const TAB_KEY = 'quotahot.tab';
-const TABS: Tab[] = ['accounts', 'schedule', 'tasks', 'config'];
+const TABS: Tab[] = ['accounts', 'schedule', 'tasks', 'wechat', 'config'];
 
 type ActiveDrag = {
   id: string;
@@ -489,6 +490,16 @@ export function App() {
 
   const running = status.running;
   const active = accounts.filter((a) => a.state === 'waiting' || a.state === 'sending').length;
+  const tabProps = (value: Tab) => ({
+    id: `${value}-tab`,
+    role: 'tab',
+    'aria-controls': `${value}-panel`,
+    'aria-selected': tab === value,
+    tabIndex: tab === value ? 0 : -1,
+    className: tab === value ? 'tab on' : 'tab',
+    onFocus: () => openTab(value),
+    onClick: () => openTab(value),
+  });
 
   return (
     <div className="app">
@@ -548,38 +559,44 @@ export function App() {
         </div>
       </header>
 
-      <nav className="tabs" role="tablist">
+      <nav className="tabs" role="tablist" aria-label="页面导航" onKeyDown={(event) => {
+        if (!(event.target instanceof HTMLButtonElement)) return;
+        const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+        const index = tabs.indexOf(event.target);
+        if (index < 0) return;
+        let nextIndex: number;
+        switch (event.key) {
+          case 'ArrowRight': nextIndex = (index + 1) % tabs.length; break;
+          case 'ArrowLeft': nextIndex = (index - 1 + tabs.length) % tabs.length; break;
+          case 'Home': nextIndex = 0; break;
+          case 'End': nextIndex = tabs.length - 1; break;
+          default: return;
+        }
+        event.preventDefault();
+        tabs[nextIndex]?.focus();
+      }}>
         <button
-          role="tab"
-          aria-selected={tab === 'accounts'}
-          className={tab === 'accounts' ? 'tab on' : 'tab'}
-          onClick={() => openTab('accounts')}
+          {...tabProps('accounts')}
         >
           账户
         </button>
         <button
-          role="tab"
-          aria-selected={tab === 'schedule'}
-          className={tab === 'schedule' ? 'tab on' : 'tab'}
-          onClick={() => openTab('schedule')}
+          {...tabProps('schedule')}
         >
           调度任务
           {/* 有几个账户在跑，切到别的页也该看得见 */}
           {running && <span className="tab-count">{status.accountIds.length}</span>}
         </button>
         <button
-          role="tab"
-          aria-selected={tab === 'tasks'}
-          className={tab === 'tasks' ? 'tab on' : 'tab'}
-          onClick={() => openTab('tasks')}
+          {...tabProps('tasks')}
         >
           任务管理
         </button>
+        <button {...tabProps('wechat')}>
+          微信对话
+        </button>
         <button
-          role="tab"
-          aria-selected={tab === 'config'}
-          className={tab === 'config' ? 'tab on' : 'tab'}
-          onClick={() => openTab('config')}
+          {...tabProps('config')}
         >
           配置
           {/* 这一页被藏起来时也要看得出有没改完 */}
@@ -588,7 +605,7 @@ export function App() {
       </nav>
 
       {/* 两页都保持挂载、只切显示：否则一离开配置页，没保存的草稿就没了 */}
-      <div className="tab-panel" hidden={tab !== 'accounts'}>
+      <div id="accounts-panel" className="tab-panel" role="tabpanel" aria-labelledby="accounts-tab" hidden={tab !== 'accounts'}>
         <RunBar
           busy={busy}
           total={accounts.length}
@@ -721,7 +738,7 @@ export function App() {
         <LogPane logs={logs} />
       </div>
 
-      <div className="tab-panel" hidden={tab !== 'schedule'}>
+      <div id="schedule-panel" className="tab-panel" role="tabpanel" aria-labelledby="schedule-tab" hidden={tab !== 'schedule'}>
         <SchedulePane
           accounts={accounts}
           status={status}
@@ -737,11 +754,15 @@ export function App() {
         <LogPane logs={logs} />
       </div>
 
-      <div className="tab-panel" hidden={tab !== 'tasks'}>
+      <div id="tasks-panel" className="tab-panel" role="tabpanel" aria-labelledby="tasks-tab" hidden={tab !== 'tasks'}>
         <TaskPane active={tab === 'tasks'} />
       </div>
 
-      <div className="tab-panel" hidden={tab !== 'config'}>
+      <div id="wechat-panel" className="tab-panel" role="tabpanel" aria-labelledby="wechat-tab" hidden={tab !== 'wechat'}>
+        <WechatPane active={tab === 'wechat'} />
+      </div>
+
+      <div id="config-panel" className="tab-panel" role="tabpanel" aria-labelledby="config-tab" hidden={tab !== 'config'}>
         <ControlPanel
           config={config}
           busy={busy}

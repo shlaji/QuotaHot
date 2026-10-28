@@ -57,6 +57,19 @@ import { taskQuotaSource } from './task-quota.js';
 import { taskRoutes } from './task-routes.js';
 import { taskLogRoutes } from './task-log-routes.js';
 import { listTaskModels } from './task-models.js';
+import QRCode from 'qrcode';
+import { WechatSessionStore } from './wechat-session-store.js';
+import { WechatClawbotClient } from './wechat-clawbot-client.js';
+import { WechatLoginService } from './wechat-login-service.js';
+import { wechatRoutes } from './wechat-routes.js';
+import { WechatInboxStore } from './wechat-inbox/store.js';
+import { IlinkBotClient } from './wechat-inbox/client.js';
+import { WechatInboxPoller } from './wechat-inbox/poller.js';
+import { WechatInboxService } from './wechat-inbox/service.js';
+import { WechatInboxSender } from './wechat-inbox/sender.js';
+import { WechatInboxTyping } from './wechat-inbox/typing.js';
+import { wechatInboxRoutes } from './wechat-inbox/routes.js';
+import { migrateWechatLocalData } from './wechat-inbox/migrate.js';
 
 const PORT = Number(process.env.PORT ?? 8686);
 const HOST = process.env.QUOTAHOT_HOST || '127.0.0.1';
@@ -87,6 +100,39 @@ try {
 }
 const scheduler = new Scheduler(store, config);
 const taskStore = new TaskStore(join(cfgMod.DATA_DIR, 'tasks.db'));
+const wechatSessionStore = new WechatSessionStore();
+migrateWechatLocalData();
+const wechatClient = new WechatClawbotClient();
+const wechatInboxStore = new WechatInboxStore();
+const wechatInbox: WechatInboxService = new WechatInboxService(wechatSessionStore, wechatInboxStore, {
+  getPollState: (owner) => wechatInboxPoller.getState(owner),
+});
+const wechatInboxPoller = new WechatInboxPoller({
+  store: wechatInboxStore,
+  createClient: (_owner, binding) => new IlinkBotClient(binding),
+  processUpdates: (owner, update, options) => wechatInbox.processUpdates(owner, update, options),
+  notifyStart: async (_owner, binding) => { await new IlinkBotClient(binding).notifyStart(); },
+  notifyStop: async (_owner, binding) => { await new IlinkBotClient(binding).notifyStop(); },
+});
+const inboxSendOptions = { getPollState: (owner: string) => wechatInboxPoller.getState(owner) };
+const wechatInboxSender = new WechatInboxSender(wechatSessionStore, wechatInboxStore, inboxSendOptions);
+const wechatInboxTyping = new WechatInboxTyping(wechatSessionStore, wechatInboxStore, inboxSendOptions);
+const wechatLogin = new WechatLoginService(wechatSessionStore, wechatClient, {
+  beforeBindingChange: (owner) => wechatInboxPoller.stop(owner),
+  afterBindingChange: (owner) => {
+    const binding = wechatSessionStore.getBinding(owner);
+    if (!binding) { wechatInbox.deactivateBinding(owner); return; }
+    wechatInbox.activateBinding(owner);
+    if (!wechatSessionStore.isBindingPaused(owner)) wechatInboxPoller.start(owner, binding);
+  },
+});
+wechatInboxStore.markInterruptedOutboundUnknown();
+for (const binding of wechatSessionStore.listBindings()) {
+  wechatInbox.activateBinding(binding.ownerIlinkUserId);
+  if (!wechatSessionStore.isBindingPaused(binding.ownerIlinkUserId)) {
+    wechatInboxPoller.start(binding.ownerIlinkUserId, binding);
+  }
+}
 const taskScheduler = new TaskScheduler(taskStore, {
   quota: taskQuotaSource({
     store,
@@ -193,6 +239,10 @@ api.route('/', qoderRoutes({ accountsDir: cfgMod.ACCOUNTS_DIR, changed: async ()
 } }));
 api.route('/', taskRoutes(taskScheduler, Date.now, listTaskModels));
 api.route('/', taskLogRoutes(taskStore));
+api.route('/', wechatRoutes({
+  login: wechatLogin,
+  qrSvg: (payload) => QRCode.toString(payload, { type: 'svg' }),
+}));
 
 api.get('/state', async (c) => {
   const body: StateResponse = {
@@ -762,6 +812,9 @@ api.get('/events', (c) =>
   }),
 );
 
+api.route('/wechat-inbox', wechatInboxRoutes({
+  service: wechatInbox, sender: wechatInboxSender, typing: wechatInboxTyping,
+}));
 app.route('/api', api);
 
 /**
@@ -888,14 +941,19 @@ const server = serve({ fetch: app.fetch, port: PORT, hostname: HOST }, (info) =>
   });
 });
 
+let shuttingDown = false;
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log(`\n收到 ${sig}，正在停止…`);
     if (refreshTimer) clearTimeout(refreshTimer);
     if (clientTimer) clearTimeout(clientTimer);
-    void Promise.all([scheduler.stop(), taskScheduler.stop()]).finally(() => {
+    void Promise.all([scheduler.stop(), taskScheduler.stop(), wechatLogin.shutdown(), wechatInboxPoller.shutdown()]).finally(() => {
       server.close();
       taskStore.close();
+      wechatInboxStore.close();
+      wechatSessionStore.close();
       store.close();
       process.exit(0);
     });

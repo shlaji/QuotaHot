@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { gzipSync } from 'node:zlib';
 import { AddressInfo } from 'node:net';
+import { fetch as undiciFetch } from 'undici';
 import {
   noteError,
   recordOutbound,
   request,
   setAuditSink,
+  setProxy,
   type AuditSink,
 } from '../src/server/http.js';
 import type { RequestRecord } from '../src/shared/types.js';
@@ -70,6 +72,66 @@ test('请求头逐字发出，不夹带浏览器语义的额外头', async () =>
   assert.ok(names.includes('x-app'));
   assert.equal(seen[seen.indexOf('user-agent') + 1], 'claude-cli/2.1.220 (external, cli)');
 });
+
+for (const transport of ['undici', 'fetch'] as const) {
+  for (const route of ['direct', 'proxy', 'bypass'] as const) {
+    for (const status of [301, 307, 308]) {
+      for (const followRedirects of [false, undefined, true]) {
+        test(`${transport} ${route} HTTP ${status} followRedirects=${followRedirects}`, async (t) => {
+          if (transport === 'fetch') t.mock.method(globalThis, 'fetch', undiciFetch);
+          let redirectedRequests = 0;
+          let redirectedBytes = 0;
+          let proxyRequests = 0;
+          const target = await serve((incoming, response) => {
+            redirectedRequests++;
+            incoming.on('data', (chunk: Buffer) => { redirectedBytes += chunk.length; });
+            incoming.on('end', () => response.end('redirected'));
+          });
+          t.after(target.close);
+          const redirect: Handler = (incoming, response) => {
+            incoming.resume();
+            response.writeHead(status, { location: target.url });
+            response.end('original');
+          };
+          const source = await serve(redirect);
+          t.after(source.close);
+          const proxy = await serve((incoming, response) => {
+            proxyRequests++;
+            if (incoming.url === target.url) {
+              redirectedRequests++;
+              incoming.on('data', (chunk: Buffer) => { redirectedBytes += chunk.length; });
+              incoming.on('end', () => response.end('redirected'));
+              return;
+            }
+            redirect(incoming, response);
+          });
+          t.after(proxy.close);
+          t.after(() => setProxy(''));
+          setProxy(route === 'direct' ? '' : proxy.url, route === 'bypass' ? ['127.0.0.1'] : []);
+
+          const response = await request(source.url, {
+            transport, method: 'POST', body: 'private-body', timeoutMs: 2_000,
+            ...(followRedirects === undefined ? {} : { followRedirects }),
+          });
+          const body = await response.text();
+
+          if (followRedirects === false) {
+            assert.equal(response.status, status);
+            assert.equal(response.headers.get('location'), target.url);
+            assert.equal(body, 'original');
+            assert.deepEqual({ redirectedRequests, redirectedBytes }, { redirectedRequests: 0, redirectedBytes: 0 });
+          } else {
+            assert.equal(response.status, 200);
+            assert.equal(body, 'redirected');
+            assert.equal(redirectedRequests, 1);
+            assert.equal(redirectedBytes, status === 301 ? 0 : Buffer.byteLength('private-body'));
+          }
+          assert.equal(proxyRequests, route === 'proxy' ? (followRedirects === false ? 1 : 2) : 0);
+        });
+      }
+    }
+  }
+}
 
 test('gzip 响应会被解开，因为低层 request 不自己解压', async () => {
   const s = await serve((_req, res) => {

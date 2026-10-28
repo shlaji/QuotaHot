@@ -1,0 +1,305 @@
+openapi: 3.1.0
+info:
+  title: QuotaHot 微信绑定用户消息 API
+  version: 2.0.0
+  description: >-
+    QuotaHot 操作者通过绑定用户列表直接读取和发送消息。不存在联系人列表或第二收件人选择。
+    所有路由受全局 accessGuard、跨站校验及 Cache-Control: no-store 约束。真实非生产环境观察仅作可选记录，
+    不作为发送或发布前置条件。请求被 iLink 接受不等于已送达或已读。
+    不签发或要求持久 quotahot_wechat 浏览器会话 cookie，绑定选择不是浏览器登录。
+    二维码启动、轮询和取消仍使用 /api/wechat/qrcode 系列路径，其中轮询和取消须验证短期 quotahot_wechat_flow cookie；
+    flow cookie 不授予绑定管理或消息访问能力。二维码与逐绑定操作位于绑定列表区，不提供顶部会话/退出操作。
+    本契约的消息路由使用 /api/wechat-inbox，解除在对应路径显式使用 /api/wechat。
+    不设置独立 readiness、Gate 0 或真实生产扫码/验收前置条件；语音出站在本次范围内保持禁用。
+security:
+  - WebBasic: []
+  - {}
+servers:
+  - url: /api/wechat-inbox
+paths:
+  /bindings/{bindingId}:
+    servers:
+      - url: /api/wechat
+    parameters:
+      - $ref: '#/components/parameters/BindingId'
+    delete:
+      summary: 解除路径指定的本地绑定
+      description: >-
+        请求为空或空 JSON 对象。只停止并移除指定用户的本地有效绑定，保留其消息和附件历史，
+        不影响其他绑定，也不代表撤销微信上游授权。相同身份重新扫码可恢复通信及原历史访问。
+        不要求持久浏览器会话；关闭浏览器或取消扫码不是解除操作。
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: false }
+      responses:
+        '200':
+          description: 指定本地绑定已解除，历史保留。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UnlinkResult' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/BindingNotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /bindings:
+    get:
+      summary: 列出二维码绑定用户
+      responses:
+        '200':
+          description: 只返回安全身份、授权/连接状态与消息能力状态。
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BindingSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /bindings/{bindingId}/messages:
+    parameters:
+      - $ref: '#/components/parameters/BindingId'
+    get:
+      summary: 分页读取一个绑定用户的消息
+      parameters:
+        - name: before
+          in: query
+          required: false
+          description: 不透明的本地分页游标；省略时读取最新一页。
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: 只返回该 bindingId 的消息和本地附件标识，不包含凭证或上下文。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessagePage' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+    post:
+      summary: 手动向路径指定的绑定用户发送一条消息
+      description: >-
+        收件人只由路径 bindingId 解析出的 QR ilink_user_id 决定。请求体不接受联系人 ID、
+        conversation ID、from_user_id、to_user_id 或 context_token。仅当绑定生命周期允许且具备本绑定上下文时发送；缺少本绑定上下文时返回
+        409 wechat_inbox_context_required；均不得回退到其他目标。
+        iLink accepted 仅表示上游接受。发送超时/结果不明时为 unknown，客户端不得自动重试。
+        本次范围内语音出站保持禁用，并返回 400 wechat_inbox_voice_outbound_disabled。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TextSend' }
+          multipart/form-data:
+            schema: { $ref: '#/components/schemas/MediaSend' }
+      responses:
+        '202':
+          description: 上游接受该消息请求；不代表终端送达或已读。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendResult' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 绑定不可发送，或当前绑定尚未收到并验证归属的首条入站消息上下文（wechat_inbox_context_required）；上下文检查先于请求体解析和发送副作用。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '502': { $ref: '#/components/responses/UpstreamFailure' }
+        '504':
+          description: 发送结果未知，禁止自动重试。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SendResult' }
+  /bindings/{bindingId}/typing:
+    parameters:
+      - $ref: '#/components/parameters/BindingId'
+    post:
+      summary: 为所选绑定用户设置或取消输入状态
+      description: 输入状态是辅助能力；失败不得阻止人工消息收发，且请求不得指定第二收件人。仅绑定生命周期允许且具备本绑定上下文时允许请求；缺少上下文返回 409 wechat_inbox_context_required。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status: { type: string, enum: [typing, cancel] }
+      responses:
+        '204': { description: 输入状态请求已处理。 }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: 绑定不可发送，或该绑定尚未获得自己的首条入站消息上下文（wechat_inbox_context_required）；上下文检查先于请求体解析和输入状态配置查询。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /attachments/{attachmentId}:
+    parameters:
+      - name: attachmentId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      summary: 读取绑定用户消息的本地附件
+      responses:
+        '200':
+          description: 以安全文件名和已校验 MIME 流式返回；禁止缓存并设置 nosniff。
+          content:
+            '*/*':
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+components:
+  securitySchemes:
+    WebBasic:
+      type: http
+      scheme: basic
+      description: 仅在服务部署配置 Web 密码时要求；无密码部署不验证 Basic Auth，但全局同源/跨站保护仍生效。不接受持久 QR 浏览器 cookie 作为替代凭证。
+  parameters:
+    BindingId:
+      name: bindingId
+      in: path
+      required: true
+      schema: { type: string }
+      description: QR 授权返回的 ilink_user_id 对应的本地绑定身份；也是唯一消息收件人。
+  responses:
+    Unauthorized:
+      description: 配置 Web 密码后凭证缺失或错误。
+      content:
+        text/plain:
+          schema: { type: string, const: Unauthorized }
+    Forbidden:
+      description: 全局 accessGuard 拒绝跨站请求或无效、不匹配的 Origin。
+      content:
+        text/plain:
+          schema: { type: string, const: Forbidden }
+    InvalidRequest:
+      description: 输入、分页参数或消息类型无效；语音出站未开放时返回 wechat_inbox_voice_outbound_disabled。
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: 绑定用户或本地附件不存在。
+      content:
+        application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    BindingNotFound:
+      description: 路径指定的本地有效绑定不存在（wechat_binding_not_found）；保留历史不等于仍有有效凭证。
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    InternalError:
+      description: 安全内部错误，不暴露存储或上游原始响应。
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UpstreamFailure:
+      description: 上传失败或上游明确拒绝；只返回稳定错误类别。
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    UnlinkResult:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, const: unlinked }
+    BindingSummary:
+      type: object
+      additionalProperties: false
+      required: [ownerIlinkUserId, botId, createdAt, updatedAt, connectionState, canSend, replyContextState]
+      properties:
+        ownerIlinkUserId: { type: string }
+        botId: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        connectionState: { type: string, enum: [starting, polling, backoff, relogin_required, stopped, unlinked] }
+        canSend: { type: boolean, description: 当前绑定的授权和生命周期是否允许操作；不代表已具备回复上下文。 }
+        replyContextState: { type: string, enum: [waiting_for_inbound, ready], description: 该绑定是否已有其自身已验证入站消息提供的回复上下文。 }
+        lastInboundAt: { type: [string, 'null'], format: date-time }
+    MessagePage:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor, hasMore]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+        nextCursor: { type: [string, 'null'] }
+        hasMore: { type: boolean }
+    Message:
+      type: object
+      additionalProperties: false
+      required: [id, remoteMessageId, clientId, direction, kind, state, sequence, createdAt, items]
+      properties:
+        id: { type: string, format: uuid }
+        remoteMessageId: { type: [string, 'null'] }
+        clientId: { type: [string, 'null'] }
+        direction: { type: string, enum: [inbound, outbound] }
+        kind: { type: string, enum: [text, image, voice, file, video, protocol_event] }
+        state: { type: string, enum: [received, queued, uploading, sending, accepted, failed, unknown] }
+        sequence: { type: integer, minimum: 1 }
+        createdAt: { type: string, format: date-time }
+        text: { type: [string, 'null'] }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/MessageItem' }
+    MessageItem:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind: { type: string, enum: [text, image, voice, file, video, protocol_event] }
+        text: { type: [string, 'null'] }
+        attachmentId: { type: [string, 'null'], format: uuid }
+        fileName: { type: [string, 'null'] }
+        mediaType: { type: [string, 'null'] }
+        sizeBytes: { type: [integer, 'null'], minimum: 0 }
+    TextSend:
+      type: object
+      additionalProperties: false
+      required: [kind, text]
+      properties:
+        kind: { const: text }
+        text: { type: string, minLength: 1 }
+    MediaSend:
+      type: object
+      additionalProperties: false
+      required: [kind, file]
+      properties:
+        kind: { type: string, enum: [image, file, video, voice] }
+        file: { type: string, format: binary }
+        fileName: { type: string }
+        mediaType: { type: string }
+    SendResult:
+      type: object
+      additionalProperties: false
+      required: [messageId, state]
+      properties:
+        messageId: { type: string, format: uuid }
+        state: { type: string, enum: [accepted, unknown] }
+        errorCode: { type: [string, 'null'] }
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error: { type: string }
