@@ -11,7 +11,7 @@ import { isSea } from 'node:sea';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import lockfile from 'proper-lockfile';
-import { opencodePlugin } from './opencode-plugin.js';
+import { opencodeNotificationPlugin, opencodePlugin } from './opencode-plugin.js';
 import { piAuthPath } from './client-auth.js';
 const PI_EXTENSION_MARKER = '// quotahot:pi-extension';
 
@@ -29,6 +29,7 @@ export const CODEX_EVENTS = ['SessionStart', 'UserPromptSubmit', 'Stop'] as cons
 /** OpenCode 的插件目录候选。不同版本用过两个名字，本机已经有哪个就用哪个。 */
 const OPENCODE_PLUGIN_DIRS = ['plugin', 'plugins'];
 const OPENCODE_PLUGIN_FILE = 'quotahot.js';
+const OPENCODE_NOTIFICATION_PLUGIN_FILE = 'quotahot-session-notify.js';
 
 export interface InstallReport {
   /** 装/卸了什么，逐条给用户看。 */
@@ -126,7 +127,8 @@ export async function opencodePluginPath(): Promise<string> {
     try {
       await readdir(join(base, dir));
       return join(base, dir, OPENCODE_PLUGIN_FILE);
-    } catch {
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
       // 这个目录还不存在，看下一个
     }
   }
@@ -150,6 +152,38 @@ export async function uninstallOpencode(): Promise<InstallReport> {
   }
   await rm(path, { force: true });
   return { changes: [`已删除 ${path}`], paths: [path] };
+}
+
+export async function opencodeNotificationPluginPath(): Promise<string> {
+  return join(dirname(await opencodePluginPath()), OPENCODE_NOTIFICATION_PLUGIN_FILE);
+}
+
+export async function installNotificationOpencode(command: string | readonly string[]): Promise<InstallReport> {
+  const path = await opencodeNotificationPluginPath();
+  const previous = await readFile(path, 'utf8').catch((error: unknown) => {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return '';
+    throw error;
+  });
+  if (previous && !previous.includes('quotahot-session-notify:start')) {
+    return { changes: [`${path} 不是 QuotaHot 会话通知插件，未覆盖`], paths: [] };
+  }
+  await mkdir(dirname(path), { recursive: true });
+  await writeAtomic(path, opencodeNotificationPlugin(command));
+  return { changes: [`${previous ? '更新' : '新增'} OpenCode 会话通知插件 ${path}`], paths: [path] };
+}
+
+export async function uninstallNotificationOpencode(): Promise<InstallReport> {
+  const path = await opencodeNotificationPluginPath();
+  const text = await readFile(path, 'utf8').catch((error: unknown) => {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return '';
+    throw error;
+  });
+  if (!text) return { changes: ['OpenCode 会话通知插件尚未安装'], paths: [] };
+  if (!text.includes('quotahot-session-notify:start')) {
+    return { changes: [`${path} 不属于 QuotaHot 会话通知插件，未修改`], paths: [] };
+  }
+  await rm(path, { force: true });
+  return { changes: [`已删除 OpenCode 会话通知插件 ${path}`], paths: [path] };
 }
 
 export function piExtensionPath(): string {

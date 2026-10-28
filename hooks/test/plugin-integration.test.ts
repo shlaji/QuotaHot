@@ -1,13 +1,130 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { opencodePlugin, selfInvocation } from '../src/install.js';
+import { saveNotificationConfig } from '../src/notification-config.js';
+import { NotificationLedgerFileSchema } from '../src/notification-schema.js';
+import { createNotificationCliFixture } from './notification-cli-fixture.js';
 
 const exec = promisify(execFile);
+
+test('standalone notification install preserves ownership and deduplicates completions across reloads', async (t) => {
+  const fixture = await createNotificationCliFixture(t);
+  const configHome = join(fixture.home, 'config');
+  const pluginDirectory = join(configHome, 'opencode', 'plugin');
+  const quotaPath = join(pluginDirectory, 'quotahot.js');
+  const notificationPath = join(pluginDirectory, 'quotahot-session-notify.js');
+  const foreignPath = join(pluginDirectory, 'foreign.js');
+  const ledgerPath = join(fixture.dataDir, 'session-notify-ledger.json');
+  const environment = {
+    ...process.env,
+    HOME: fixture.home,
+    XDG_CONFIG_HOME: configHome,
+    XDG_DATA_HOME: join(fixture.home, 'client-data'),
+    QUOTAHOT_DATA_DIR: fixture.dataDir,
+    PATH: `${fixture.binDir}:${process.env.PATH ?? ''}`,
+  };
+  const runCli = (...args: string[]) => exec(process.execPath, [
+    '--import', import.meta.resolve('tsx'), resolve('src/index.ts'), ...args,
+  ], { cwd: process.cwd(), env: environment, timeout: 10_000 });
+
+  await runCli('install');
+  const quotaSource = await readFile(quotaPath, 'utf8');
+  const foreignSource = 'export default async () => ({});\n';
+  await writeFile(foreignPath, foreignSource);
+  await runCli('notify', 'install');
+  const notificationSource = await readFile(notificationPath, 'utf8');
+  assert.match(quotaSource, /quotahot:start/);
+  assert.doesNotMatch(quotaSource, /quotahot-session-notify:start/);
+  assert.match(notificationSource, /quotahot-session-notify:start/);
+  assert.doesNotMatch(notificationSource, /quotahot:start/);
+  assert.equal(await readFile(quotaPath, 'utf8'), quotaSource);
+
+  await saveNotificationConfig(fixture.dataDir, {
+    version: 1,
+    enabled: true,
+    target: { openConversationId: 'conversation-1', displayName: 'Test group' },
+    authorizedAt: '2026-10-22T10:00:00.000Z',
+  });
+  await writeFile(join(fixture.home, 'package.json'), '{"type":"module"}\n');
+  const driverPath = join(fixture.home, 'opencode-driver.mjs');
+  await writeFile(driverPath, `
+import assert from 'node:assert/strict';
+import SessionNotification from ${JSON.stringify(pathToFileURL(notificationPath).href)};
+
+const notifications = [];
+let messageReads = 0;
+const plugin = await SessionNotification({ client: {
+  session: { messages: async ({ path }) => {
+    assert.equal(path.id, 'completion-session');
+    messageReads += 1;
+    return { data: [
+      { info: { id: 'question', sessionID: path.id, role: 'user', time: { created: 1 } },
+        parts: [{ type: 'text', text: 'question' }] },
+      { info: { id: 'answer', sessionID: path.id, role: 'assistant', providerID: 'openai', time: { created: 2, completed: 3 } },
+        parts: [{ type: 'text', text: 'final answer' }] },
+    ] };
+  } },
+  tui: { showToast: async ({ body }) => { notifications.push(body); } },
+} });
+try {
+  const idle = { event: { type: 'session.idle', properties: { sessionID: 'completion-session' } } };
+  await plugin.event(idle);
+  await plugin.event(idle);
+  assert.equal(messageReads, 2);
+  assert.equal(notifications.length, 2);
+  for (const notification of notifications) {
+    assert.equal(notification.variant, 'success');
+    assert.match(notification.message, /sent/);
+  }
+} finally {
+  await plugin.dispose();
+}
+`);
+  await exec(process.execPath, [driverPath], { env: environment, timeout: 10_000 });
+  assert.equal(existsSync(ledgerPath), true, 'completion must be persisted in the shared ledger');
+  const firstLedger = await readFile(ledgerPath, 'utf8');
+  const ledger = NotificationLedgerFileSchema.parse(JSON.parse(firstLedger));
+  assert.equal(ledger.records.length, 1);
+  assert.equal(ledger.records[0]?.sessionId, 'completion-session');
+  assert.equal(ledger.records[0]?.assistantMessageId, 'answer');
+  assert.equal(ledger.records[0]?.completionKey, 'completion-session:answer');
+  assert.equal(ledger.records[0]?.state, 'sent');
+  assert.equal(ledger.records[0]?.partCount, 1);
+  assert.deepEqual(ledger.records[0]?.sentParts, [1]);
+  const firstCalls = (await readFile(fixture.dwsArgsPath, 'utf8')).trim().split('\n');
+  assert.deepEqual(firstCalls.map((call) => call.split(' ')[1]), [
+    '+conversation-info', '+send-to-group', '+messages-query-send-status', '+conversation-info',
+  ]);
+
+  await exec(process.execPath, [driverPath], { env: environment, timeout: 10_000 });
+  const callsAfterReload = (await readFile(fixture.dwsArgsPath, 'utf8')).trim().split('\n');
+  assert.equal(callsAfterReload.filter((call) => call.split(' ')[1] === '+send-to-group').length, 1);
+  assert.deepEqual(callsAfterReload.slice(firstCalls.length).map((call) => call.split(' ')[1]), [
+    '+conversation-info', '+conversation-info',
+  ]);
+  assert.equal(await readFile(ledgerPath, 'utf8'), firstLedger);
+
+  await runCli('notify', 'uninstall');
+  assert.equal(existsSync(notificationPath), false);
+  assert.equal(await readFile(quotaPath, 'utf8'), quotaSource);
+  assert.equal(await readFile(foreignPath, 'utf8'), foreignSource);
+  assert.equal(await readFile(ledgerPath, 'utf8'), firstLedger);
+
+  await writeFile(notificationPath, foreignSource);
+  await runCli('notify', 'install');
+  assert.equal(await readFile(notificationPath, 'utf8'), foreignSource);
+  await runCli('notify', 'uninstall');
+  assert.equal(await readFile(notificationPath, 'utf8'), foreignSource);
+  assert.equal(await readFile(quotaPath, 'utf8'), quotaSource);
+  assert.equal(await readFile(foreignPath, 'utf8'), foreignSource);
+});
 
 test('isolated install-hook activation matches generator and adopts eligible auth', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'quotahot-plugin-integration-'));

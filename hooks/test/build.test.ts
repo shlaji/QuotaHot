@@ -44,13 +44,16 @@ test('production build has no import.meta warning and resolves a relocated adjac
 
   assert.equal(build.status, 0, build.stderr);
   assert.doesNotMatch(build.stderr, /empty-import-meta|import\.meta/);
+  assert.equal(
+    (await readFile(join(fixture, 'dist/opencode-notification-plugin-template.js'), 'utf8')).includes('quotahot-session-notify:start'),
+    true,
+  );
   await context.test('relocated distribution reads its own template instead of the source or working directory', async () => {
     const relocated = join(root, 'relocated package');
     await cp(join(fixture, 'dist'), relocated, { recursive: true });
     const binary = join(relocated, 'quotahot-hook');
     const template = `${await readFile(join(relocated, 'opencode-plugin-template.js'), 'utf8')}\n// relocated-template\n`;
     await writeFile(join(relocated, 'opencode-plugin-template.js'), template);
-    await rm(fixture, { recursive: true, force: true });
     const command = [process.execPath, binary, 'run', 'opencode'];
 
     const result = spawnSync(process.execPath, [binary, 'install', '--print'], {
@@ -63,4 +66,27 @@ test('production build has no import.meta warning and resolves a relocated adjac
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, `# ${join(root, 'opencode/plugin/quotahot.js')}\n${template.replace('"__QUOTAHOT_COMMAND_ARGS__"', JSON.stringify(command))}\n`);
   });
+
+  await context.test('relocated notification plugin preview reads its adjacent template', async () => {
+    const notificationFixture = join(root, 'hooks notification');
+    await cp(join(fixture, 'dist'), notificationFixture, { recursive: true });
+    const relocated = join(root, 'relocated notification package');
+    await cp(notificationFixture, relocated, { recursive: true });
+    const binary = join(relocated, 'quotahot-hook');
+    const templatePath = join(relocated, 'opencode-notification-plugin-template.js');
+    const template = `${await readFile(templatePath, 'utf8')}\n// relocated-notification-template\n`;
+    await writeFile(templatePath, template);
+    const command = [process.execPath, binary];
+
+    const result = spawnSync(process.execPath, [binary, 'notify', 'install', '--print'], {
+      cwd: root,
+      env: { ...process.env, XDG_CONFIG_HOME: root },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `# ${join(root, 'opencode/plugin/quotahot-session-notify.js')}\n${template.replace('"__QUOTAHOT_SESSION_NOTIFY_COMMAND_ARGS__"', JSON.stringify(command))}\n`);
+  });
+  await rm(fixture, { recursive: true, force: true });
 });

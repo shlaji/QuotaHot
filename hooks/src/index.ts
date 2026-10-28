@@ -23,78 +23,9 @@ import {
 import type { Provider } from './types.js';
 import { readRecoveryStatus } from './recovery-status.js';
 import { APP_VERSION } from './version.js';
-
-const HELP = `QuotaHot Hook - 独立的账户额度检查与切换命令，不启动 Web 服务。
-
-用法：
-  quotahot-hook status [选项]          查看账户额度和本机当前登录账户
-  quotahot-hook switch [选项]          手动切换账户并同步客户端凭证
-  quotahot-hook run opencode [选项]    OpenCode 插件的事件入口
-  quotahot-hook recovery-status [--json]  查看本地额度恢复等待状态
-  quotahot-hook recovery [--json]         recovery-status 的简写
-  quotahot-hook install [--print]      安装 OpenCode 插件，清理旧触发器
-  quotahot-hook uninstall              移除 QuotaHot 的触发集成
-  quotahot-hook help [命令]             查看全局或命令帮助
-  quotahot-hook version | --version    查看版本号
-
-各命令可用 --help 查看参数；账户数据默认在 ~/.quotahot，可设置 QUOTAHOT_DATA_DIR。
-`;
-
-const COMMAND_HELP: Readonly<Record<string, string>> = {
-  'recovery-status': `用法：quotahot-hook recovery-status [--json]
-
-只检查本地 OpenCode 额度恢复快照，不查询上游、不切换账户；读取时会删除超过三分钟无心跳的 stale 快照。
-  --json  输出含等待会话和插件实例的结构化状态，便于诊断。
-`,
-  status: `用法：quotahot-hook status [选项]
-
-查询账户额度与本机客户端在用账户，默认查询 Codex；可能更新本地额度缓存。
-  --provider <codex|claude>  选择账户类型（默认 codex）。
-  --threshold <percent>     上游未明确给出可用结论时，用于判断额度用尽的已用百分比（0–100，默认 80）。
-  -c, --cache-seconds <seconds> 优先使用指定秒数内的额度缓存（默认 300）。
-  --no-check               不请求上游，仅使用本地缓存；未知用量会标为 skipped。
-  --json                   输出完整的账户状态和客户端登录映射。
-`,
-  switch: `用法：quotahot-hook switch [选项]
-
-手动选择可用账户并覆盖目标客户端的当前登录凭证；切换前可用 --dry-run 预览。
-  --provider <codex|claude>  选择账户类型（默认 codex）。
-  --client <名称列表>       指定逗号分隔的写回目标：codex-cli、opencode、claude-cli、pi-claude、pi-codex；
-                            默认按 provider 同步对应客户端（Pi 仅在已有凭证时写入）。覆盖登录有风险。
-  --threshold <percent>     上游未明确给出可用结论时，用于判断额度用尽的已用百分比（0–100，默认 80）。
-  -c, --cache-seconds <seconds> 使用额度缓存的秒数（默认 300）。
-  -i, --min-interval-seconds <seconds> 两次切换间的最短秒数（默认 60）。
-  --reason <text>           设置切换原因（默认“手动触发”）。
-  --exhausted              将当前账户直接标为额度用尽并冷却；无需额度证据，请谨慎使用。
-  --no-check               不请求上游额度，可能按旧缓存或未知用量选错账户。
-  --dry-run                只预览，不写状态、缓存或凭证；过期令牌无法只读刷新。
-  --json                   输出完整切换结果（可能包含账户邮箱）。
-`,
-  run: `用法：quotahot-hook run opencode [选项]
-
-从标准输入读取 OpenCode 事件；只对 OpenAI/Codex 明确额度信号尝试切换，运行故障时不阻断插件。
-额度事件固定按 OpenCode 的来源、原因及额度阈值处理，不接受手动切换参数。
-  -i, --min-interval-seconds <seconds> 切换间隔（默认 60）；设为 0 会绕过间隔保护。
-  --no-check               不查询上游额度，可能按旧缓存或未知用量选错账户。
-  --dry-run                只预览，不写切换状态或客户端凭证。
-  --json                   标准输出仍是插件 JSON；诊断结果另写标准错误。
-`,
-  install: `用法：quotahot-hook install [--print]
-
-安装 QuotaHot OpenCode 插件并清理自有的旧 Codex/Pi 触发器，不修改账户凭证。
-  --print  只打印插件路径及内容，不安装、不清理、不写文件。
-`,
-  uninstall: '用法：quotahot-hook uninstall\n\n移除 QuotaHot 自有的 OpenCode 插件和旧触发器，不删除账户凭证。\n',
-  version: '用法：quotahot-hook version\n\n打印当前独立 hook 程序的版本号，不启动服务。\n',
-};
-
-class UsageError extends Error {}
-
-type Flags = {
-  readonly values: Readonly<Record<string, string>>;
-  readonly bools: ReadonlySet<string>;
-  readonly positional: readonly string[];
-};
+import { HELP, COMMAND_HELP } from './cli-help.js';
+import { UsageError, type Flags } from './cli-types.js';
+import { notify } from './notification-cli.js';
 
 function canonicalOptionName(name: string): string {
   switch (name) {
@@ -127,7 +58,7 @@ function parseFlags(argv: readonly string[]): Flags {
       continue;
     }
     const name = canonicalOptionName(body);
-    if (['help', 'json', 'no-check', 'dry-run', 'exhausted', 'print'].includes(name)) {
+    if (['help', 'json', 'no-check', 'dry-run', 'exhausted', 'print', 'yes'].includes(name)) {
       bools.add(name);
       continue;
     }
@@ -218,6 +149,7 @@ export async function run(argv: readonly string[]): Promise<number> {
       status: ['help', 'provider', 'threshold', 'cache-seconds', 'no-check', 'json'],
       switch: ['help', 'provider', 'client', 'threshold', 'cache-seconds', 'min-interval-seconds', 'reason', 'exhausted', 'no-check', 'dry-run', 'json'],
       run: ['help', 'json', 'no-check', 'dry-run', 'min-interval-seconds'],
+      notify: ['help', 'json', 'group', 'yes', 'print'],
       install: ['help', 'print'],
       uninstall: ['help'],
       'recovery-status': ['help', 'json'],
@@ -233,7 +165,7 @@ export async function run(argv: readonly string[]): Promise<number> {
           if (!allowed.includes(canonicalOptionName(option))) throw new UsageError(`${command} 不支持选项 ${argument.split('=', 1)[0]}`);
         }
       }
-      for (const option of ['help', 'json', 'no-check', 'dry-run', 'exhausted', 'print']) {
+      for (const option of ['help', 'json', 'no-check', 'dry-run', 'exhausted', 'print', 'yes']) {
         if (flags.values[option] !== undefined) throw new UsageError(`${command} 的 --${option} 不接受参数`);
       }
       for (const option of ['threshold', 'cache-seconds', 'min-interval-seconds']) {
@@ -242,7 +174,7 @@ export async function run(argv: readonly string[]): Promise<number> {
           throw new UsageError(`${command} 的 --${option} 需要${option === 'threshold' ? ' 0 到 100 的百分比' : '非负秒数'}`);
         }
       }
-      if (command !== 'run' && command !== 'switch' && flags.positional.length > 0) throw new UsageError(`${command} 不接受额外参数`);
+      if (command !== 'run' && command !== 'switch' && command !== 'notify' && flags.positional.length > 0) throw new UsageError(`${command} 不接受额外参数`);
     }
     if (command === 'run') {
     }
@@ -296,6 +228,7 @@ export async function run(argv: readonly string[]): Promise<number> {
         return 0;
       }
       case 'run': return await runEvent(flags.positional[0], flags);
+      case 'notify': return await notify(flags);
       case 'install': return await install(flags, false);
       case 'uninstall': return await install(flags, true);
       case 'help':

@@ -8,6 +8,7 @@
   "files": [
     "dist/quotahot-hook",
     "dist/opencode-plugin-template.js",
+    "dist/opencode-notification-plugin-template.js",
     "dist/package.json",
     "README.md"
   ],
@@ -18,7 +19,8 @@
   },
   "dependencies": {
     "proper-lockfile": "^4.1.2",
-    "undici": "^8.10.1"
+    "undici": "^8.10.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.4.1",
