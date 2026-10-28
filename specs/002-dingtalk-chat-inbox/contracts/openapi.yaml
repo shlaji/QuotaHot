@@ -1,0 +1,258 @@
+openapi: 3.1.0
+info:
+  title: DingTalk Inbox Service API
+  version: 1.0.0
+  description: 独立 DingTalk Inbox 服务 API。服务拥有 DWS 子进程、业务状态及数据库；QuotaHot 可选地代理请求，但不是服务运行依赖。
+servers:
+  - url: http://localhost:8787/api/v1
+security:
+  - bearerAuth: []
+paths:
+  /capability:
+    get:
+      summary: 查询 DingTalk 运行时可用状态
+      responses:
+        "200":
+          description: 能力与当前监听状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capability"
+  /people/search:
+    get:
+      summary: 按姓名查询人员候选
+      parameters:
+        - in: query
+          name: query
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: 当前 profile 返回的候选，不隐式选择目标
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, complete]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/PersonCandidate" }
+                  complete: { type: boolean }
+        "503": { $ref: "#/components/responses/RuntimeUnavailable" }
+  /groups/search:
+    get:
+      summary: 按关键词查询群候选
+      parameters:
+        - in: query
+          name: query
+          required: true
+          schema: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: 当前 profile 返回的候选，不隐式选择目标
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, complete]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/GroupCandidate" }
+                  complete: { type: boolean }
+        "503": { $ref: "#/components/responses/RuntimeUnavailable" }
+  /active-target:
+    get:
+      summary: 读取当前目标和监听状态
+      responses:
+        "200":
+          description: 当前目标、持久化监听意图及运行状态；无目标时 activeTarget 为 null。进程重启后返回新订阅代次的实际状态，不复用旧 ready 状态。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [activeTarget, listeningDesired, subscriptionState]
+                properties:
+                  activeTarget:
+                    oneOf:
+                      - $ref: "#/components/schemas/PersonTarget"
+                      - $ref: "#/components/schemas/GroupTarget"
+                      - type: "null"
+                  listeningDesired: { type: boolean }
+                  subscriptionState:
+                    oneOf:
+                      - $ref: "#/components/schemas/SubscriptionState"
+                      - type: "null"
+    put:
+      summary: 明确选择用户单聊或群并启动监听
+      description: 目标 ID 必须来自同 profile 搜索结果；选择目标会持久化监听意图并启动订阅。切换目标先干净停止旧订阅。不得选取其他会话或降级轮询。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/PersonTarget"
+                - $ref: "#/components/schemas/GroupTarget"
+      responses:
+        "202":
+          description: 已接受启动；只有 SSE/状态转为 ready 后才视为监听可用
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionState"
+        "400": { $ref: "#/components/responses/InvalidTarget" }
+        "503": { $ref: "#/components/responses/RuntimeUnavailable" }
+    delete:
+      summary: 停止当前目标监听
+      responses:
+        "200":
+          description: 订阅已停止或正在完成干净清理
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionState"
+  /messages:
+    get:
+      summary: 获取指定目标已保存消息
+      parameters:
+        - in: query
+          name: targetType
+          required: true
+          schema: { type: string, enum: [person, group] }
+        - in: query
+          name: targetId
+          required: true
+          schema: { type: string, minLength: 1 }
+        - in: query
+          name: before
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: 仅返回与目标类型及稳定 ID 同时匹配、且本地持久化时间未超过 30 天的记录；按 storedAt 倒序分页。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Message" }
+                  nextBefore: { type: string }
+        "400": { $ref: "#/components/responses/InvalidTarget" }
+    post:
+      summary: 向当前活动用户或群发送文本
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetType, targetId, text, clientMessageId]
+              properties:
+                targetType: { type: string, enum: [person, group] }
+                targetId: { type: string, minLength: 1 }
+                text: { type: string, minLength: 1 }
+                clientMessageId: { type: string, minLength: 1 }
+      responses:
+        "202":
+          description: 消息已本地持久化并提交发送；此响应不表示 DingTalk 已接受或收件人已收到，最终状态通过 SSE/消息查询更新。
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/InvalidTarget" }
+        "409":
+          description: 目标不再是当前活动目标，拒绝发送
+        "503": { $ref: "#/components/responses/RuntimeUnavailable" }
+  /events:
+    get:
+      summary: 接收监听状态、入站消息和发送状态
+      responses:
+        "200":
+          description: text/event-stream；事件格式见 contracts/sse.md
+          content:
+            text/event-stream:
+              schema: { type: string }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+  schemas:
+    PersonCandidate:
+      type: object
+      required: [userId, displayName]
+      properties:
+        userId: { type: string }
+        displayName: { type: string }
+        department: { type: string }
+    GroupCandidate:
+      type: object
+      required: [openConversationId, displayName]
+      properties:
+        openConversationId: { type: string }
+        displayName: { type: string }
+    PersonTarget:
+      type: object
+      required: [targetType, targetId, displayName]
+      properties:
+        targetType: { const: person }
+        targetId: { type: string, description: 当前 profile 搜索返回的 userId }
+        displayName: { type: string }
+    GroupTarget:
+      type: object
+      required: [targetType, targetId, displayName]
+      properties:
+        targetType: { const: group }
+        targetId: { type: string, description: 当前 profile 搜索返回的 openConversationId }
+        displayName: { type: string }
+    SubscriptionState:
+      type: object
+      required: [subscriptionId, targetType, targetId, state]
+      properties:
+        subscriptionId: { type: string }
+        targetType: { type: string, enum: [person, group] }
+        targetId: { type: string }
+        state:
+          type: string
+          enum: [starting, ready, stopping, stopped, failed, interrupted]
+        failureCode: { type: string }
+        failureMessage: { type: string }
+    Message:
+      type: object
+      required: [localId, targetType, targetId, direction, contentType, content, storedAt, sendState]
+      properties:
+        localId: { type: string }
+        targetType: { type: string, enum: [person, group] }
+        targetId: { type: string }
+        conversationId: { type: string, description: 入站消息的会话身份；出站消息若无上游提供值则省略 }
+        eventId: { type: string }
+        messageId: { type: string }
+        senderId: { type: string }
+        senderName: { type: string }
+        direction: { type: string, enum: [inbound, outbound] }
+        contentType: { type: string, const: text }
+        content: { type: string }
+        sourceTime: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time, description: 入站消息的本地接收时间 }
+        storedAt: { type: string, format: date-time, description: 本地持久化时间，也是 30 天保留期限的起算时间 }
+        sendState:
+          type: string
+          enum: [not_applicable, pending, accepted, failed, unknown]
+          description: accepted 表示 DingTalk 明确接受发送请求，不代表收件人已收到或已读；unknown 表示无法确认是否接受。
+    Capability:
+      type: object
+      required: [available, reason]
+      properties:
+        available: { type: boolean }
+        reason: { type: string }
+        dwsVersion: { type: string }
+  responses:
+    RuntimeUnavailable:
+      description: DWS binary、profile、授权或权限不可用；未启用备用通道
+    InvalidTarget:
+      description: 目标 ID、目标类型或搜索完整性不满足要求

@@ -1,0 +1,263 @@
+openapi: 3.1.0
+info:
+  title: QuotaHot DingTalk Chat Inbox API (Superseded Draft)
+  version: 0.1.0
+  description: >-
+    历史候选接口草案，仅为保留先前审阅上下文。当前规划契约以
+    contracts/openapi.yaml 为准；不得从本文件实现接口。
+servers:
+  - url: /api/dingtalk-chat
+security:
+  - webSession: []
+paths:
+  /search:
+    get:
+      summary: 搜索 DingTalk 用户或群
+      parameters:
+        - in: query
+          name: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+        - in: query
+          name: kind
+          required: false
+          schema:
+            type: string
+            enum: [user, group]
+      responses:
+        '200':
+          description: 区分用户与群的搜索结果；不自动选中目标
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SearchResult'
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '502': { $ref: '#/components/responses/ProviderUnavailable' }
+  /targets:
+    post:
+      summary: 明确确认一个搜索结果为当前目标
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [kind, externalId]
+              properties:
+                kind: { type: string, enum: [user, group] }
+                externalId: { type: string, minLength: 1 }
+      responses:
+        '201':
+          description: 已确认目标
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Target' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/ProviderUnavailable' }
+    get:
+      summary: 列出本地已确认目标
+      responses:
+        '200':
+          description: 目标摘要
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Target' }
+  /targets/{targetId}/subscription:
+    parameters:
+      - $ref: '#/components/parameters/TargetId'
+    get:
+      summary: 读取目标的当前订阅状态
+      responses:
+        '200':
+          description: 订阅状态；ready 仅表示 provider 已报告就绪
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: 为已确认目标启动或确保单一活动订阅
+      responses:
+        '202':
+          description: 已接受启动请求；需等状态变为 ready
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Subscription' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/TargetUnavailable' }
+        '502': { $ref: '#/components/responses/ProviderUnavailable' }
+    delete:
+      summary: 停止该目标的活动订阅
+      responses:
+        '202': { description: 停止已接受；客户端需等待状态为 stopped 或 failed }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /targets/{targetId}/messages:
+    parameters:
+      - $ref: '#/components/parameters/TargetId'
+    get:
+      summary: 读取目标的本地消息记录
+      parameters:
+        - in: query
+          name: before
+          required: false
+          schema: { type: string }
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: 按消息序列分页的历史记录
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, hasMore, nextCursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Message' }
+                  hasMore: { type: boolean }
+                  nextCursor: { type: [string, 'null'] }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: 向路径中明确指定的用户或群发送文本
+      description: 不接受请求体中的收件人覆盖；unknown 不得重试并不得标记成功。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [text]
+              properties:
+                text: { type: string, minLength: 1 }
+      responses:
+        '202':
+          description: provider 接受发送；不代表已送达或已读
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [message]
+                properties:
+                  message: { $ref: '#/components/schemas/Message' }
+        '400': { $ref: '#/components/responses/InvalidRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/TargetUnavailable' }
+        '502': { $ref: '#/components/responses/ProviderUnavailable' }
+        '504':
+          description: 投递结果未知；不表示未发送，调用方不得自动重试
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /events:
+    get:
+      summary: 接收本地订阅状态和新消息的服务器推送
+      description: >-
+        候选 SSE 通道。每个消息事件须包含已确认 targetId；客户端只向匹配目标的视图追加。
+        SSE 断线重连不代表 DingTalk provider 订阅恢复成功；订阅状态须另行读取。
+      responses:
+        '200':
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '401': { description: 未通过 Web 认证 }
+components:
+  securitySchemes:
+    webSession:
+      type: http
+      scheme: basic
+      description: 沿用 QuotaHot Web 认证；部署配置可决定是否启用。
+  parameters:
+    TargetId:
+      in: path
+      name: targetId
+      required: true
+      schema: { type: string }
+  schemas:
+    SearchResult:
+      type: object
+      required: [kind, externalId, displayName]
+      properties:
+        kind: { type: string, enum: [user, group] }
+        externalId: { type: string }
+        displayName: { type: string }
+        description: { type: [string, 'null'] }
+    Target:
+      type: object
+      required: [id, kind, externalId, displayName, active]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [user, group] }
+        externalId: { type: string }
+        displayName: { type: string }
+        active: { type: boolean }
+    Subscription:
+      type: object
+      required: [targetId, status]
+      properties:
+        targetId: { type: string }
+        status: { type: string, enum: [starting, ready, stopping, stopped, failed] }
+        startedAt: { type: [string, 'null'], format: date-time }
+        readyAt: { type: [string, 'null'], format: date-time }
+        stoppedAt: { type: [string, 'null'], format: date-time }
+        failureCode: { type: [string, 'null'] }
+    Message:
+      type: object
+      required: [id, targetId, direction, senderName, text, receivedAt, sendState]
+      properties:
+        id: { type: string }
+        targetId: { type: string }
+        externalMessageId: { type: [string, 'null'] }
+        direction: { type: string, enum: [inbound, outbound] }
+        senderName: { type: string }
+        text: { type: string }
+        occurredAt: { type: [string, 'null'], format: date-time }
+        receivedAt: { type: string, format: date-time }
+        sendState: { type: string, enum: [received, sending, accepted, failed, unknown] }
+        failureCode: { type: [string, 'null'] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        message: { type: string }
+  responses:
+    InvalidRequest:
+      description: 请求不符合 Web 契约
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: 目标不存在或不再授权
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TargetUnavailable:
+      description: 目标或订阅尚不可用
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ProviderUnavailable:
+      description: 服务端 DingTalk 运行时不可用或请求失败
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
