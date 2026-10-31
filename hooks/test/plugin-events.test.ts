@@ -300,7 +300,7 @@ async function recoveryFixture(t: TestContext) {
     await rm(directory, { recursive: true, force: true });
   });
   let now = 100;
-  const timers = new Map<object, { at: number; callback: () => void }>();
+  const timers = new Map<object, { at: number; delay: number; callback: () => void }>();
   const payloads: Array<{ source: string; recover?: boolean; provider?: string; quotaCheckAfter?: number; event?: { properties: { sessionID: string } } }> = [];
   const children: Array<{ finish(outcome: string, waitUntil?: number, latestData?: boolean): void }> = [];
   const watcherEvents: Array<(event: string, filename: string | null) => void> = [];
@@ -342,7 +342,9 @@ async function recoveryFixture(t: TestContext) {
       return watcher;
     },
     setTimeout: (callback: () => void, delay: number) => {
-      const timer = { unref() {} }; timers.set(timer, { at: now + delay, callback }); return timer;
+      const timer = { unref() {} };
+      timers.set(timer, { at: now + (delay > 2_147_483_647 ? 1 : delay), delay, callback });
+      return timer;
     },
     clearTimeout: (timer: object) => timers.delete(timer),
     spawn: () => {
@@ -366,9 +368,12 @@ async function recoveryFixture(t: TestContext) {
     await flush();
   };
   const seed = async (sessionID: string) => {
-    const message = assistant(sessionID, `failed-${sessionID}`, 'openai', 10);
+    const original = assistant(sessionID, `failed-${sessionID}`, 'openai', 10);
+    const message = { event: { ...original.event, properties: { info: {
+      ...original.event.properties.info, parentID: `user-${sessionID}`,
+    } } } };
     histories.set(sessionID, [
-      { info: { id: `user-${sessionID}`, role: 'user', time: { created: 1 } } },
+      { info: { id: `user-${sessionID}`, sessionID, role: 'user', time: { created: 1 } }, parts: [] },
       { info: { ...message.event.properties.info, parentID: `user-${sessionID}`, error: { statusCode: 429 }, time: { created: 10, completed: 20 } } },
     ]);
     await plugin.event(message);
@@ -388,6 +393,72 @@ async function recoveryFixture(t: TestContext) {
     get watchers() { return watcherEvents.length; },
     second: () => factory(input) };
 }
+
+for (const delay of [2_147_483_646, 2_147_483_647, 2_147_483_648, 30 * 86_400_000 + 60_000, 2 * 2_147_483_647 + 1]) {
+  test(`long recovery wait preserves its deadline across timer chunks: ${delay}ms`, async (t) => {
+    const state = await recoveryFixture(t);
+    const sessionID = `long-wait-${delay}`;
+    const deadline = 100 + delay;
+    await state.seed(sessionID);
+    const pending = state.plugin.event(terminal(sessionID)); await state.flush();
+    state.children.at(-1)?.finish('no_candidate', deadline - 60_000, true); await pending;
+    await state.plugin.event(idle(sessionID));
+    await state.settledStatus();
+    assert.equal((await snapshot(state.directory)).value.nextCheckAt, deadline);
+
+    let remaining = delay;
+    while (remaining > 2_147_483_647) {
+      await state.advance(2_147_483_646);
+      assert.equal(state.payloads.length, 1, 'quota must not be checked before an intermediate timer chunk ends');
+      await state.advance(1);
+      assert.equal(state.payloads.length, 1, 'an intermediate timer chunk must only re-arm the timer');
+      await state.settledStatus();
+      assert.equal((await snapshot(state.directory)).value.nextCheckAt, deadline);
+      remaining -= 2_147_483_647;
+    }
+    await state.advance(remaining - 1);
+    assert.equal(state.payloads.length, 1);
+    await state.advance(1);
+    assert.equal(state.payloads.length, 2);
+    state.children.at(-1)?.finish('available'); await state.flush();
+    assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
+  });
+}
+
+test('long recovery wait ignores a stale timer after an external quota update', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.seed('long-wait-wake');
+  const pending = state.plugin.event(terminal('long-wait-wake')); await state.flush();
+  state.children.at(-1)?.finish('no_candidate', 100 + 30 * 86_400_000, true); await pending;
+  await state.plugin.event(idle('long-wait-wake'));
+  const stale = [...state.timers.values()].find((timer) => timer.delay > 120_000);
+  assert.ok(stale);
+
+  state.setAccounts({ available: { usedPercent: 0, resetAt: 0, blockedUntil: 0 } });
+  state.emitState(); await state.flush();
+  stale.callback(); await state.flush();
+  assert.equal(state.payloads.length, 1, 'a replaced chunk must not run a quota check');
+  await state.advance(0);
+  assert.equal(state.payloads.length, 2);
+  state.children.at(-1)?.finish('available'); await state.flush();
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['long-wait-wake']);
+});
+
+test('long recovery wait cannot re-arm a cancelled timer after disposal', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.seed('long-wait-disposed');
+  const pending = state.plugin.event(terminal('long-wait-disposed')); await state.flush();
+  state.children.at(-1)?.finish('no_candidate', 100 + 30 * 86_400_000, true); await pending;
+  const stale = [...state.timers.values()].find((timer) => timer.delay > 120_000);
+  assert.ok(stale);
+
+  await state.plugin.dispose();
+  stale.callback(); await state.flush();
+  await state.advance(60 * 86_400_000);
+  assert.equal(state.payloads.length, 1);
+  assert.equal(state.timers.size, 0);
+  assert.equal(state.prompts.length, 0);
+});
 
 async function snapshot(directory: string, matches: (value: Record<string, unknown>) => boolean = () => true): Promise<{ path: string; value: Record<string, unknown> }> {
   const location = join(directory, 'recovery-status');
@@ -735,6 +806,16 @@ test('recovery stops quota polling after five attempts and waits for switch-stat
   await state.advance(300_000);
   assert.equal(state.payloads.length, 5);
 
+  const sessionID = 'bounded-recovery';
+  for (let index = 0; index < 3; index += 1) await state.plugin.event(idle(sessionID));
+  const user = internalUser(sessionID);
+  const history = state.histories.get(sessionID); assert.ok(history);
+  history.push(user);
+  await state.plugin.event({ event: { type: 'message.updated', properties: { info: user.info } } });
+  await state.plugin.event({ event: { type: 'message.part.updated', properties: { part: user.parts[0] } } });
+  await state.advance(20 * pollInterval);
+  assert.equal(state.payloads.length, 5);
+
   state.setAccounts({ recovered: { usedPercent: 0, resetAt: 0, blockedUntil: 0 } });
   state.emitState(); await state.flush(); await state.advance(0);
   assert.equal(state.payloads.length, 6);
@@ -1009,6 +1090,327 @@ test('network errors without a queued quota failure do not trigger account recov
   assert.equal(state.timers.size, 0);
 });
 
+for (const evidence of ['synthetic', 'marker'] as const) {
+  test(`OmO recovery continues once after info-only user update and verified ${evidence} part`, async (t) => {
+    const state = await recoveryFixture(t);
+    const sessionID = `internal-${evidence}`;
+    await state.fail(sessionID);
+    const info = { id: 'internal-user', sessionID, role: 'user', time: { created: 101 } };
+    const part = { id: 'internal-text', sessionID, messageID: info.id, type: 'text',
+      ...(evidence === 'synthetic' ? { synthetic: true, text: 'internal activity' }
+        : { text: 'internal activity\n<!-- OMO_INTERNAL_INITIATOR -->' }) };
+    const history = state.histories.get(sessionID);
+    assert.ok(history);
+    history.push({ info, parts: [] });
+    await state.plugin.event({ event: { type: 'message.updated', properties: { info } } });
+    history[history.length - 1] = { info, parts: [part] };
+    await state.plugin.event({ event: { type: 'message.part.updated', properties: { part } } });
+
+    await state.advance();
+    state.children.at(-1)?.finish('available'); await state.flush();
+    await state.plugin.event(idle(sessionID));
+    await state.advance();
+
+    assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
+  });
+}
+
+test('OmO recovery retains original quota after an internal assistant fails with ECONNREFUSED', async (t) => {
+  const state = await recoveryFixture(t);
+  const sessionID = 'internal-network';
+  await state.fail(sessionID);
+  const history = state.histories.get(sessionID);
+  assert.ok(history);
+  const user = { info: { id: 'internal-user', sessionID, role: 'user', time: { created: 101 } },
+    parts: [{ id: 'internal-text', sessionID, messageID: 'internal-user', type: 'text', synthetic: true, text: 'internal activity' }] };
+  history.push(user);
+  const info = { id: 'internal-assistant', sessionID, parentID: user.info.id,
+    role: 'assistant', providerID: 'openai', modelID: 'model', time: { created: 102 } };
+  history.push({ info, parts: [] });
+  await state.plugin.event({ event: { type: 'message.updated', properties: { info } } });
+  const error = { name: 'APIConnectionError', data: { message: 'connect ECONNREFUSED 127.0.0.1:9' } };
+  const failed = { ...info, error, time: { created: 102, completed: 103 } };
+  history[history.length - 1] = { info: failed, parts: [] };
+  await state.plugin.event({ event: { type: 'message.updated', properties: { info: failed } } });
+  await state.plugin.event({ event: { type: 'session.error', properties: { sessionID, error } } });
+  await state.plugin.event(idle(sessionID));
+
+  await state.advance();
+  state.children.at(-1)?.finish('available'); await state.flush();
+  await state.plugin.event(idle(sessionID));
+  await state.advance();
+
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
+});
+
+for (const input of ['text', 'attachment'] as const) {
+  test(`OmO recovery cancels on genuine newer ${input} user found only in fresh SDK history`, async (t) => {
+    const state = await recoveryFixture(t);
+    const sessionID = `genuine-${input}`;
+    await state.fail(sessionID);
+    const history = state.histories.get(sessionID);
+    assert.ok(history);
+    history.push({ info: { id: 'genuine-user', sessionID, role: 'user', time: { created: 101 } }, parts: [
+      input === 'text' ? { id: 'genuine-part', sessionID, messageID: 'genuine-user', type: 'text', text: 'new task' }
+        : { id: 'genuine-part', sessionID, messageID: 'genuine-user', type: 'file', mime: 'image/png', url: 'file:///test/image.png' },
+    ] });
+    history.push({ info: { id: 'internal-user', sessionID, role: 'user', time: { created: 102 } },
+      parts: [{ id: 'internal-text', sessionID, messageID: 'internal-user', type: 'text', synthetic: true, text: 'internal activity' }] });
+
+    await state.advance();
+    state.children.at(-1)?.finish('available'); await state.flush();
+    await state.plugin.event(idle(sessionID));
+
+    assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), []);
+  });
+}
+
+test('OmO recovery cancels after a successful final internal assistant found in fresh SDK history', async (t) => {
+  const state = await recoveryFixture(t);
+  const sessionID = 'internal-success';
+  await state.fail(sessionID);
+  const history = state.histories.get(sessionID);
+  assert.ok(history);
+  history.push({ info: { id: 'internal-user', sessionID, role: 'user', time: { created: 101 } },
+    parts: [{ id: 'internal-text', sessionID, messageID: 'internal-user', type: 'text', synthetic: true, text: 'internal activity' }] });
+  history.push({ info: { id: 'internal-assistant', sessionID, parentID: 'internal-user', role: 'assistant',
+    providerID: 'openai', modelID: 'model', finish: 'stop', time: { created: 102, completed: 103 } }, parts: [] });
+
+  await state.advance();
+  state.children.at(-1)?.finish('available'); await state.flush();
+  await state.plugin.event(idle(sessionID));
+
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), []);
+});
+
+for (const providerID of ['openai', 'anthropic']) {
+  test(`OmO recovery does not authorize a newer ${providerID} network failure outside the internal OpenAI chain`, async (t) => {
+    const state = await recoveryFixture(t);
+    const sessionID = `unrelated-${providerID}`;
+    await state.fail(sessionID);
+    const history = state.histories.get(sessionID);
+    assert.ok(history);
+    if (providerID === 'anthropic') history.push({
+      info: { id: 'internal-user', sessionID, role: 'user', time: { created: 101 } },
+      parts: [{ id: 'internal-text', sessionID, messageID: 'internal-user', type: 'text', synthetic: true, text: 'internal activity' }],
+    });
+    history.push({ info: { id: 'unrelated-assistant', sessionID,
+      parentID: providerID === 'anthropic' ? 'internal-user' : `user-${sessionID}`, role: 'assistant',
+      providerID, modelID: 'model', error: { name: 'APIConnectionError', data: { message: 'ECONNREFUSED' } },
+      time: { created: 102, completed: 103 } }, parts: [] });
+
+    await state.advance();
+    state.children.at(-1)?.finish('available'); await state.flush();
+    await state.plugin.event(idle(sessionID));
+
+    assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), []);
+  });
+}
+
+function internalUser(sessionID: string) {
+  return { info: { id: 'internal-user', sessionID, role: 'user', time: { created: 101 } },
+    parts: [{ id: 'internal-text', sessionID, messageID: 'internal-user', type: 'text', synthetic: true,
+      text: 'internal activity\n<!-- OMO_INTERNAL_INITIATOR -->' }] };
+}
+
+test('OmO recovery accepts observed APIError ECONNREFUSED without replacing the quota failure identity', async (t) => {
+  const state = await recoveryFixture(t); const sessionID = 'apierror-network';
+  await state.fail(sessionID);
+  const history = state.histories.get(sessionID); assert.ok(history);
+  history.push(internalUser(sessionID), { info: { id: 'internal-assistant', sessionID, parentID: 'internal-user',
+    role: 'assistant', providerID: 'openai', error: { name: 'APIError', data: { message: 'connect ECONNREFUSED', isRetryable: true } },
+    time: { created: 102, completed: 103 } }, parts: [] });
+
+  await state.advance(); state.children.at(-1)?.finish('available'); await state.flush();
+  await state.plugin.event(terminal(sessionID)); await state.plugin.event(idle(sessionID));
+
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
+  assert.equal(state.payloads.length, 2);
+});
+
+for (const mixed of ['file', 'text'] as const) {
+  test(`OmO recovery cancels mixed internal marker and genuine ${mixed} input`, async (t) => {
+    const state = await recoveryFixture(t); const sessionID = `mixed-${mixed}`;
+    await state.fail(sessionID);
+    const user = internalUser(sessionID);
+    const history = state.histories.get(sessionID); assert.ok(history);
+    history.push({ info: user.info, parts: [...user.parts, mixed === 'file'
+      ? { id: 'real', sessionID, messageID: user.info.id, type: 'file', mime: 'image/png', url: 'file:///test/image.png' }
+      : { id: 'real', sessionID, messageID: user.info.id, type: 'text', text: 'genuine new task' }] });
+
+    await state.advance(); state.children.at(-1)?.finish('available'); await state.flush();
+
+    assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), []);
+  });
+}
+
+for (const missing of ['parts', 'text', 'parent', 'anchor', 'lookup', 'timestamp'] as const) {
+  test(`OmO recovery defers transient ${missing} uncertainty and resumes after authoritative history repairs`, async (t) => {
+    const state = await recoveryFixture(t); const sessionID = `repair-${missing}`;
+    await state.fail(sessionID);
+    const history = state.histories.get(sessionID); assert.ok(history);
+    const user = internalUser(sessionID);
+    const answer = { info: { id: 'internal-assistant', sessionID, parentID: user.info.id, role: 'assistant', providerID: 'openai',
+      error: { name: 'APIError', data: { message: 'connect ECONNREFUSED' } }, time: { created: 102, completed: 103 } }, parts: [] };
+    const repaired = [...history, user, answer];
+    const messages = state.sdk.messages;
+    switch (missing) {
+      case 'parts': state.histories.set(sessionID, [...history, { info: user.info, parts: [] }]); break;
+      case 'text': state.histories.set(sessionID, [...history, { info: user.info, parts: [{ ...user.parts[0], text: '' }] }]); break;
+      case 'parent': state.histories.set(sessionID, [...history, user, { ...answer, info: { ...answer.info, parentID: undefined } }]); break;
+      case 'anchor': state.histories.set(sessionID, [user, answer]); break;
+      case 'lookup': state.sdk.messages = async () => ({ error: { message: 'lookup unavailable' } }); break;
+      case 'timestamp': state.histories.set(sessionID, [...history, user, { ...answer, info: { ...answer.info, time: { created: 101, completed: 103 } } }]); break;
+    }
+    await state.advance(); state.children.at(-1)?.finish('available'); await state.flush();
+    assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), []);
+
+    state.sdk.messages = messages; state.histories.set(sessionID, repaired);
+    await state.plugin.event({ event: { type: 'message.part.updated', properties: { part: user.parts[0] } } });
+    await state.plugin.event(idle(sessionID));
+
+    assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
+  });
+}
+
+test('OmO recovery cancels final internal success even before a later network failure', async (t) => {
+  const state = await recoveryFixture(t); const sessionID = 'success-before-failure';
+  await state.fail(sessionID);
+  const history = state.histories.get(sessionID); assert.ok(history);
+  history.push(internalUser(sessionID),
+    { info: { id: 'success', sessionID, parentID: 'internal-user', role: 'assistant', providerID: 'openai',
+      finish: 'stop', time: { created: 102, completed: 103 } }, parts: [] },
+    { info: { id: 'network', sessionID, parentID: 'internal-user', role: 'assistant', providerID: 'openai',
+      error: { name: 'APIConnectionError' }, time: { created: 104, completed: 105 } }, parts: [] });
+
+  await state.advance(); state.children.at(-1)?.finish('available'); await state.flush();
+
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), []);
+});
+
+test('OmO recovery continues after a completed tool-calls step and a distinct internal network failure', async (t) => {
+  const state = await recoveryFixture(t); const sessionID = 'tool-step-network';
+  await state.fail(sessionID);
+  const history = state.histories.get(sessionID); assert.ok(history);
+  history.push(internalUser(sessionID),
+    { info: { id: 'tool-step', sessionID, parentID: 'internal-user', role: 'assistant', providerID: 'openai',
+      finish: 'tool-calls', time: { created: 102, completed: 103 } }, parts: [] },
+    { info: { id: 'network-step', sessionID, parentID: 'internal-user', role: 'assistant', providerID: 'openai',
+      error: { name: 'APIError', data: { message: 'connect ECONNREFUSED' } },
+      time: { created: 104, completed: 105 } }, parts: [] });
+
+  await state.advance(); state.children.at(-1)?.finish('available'); await state.flush();
+  await state.plugin.event(idle(sessionID));
+
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
+});
+
+for (const finish of ['tool-calls', 'unknown', undefined]) {
+  test(`OmO recovery waits for internal assistant progress with finish ${finish}`, async (t) => {
+    const state = await recoveryFixture(t); const sessionID = `progress-${finish}`;
+    await state.fail(sessionID);
+    const history = state.histories.get(sessionID); assert.ok(history);
+    const user = internalUser(sessionID);
+    const info = { id: 'progress', sessionID, parentID: user.info.id, role: 'assistant', providerID: 'openai',
+      finish, time: { created: 102, completed: 103 } };
+    history.push(user, { info, parts: [] });
+    await state.advance(); state.children.at(-1)?.finish('available'); await state.flush();
+    assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), []);
+
+    history[history.length - 1] = { info: { ...info, error: { name: 'APIError', data: { message: 'ECONNREFUSED' } } }, parts: [] };
+    await state.plugin.event(idle(sessionID));
+
+    assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
+  });
+}
+
+test('OmO recovery coalesces a part update arriving during an authoritative history lookup', async (t) => {
+  const state = await recoveryFixture(t); const sessionID = 'part-lookup-race';
+  await state.fail(sessionID);
+  const history = state.histories.get(sessionID); assert.ok(history);
+  const user = internalUser(sessionID);
+  const incomplete = [...history, { info: user.info, parts: [] }];
+  state.histories.set(sessionID, [...history, user]);
+  const messages = state.sdk.messages;
+  let release: (value: unknown) => void = () => {};
+  state.sdk.messages = () => new Promise((resolve) => { release = resolve; });
+  await state.advance(); state.children.at(-1)?.finish('available'); await state.flush();
+  state.sdk.messages = messages;
+  await state.plugin.event({ event: { type: 'message.part.updated', properties: { part: user.parts[0] } } });
+  release({ data: incomplete }); await state.flush();
+
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
+});
+
+test('OmO recovery defers an initial info-only user then permits the original check after parts arrive', async (t) => {
+  const state = await recoveryFixture(t); const sessionID = 'initial-internal';
+  await state.seed(sessionID);
+  const user = internalUser(sessionID);
+  const history = state.histories.get(sessionID); assert.ok(history);
+  history.push({ info: user.info, parts: [] });
+  const initial = state.plugin.event(terminal(sessionID));
+  await state.plugin.event({ event: { type: 'message.updated', properties: { info: user.info } } });
+  await initial;
+  assert.equal(state.payloads.length, 0);
+
+  history[history.length - 1] = user;
+  const classified = state.plugin.event({ event: { type: 'message.part.updated', properties: { part: user.parts[0] } } });
+  await state.flush();
+  assert.equal(state.payloads.length, 1);
+  state.children.at(-1)?.finish('available'); await classified;
+  await state.plugin.event(idle(sessionID));
+
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
+});
+
+test('OmO recovery coalesces an internal part update during the final live status lookup', async (t) => {
+  const state = await recoveryFixture(t); const sessionID = 'part-status-race';
+  await state.fail(sessionID);
+  const status = state.sdk.status;
+  let release: (value: unknown) => void = () => {};
+  state.sdk.status = () => new Promise((resolve) => { release = resolve; });
+  await state.advance(); state.children.at(-1)?.finish('available'); await state.flush();
+  const history = state.histories.get(sessionID); assert.ok(history);
+  const user = internalUser(sessionID); history.push(user);
+  state.sdk.status = status;
+  await state.plugin.event({ event: { type: 'message.part.updated', properties: { part: user.parts[0] } } });
+  release({ data: {} }); await state.flush();
+  await state.plugin.event(idle(sessionID));
+
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
+});
+
+test('OmO recovery does not treat generic retryable APIError as an internal network failure', async (t) => {
+  const state = await recoveryFixture(t); const sessionID = 'generic-apierror';
+  await state.fail(sessionID);
+  const history = state.histories.get(sessionID); assert.ok(history);
+  history.push(internalUser(sessionID), { info: { id: 'internal-assistant', sessionID, parentID: 'internal-user',
+    role: 'assistant', providerID: 'openai', error: { name: 'APIError', data: { message: 'Internal Server Error', statusCode: 500, isRetryable: true } },
+    time: { created: 102, completed: 103 } }, parts: [] });
+
+  await state.advance(); state.children.at(-1)?.finish('available'); await state.flush();
+
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), []);
+});
+
+test('OmO recovery defers observed assistant missing from history and rechecks when it arrives', async (t) => {
+  const state = await recoveryFixture(t); const sessionID = 'assistant-history-lag';
+  await state.seed(sessionID);
+  const pending = state.plugin.event(terminal(sessionID)); await state.flush();
+  state.children.at(-1)?.finish('available'); await pending;
+  const info = { id: 'internal-assistant', sessionID, parentID: 'internal-user', role: 'assistant', providerID: 'openai',
+    error: { name: 'APIError', data: { message: 'ECONNRESET' } }, time: { created: 102, completed: 103 } };
+  await state.plugin.event({ event: { type: 'message.updated', properties: { info } } });
+  await state.plugin.event(idle(sessionID));
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), []);
+
+  const history = state.histories.get(sessionID); assert.ok(history);
+  history.push(internalUser(sessionID), { info, parts: [] });
+  await state.plugin.event({ event: { type: 'session.error', properties: { sessionID, error: info.error } } });
+
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
+});
+
 test('latest messages block continuation after unseen user input, success, abort or a different failure', async (t) => {
   for (const change of ['user', 'success', 'abort', 'failure']) {
     const state = await recoveryFixture(t); await state.fail(change);
@@ -1173,7 +1575,7 @@ esac
     promptAsync: async (request: Prompt) => { prompts.push(request); resolvePrompt(); return { data: undefined }; },
   } } });
   t.after(() => plugin.dispose());
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 100 });
   await plugin.event(assistant('real', 'failed', 'openai', 10));
   await plugin.event(terminal('real')); await plugin.event(idle('real'));
 

@@ -49,6 +49,7 @@ const lookupPromises = new Map();
 const deletedSessions = new Map();
 
 const RECOVERY_INTERVAL_MS = 600000;
+const MAX_TIMER_DELAY_MS = 2147483647;
 const NETWORK_RETRY_BASE_MS = 5000;
 const NETWORK_RETRY_MAX_MS = 300000;
 const MAX_RECOVERY_FAILURES = 5;
@@ -222,7 +223,8 @@ function active(entry) {
   return !entry.owner.disposed && waitingSessions.get(entry.sessionID) === entry && !isDeleted(entry.sessionID);
 }
 
-function forget(entry) {
+function forget(entry, reason) {
+  if (reason) entry.owner.logRecovery("cancel", { sessionID: entry.sessionID, failureID: entry.failureID, reason });
   completedFailures.set(failureKey(entry), true);
   while (completedFailures.size > TOMBSTONE_LIMIT) completedFailures.delete(completedFailures.keys().next().value);
   if (waitingSessions.get(entry.sessionID) === entry) waitingSessions.delete(entry.sessionID);
@@ -263,58 +265,110 @@ async function sdkRequest(operation) {
   }
 }
 
-async function resume(entry) {
-  if (!active(entry) || !entry.ready || !entry.terminal || entry.status !== "idle" || entry.resuming) return;
-  entry.resuming = true;
-  const revision = entry.revision;
-  try {
-    const result = await sdkRequest(() => entry.owner.client.session.messages({ path: { id: entry.sessionID } }));
-    if (!active(entry) || entry.revision !== revision || !result) return;
-    const messages = Array.isArray(result) ? result : result.data;
-    if (!Array.isArray(messages) || messages.length === 0) return;
-    const infos = messages.map((message) => message?.info);
-    if (infos.some((info) => !info?.id || !Number.isFinite(info.time?.created))) return;
-    infos.sort((left, right) => right.time.created - left.time.created);
-    const latest = infos[0];
-    if (infos.some((info) => info.id !== latest.id && info.time.created === latest.time.created)) return;
-    if (latest.role !== "assistant" || latest.providerID !== "openai" ||
-        latest.error?.name === "MessageAbortedError" || classifyQuotaSignal(latest) === null ||
-        (entry.failureID ? latest.id !== entry.failureID : latest.time.created > entry.started)) {
-      forget(entry);
-      return;
+function userInput(message) {
+  if (!Array.isArray(message?.parts) || !message.parts.length) return "unknown";
+  let incomplete = false;
+  for (const part of message.parts) {
+    if (part?.type === "file") return "genuine";
+    if (part?.type !== "text" || typeof part.text !== "string" || !part.text.trim()) { incomplete = true; continue; }
+    if (part.synthetic !== true && !/<!--\s*OMO_INTERNAL_INITIATOR\s*-->/.test(part.text)) return "genuine";
+  }
+  return incomplete ? "unknown" : "internal";
+}
+
+function recoveryHistory(entry, messages) {
+  if (!Array.isArray(messages) || !messages.length || messages.length > SESSION_CACHE_LIMIT) return "defer";
+  if (messages.some((message) => !message?.info?.id || !Number.isFinite(message.info.time?.created))) return "defer";
+  const ordered = [...messages].sort((left, right) => left.info.time.created - right.info.time.created);
+  if (ordered.some((message, index) => index && message.info.time.created === ordered[index - 1].info.time.created)) return "defer";
+  const anchor = ordered.find((message) => message.info.id === entry.failureID);
+  if (!anchor) return "defer";
+  if (anchor.info.error?.name === "MessageAbortedError") return "aborted";
+  if (anchor.info.time.completed && !anchor.info.error) return "original_success";
+  if (anchor.info.providerID !== "openai" || classifyQuotaSignal(anchor.info) === null) return "defer";
+  const newer = ordered.filter((message) => message.info.time.created > anchor.info.time.created);
+  const users = new Map(newer.filter((message) => message.info.role === "user").map((message) => [message.info.id, userInput(message)]));
+  if ([...users.values()].includes("genuine")) return "genuine_user";
+  const assistants = newer.filter((message) => message.info.role === "assistant");
+  if (assistants.some(({ info }) => info.time.completed && !info.error &&
+      ["stop", "length", "content-filter", "content_filter"].includes(info.finish))) return "final_success";
+  if (assistants.some(({ info }) => info.error?.name === "MessageAbortedError")) return "aborted";
+  if (assistants.some(({ info }) => info.providerID && info.providerID !== "openai")) return "provider_changed";
+  let uncertain = [...users.values()].includes("unknown") || [...entry.pendingUsers].some((id) => !users.has(id)) ||
+    [...entry.observedAssistants].some((id) => !assistants.some((message) => message.info.id === id));
+  for (const { info } of assistants) {
+    if (!info.parentID || !info.providerID) { uncertain = true; continue; }
+    const parent = ordered.find((message) => message.info.id === info.parentID);
+    if (!parent) { uncertain = true; continue; }
+    if (parent.info.time.created >= info.time.created) { uncertain = true; continue; }
+    if (!users.has(info.parentID)) return "unrelated_assistant";
+    if (users.get(info.parentID) !== "internal") { uncertain = true; continue; }
+    if (!info.error) {
+      if (!info.time.completed || info.finish !== "tool-calls" || info.id === assistants.at(-1)?.info.id) uncertain = true;
+      continue;
     }
-    if (!entry.failureID) entry.failureID = latest.id;
-    if (completedFailures.has(failureKey(entry))) { forget(entry); return; }
-    const status = await sdkRequest(() => entry.owner.client.session.status());
-    if (!active(entry) || entry.revision !== revision || entry.status !== "idle" || !status?.data ||
-        typeof status.data !== "object" || Array.isArray(status.data)) return;
-    const current = status.data[entry.sessionID];
-    if (current && current.type !== "idle") return;
-    if (typeof entry.owner.client.session.promptAsync !== "function") return;
-    forget(entry);
-    const response = await sdkRequest(() => entry.owner.client.session.promptAsync({
-      path: { id: entry.sessionID },
-      body: { parts: [{ type: "text", text: "从上次中断的位置继续执行任务" }] },
-    }));
-    if (!response) entry.owner.notify("QuotaHot: 自动续跑未确认成功，请手动检查会话", "warning");
+    const network = info.error.name === "APIConnectionError" || (info.error.name === "APIError" &&
+      /\b(?:ECONNREFUSED|ECONNRESET)\b/.test(
+        [info.error.message, info.error.data?.message].filter((value) => typeof value === "string").join(" ")));
+    if (!network && classifyQuotaSignal(info) === null) return "unrelated_failure";
+  }
+  return uncertain ? "defer" : "eligible";
+}
+
+async function resume(entry) {
+  if (!active(entry)) return;
+  if (entry.resuming) { entry.recheck = true; return; }
+  entry.resuming = true;
+  try {
+    do {
+      entry.recheck = false;
+      const revision = entry.revision;
+      const result = await sdkRequest(() => entry.owner.client.session.messages({ path: { id: entry.sessionID }, query: { limit: SESSION_CACHE_LIMIT } }));
+      if (!active(entry)) return;
+      if (entry.revision !== revision) { entry.recheck = true; continue; }
+      const reason = recoveryHistory(entry, Array.isArray(result) ? result : result?.data);
+      entry.blocked = reason === "defer";
+      if (reason !== "eligible" && reason !== "defer") {
+        forget(entry, reason); return;
+      }
+      if (entry.blocked) return;
+      if (entry.queued && recoveryFailures < MAX_RECOVERY_FAILURES) scheduleRecovery();
+      if (!entry.ready || !entry.terminal || entry.status !== "idle") return;
+      if (completedFailures.has(failureKey(entry))) { forget(entry); return; }
+      const status = await sdkRequest(() => entry.owner.client.session.status());
+      if (!active(entry)) return;
+      if (entry.revision !== revision) { entry.recheck = true; continue; }
+      if (entry.status !== "idle" || !status?.data || typeof status.data !== "object" || Array.isArray(status.data)) return;
+      const current = status.data[entry.sessionID];
+      if (current && current.type !== "idle") return;
+      if (typeof entry.owner.client.session.promptAsync !== "function") return;
+      entry.owner.logRecovery("dispatch", { sessionID: entry.sessionID, failureID: entry.failureID, reason: "quota_recovered" });
+      forget(entry);
+      const response = await sdkRequest(() => entry.owner.client.session.promptAsync({
+        path: { id: entry.sessionID },
+        body: { parts: [{ type: "text", text: "从上次中断的位置继续执行任务" }] },
+      }));
+      if (!response) entry.owner.notify("QuotaHot: 自动续跑未确认成功，请手动检查会话", "warning");
+    } while (active(entry) && entry.recheck);
   } finally {
     entry.resuming = false;
   }
 }
 
 function scheduleRecovery(delay) {
-  if (recoveryTimer || recoveryRunning || ![...waitingSessions.values()].some((entry) => entry.queued)) return;
+  if (recoveryTimer || recoveryRunning || ![...waitingSessions.values()].some((entry) => entry.queued && !entry.blocked)) return;
   const due = Math.min(recoveryWaitUntil > 0 && recoveryWaitUntil + RESET_BUFFER_MS > Date.now() ? recoveryWaitUntil + RESET_BUFFER_MS : Infinity,
     Number.isFinite(stateResetAt) && stateResetAt > 0 && stateResetAt + RESET_BUFFER_MS > Date.now()
       ? stateResetAt + RESET_BUFFER_MS : Infinity);
   const wait = recoveryRetryAt > Date.now() ? recoveryRetryAt - Date.now()
     : delay ?? (Number.isFinite(due) ? Math.max(0, due - Date.now()) : recoveryDelay);
-  recoveryTimer = setTimeout(async () => {
+  const deadline = Date.now() + wait;
+  const check = async () => {
     recoveryTimer = undefined;
     nextCheckAt = null;
     recoveryRunning = true;
     publishRecoveryStatus();
-    const entries = [...waitingSessions.values()].filter((entry) => entry.queued);
+    const entries = [...waitingSessions.values()].filter((entry) => entry.queued && !entry.blocked);
     let owner;
     let contended = false;
     let retryDelay;
@@ -364,9 +418,21 @@ function scheduleRecovery(delay) {
         " failures=" + recoveryFailures);
       publishRecoveryStatus();
     }
-  }, wait);
-  nextCheckAt = Date.now() + wait;
-  recoveryTimer.unref?.();
+  };
+  const arm = () => {
+    const timer = setTimeout(async () => {
+      if (recoveryTimer !== timer) return;
+      if (Date.now() < deadline) {
+        arm();
+        return;
+      }
+      await check();
+    }, Math.min(MAX_TIMER_DELAY_MS, Math.max(0, deadline - Date.now())));
+    recoveryTimer = timer;
+    timer.unref?.();
+  };
+  nextCheckAt = deadline;
+  arm();
   publishRecoveryStatus();
 }
 
@@ -401,15 +467,15 @@ async function runInitialRecovery(wave, owner, run, payload) {
 function createRecovery(client, run, notify) {
   const owner = {
     client, run, notify, disposed: false,
-    logRecovery(message) {
-      try { client?.app?.log?.({ body: { service: "quotahot", level: "info", message: "recovery " + message } })?.catch?.(() => {}); }
+    logRecovery(message, extra) {
+      try { client?.app?.log?.({ body: { service: "quotahot", level: "info", message: "recovery " + message, ...(extra ? { extra } : {}) } })?.catch?.(() => {}); }
       catch { /* Logging must not affect recovery. */ }
     },
   };
-  return {
+  const recovery = {
     dispose: async () => {
       owner.disposed = true;
-      for (const entry of waitingSessions.values()) if (entry.owner === owner) forget(entry);
+      for (const entry of waitingSessions.values()) if (entry.owner === owner) forget(entry, "disposed");
       await statusWrites;
     },
     observe: async (event, sessionID) => {
@@ -417,29 +483,40 @@ function createRecovery(client, run, notify) {
       if (!entry || entry.owner !== owner) return;
       const info = event.properties?.info;
       if (event.type === "session.deleted" || event.properties?.error?.name === "MessageAbortedError" ||
-           info?.error?.name === "MessageAbortedError") { forget(entry); return; }
+           info?.error?.name === "MessageAbortedError") { forget(entry, event.type === "session.deleted" ? "deleted" : "aborted"); return; }
       if (event.type === "session.error" && classifyQuotaSignal(event) === null) {
-        if (entry.queued) {
-          entry.terminal = true;
-          entry.status = "idle";
-          entry.revision += 1;
-          publishRecoveryStatus();
-          return;
-        }
-        forget(entry);
+        entry.terminal = true;
+        entry.status = "idle";
+        entry.revision += 1;
+        publishRecoveryStatus();
+        await resume(entry);
         return;
       }
       if (event.type === "message.updated") {
         entry.revision += 1;
         if (info?.role === "assistant" && info.id === entry.failureID && info.time?.completed && !info.error) {
-          forget(entry);
+          forget(entry, "original_success");
           return;
         }
-        if (info?.role === "assistant" && entry.failureID && info.id !== entry.failureID &&
-            info.time?.created >= entry.failureCreated) { forget(entry); return; }
+        if (info?.role === "assistant" && info.id !== entry.failureID &&
+            (!Number.isFinite(info.time?.created) || entry.failureCreated === undefined || info.time.created >= entry.failureCreated)) {
+          entry.observedAssistants.add(info.id);
+          entry.blocked = true;
+        }
         if (info?.role === "user" && info.id !== entry.parentID &&
-            (!Number.isFinite(info.time?.created) || info.time.created >= entry.started ||
-             (entry.failureCreated !== undefined && info.time.created >= entry.failureCreated))) forget(entry);
+             (!Number.isFinite(info.time?.created) || info.time.created >= entry.started ||
+              (entry.failureCreated !== undefined && info.time.created >= entry.failureCreated))) {
+          entry.pendingUsers.add(info.id);
+          entry.blocked = true;
+        }
+        await resume(entry);
+        if (active(entry) && entry.initialPending && !entry.blocked) await recovery.quota(entry.initialEvent, sessionID);
+        return;
+      }
+      if (event.type === "message.part.updated" || event.type === "message.part.removed") {
+        entry.revision += 1;
+        await resume(entry);
+        if (active(entry) && entry.initialPending && !entry.blocked) await recovery.quota(entry.initialEvent, sessionID);
         return;
       }
       if (event.type === "session.status" || event.type === "session.idle") {
@@ -454,7 +531,8 @@ function createRecovery(client, run, notify) {
       if (!entry) {
         entry = { sessionID, owner, started: Date.now(), revision: 0, status: "unknown", terminal: false,
           failureID: event.properties?.messageID, failureCreated: undefined, parentID: undefined,
-          ready: false, queued: false, resuming: false, attempt: null };
+          ready: false, queued: false, resuming: false, attempt: null, pendingUsers: new Set(), observedAssistants: new Set(), blocked: false,
+          initialPending: true, initialEvent: event };
         waitingSessions.set(sessionID, entry);
         while (waitingSessions.size > SESSION_CACHE_LIMIT) forget(waitingSessions.values().next().value);
         publishRecoveryStatus();
@@ -479,11 +557,18 @@ function createRecovery(client, run, notify) {
           const provider = await retryProvider(client, sessionID);
           if (!active(entry)) return;
           if (provider !== "openai") { waitingSessions.delete(sessionID); publishRecoveryStatus(); return; }
-          const latest = [...(assistantMessages.get(sessionID)?.entries() || [])].sort((left, right) => right[1].created - left[1].created)[0];
+          const latest = entry.failureID && assistantMessages.get(sessionID)?.has(entry.failureID)
+            ? [entry.failureID, assistantMessages.get(sessionID).get(entry.failureID)]
+            : [...(assistantMessages.get(sessionID)?.entries() || [])].sort((left, right) => right[1].created - left[1].created)[0];
           entry.failureID ||= latest?.[0];
           entry.failureCreated = latest?.[1].created;
           entry.parentID = latest?.[1].parentID;
           if (completedFailures.has(failureKey(entry)) || completedFailures.has(JSON.stringify([sessionID, null]))) { forget(entry); return; }
+          if (entry.pendingUsers.size) {
+            await resume(entry);
+            if (!active(entry) || entry.blocked) return;
+          }
+          entry.initialPending = false;
           const { result, retryDelay } = await runInitialRecovery(wave, owner, run, {
             source: "opencode", event, quotaCheckAfter: wave.checkAfter,
           });
@@ -517,6 +602,7 @@ function createRecovery(client, run, notify) {
     },
     get disposed() { return owner.disposed; },
   };
+  return recovery;
 }
 
 function sessionCache(sessionID) {
@@ -708,7 +794,7 @@ export const QuotaHot = async ({ client }) => {
     dispose: recovery.dispose,
     event: async ({ event }) => {
       if (recovery.disposed || !event || typeof event.type !== "string") return;
-      const sessionID = event.properties?.sessionID || event.properties?.info?.sessionID || event.properties?.info?.id;
+      const sessionID = event.properties?.sessionID || event.properties?.info?.sessionID || event.properties?.part?.sessionID || event.properties?.info?.id;
       if (sessionID && deletedSessions.has(sessionID)) return;
       const quotaEvent = quotaRetry(event) ||
         (event.type === "session.error" && event.properties?.error?.name !== "MessageAbortedError" && classifyQuotaSignal(event) !== null);

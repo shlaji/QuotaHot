@@ -15,7 +15,7 @@ const candidate: Account = {
 let candidateFreshChecks = 0;
 
 mock.module('../src/config.js', {
-  exports: { ACCOUNTS_DIR: '/tmp/accounts', loadConfig: () => ({ proxy: '', noProxy: [] }) },
+  exports: { ACCOUNTS_DIR: '/tmp/accounts', loadConfig: () => ({ proxy: '', noProxy: [], accountOrder: {} }) },
 });
 mock.module('../src/account-files.js', {
   exports: {

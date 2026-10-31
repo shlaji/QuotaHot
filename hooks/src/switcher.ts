@@ -143,8 +143,8 @@ export async function switchAccount(partial: Partial<SwitchOptions> = {}): Promi
   const network = { proxy: appConfig.proxy, noProxy: appConfig.noProxy };
   const recordCheck = !config.dryRun && config.check && config.triggerClient === 'opencode' &&
     (config.provider === 'codex' || config.provider === 'claude');
-  const locked = config.dryRun ? await switchLocked(config, network) : await withSwitchLock(async () => {
-    const result = await switchLocked(config, network);
+  const locked = config.dryRun ? await switchLocked(config, network, appConfig.accountOrder) : await withSwitchLock(async () => {
+    const result = await switchLocked(config, network, appConfig.accountOrder);
     if (!recordCheck) return result;
     const state = await readState();
     const outcome = quotaCheckOutcome(result, config.recover);
@@ -196,7 +196,7 @@ export async function surveyAccounts(
   return { statuses, active };
 }
 
-async function switchLocked(config: SwitchOptions, network: NetworkConfig): Promise<SwitchResult> {
+async function switchLocked(config: SwitchOptions, network: NetworkConfig, accountOrder: Readonly<Record<string, readonly string[]>>): Promise<SwitchResult> {
   const state = await readState();
   const clients = config.clients.length > 0 ? config.clients : clientsOf(config.provider).filter((client) =>
     !client.startsWith('pi-') || client === config.triggerClient || existsSync(clientPath(client)));
@@ -221,7 +221,11 @@ async function switchLocked(config: SwitchOptions, network: NetworkConfig): Prom
     return result(`${current.email} 仍有额度，不切换`, config.reason, { from: current.email, checked });
   }
   let waitUntil = 0;
-  for (const candidate of pool) {
+  const order = accountOrder[config.provider] ?? [];
+  const ranks = new Map<string, number>();
+  for (const id of order) if (!ranks.has(id)) ranks.set(id, ranks.size);
+  const candidates = [...pool].sort((a, b) => (ranks.get(a.id) ?? Infinity) - (ranks.get(b.id) ?? Infinity));
+  for (const candidate of candidates) {
     if (candidate.id === current?.id) continue;
     const candidateStatus = await assess(candidate, state, config, network);
     checked.push(candidateStatus);

@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   availabilityByEmail,
   accountsDir,
   codexAuthPath,
+  dataDir,
   nested,
   observations,
   opencodeAuthPath,
@@ -13,7 +15,51 @@ import {
   switchWithUsage,
   usageByEmail,
   usageWindow,
+  writeAccount,
 } from './switcher-fixture.js';
+
+test('configured order checks candidates before filename order and skips unavailable entries', async () => {
+  reset();
+  writeAccount('c@x.com');
+  writeAccount('d@x.com');
+  writeFileSync(join(dataDir, 'config.json'), JSON.stringify({ accountOrder: {
+    codex: ['codex:missing@x.com', null, 'codex:c@x.com', 'codex:c@x.com', 'codex:b@x.com'],
+  } }));
+  usageByEmail.set('c@x.com', [usageWindow('primary', 100, 3_600_000)]);
+  usageByEmail.set('b@x.com', [usageWindow('primary', 100, 3_600_000)]);
+  const result = await switchWithUsage({ exhausted: true, dryRun: true, cacheMs: 0 });
+  assert.equal(result.to, 'd@x.com');
+  assert.deepEqual(observations.queried, ['c@x.com', 'b@x.com', 'd@x.com']);
+});
+
+test('no-check honors configured order while invalid config falls back to filename order', async () => {
+  for (const [accountOrder, expected] of [
+    [{ codex: ['codex:c@x.com'] }, 'c@x.com'],
+    [{ codex: 'invalid' }, 'b@x.com'],
+    [null, 'b@x.com'],
+  ] as const) {
+    reset();
+    writeAccount('c@x.com');
+    writeFileSync(join(dataDir, 'config.json'), JSON.stringify({ accountOrder }));
+    const result = await switchWithUsage({ exhausted: true, check: false, dryRun: true });
+    assert.equal(result.to, expected);
+  }
+});
+
+test('Claude selection uses only Claude order and skips disabled accounts', async () => {
+  reset();
+  for (const [email, disabled] of [['a@x.com', false], ['b@x.com', false], ['c@x.com', true], ['d@x.com', false]] as const) {
+    writeFileSync(join(accountsDir, `claude-${email}.json`), JSON.stringify({
+      type: 'claude', email, disabled, access_token: `claude-${email}`,
+      expired: new Date(Date.now() + 86_400_000).toISOString(),
+    }));
+  }
+  writeFileSync(join(dataDir, 'config.json'), JSON.stringify({ accountOrder: {
+    codex: ['claude:b@x.com'], claude: ['claude:c@x.com', 'claude:d@x.com'],
+  } }));
+  const result = await switchWithUsage({ provider: 'claude', clients: ['claude-cli'], dryRun: true, check: false });
+  assert.equal(result.to, 'd@x.com');
+});
 
 test('exhausted current account switches both clients to an available account', async () => {
   // Given: the current account is exhausted and the candidate is available.
