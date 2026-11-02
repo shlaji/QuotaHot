@@ -77,7 +77,8 @@
 .wechat-confirm p { margin-top: 0; }
 .wechat-phrase { white-space: nowrap; }
 .wechat-inbox { display: grid; gap: var(--task-space-3); min-width: 0; }
-.wechat-history { min-width: 0; }
+.wechat-history { min-width: 0; height: min(calc(var(--task-space-10) * 12), 60dvh); overflow-y: auto; overflow-anchor: none; scrollbar-width: thin; scrollbar-color: var(--wechat-control-line) var(--panel); }
+.wechat-history:focus-visible { outline: calc(var(--task-space-1) / 2) solid var(--accent-strong); outline-offset: calc(var(--task-space-1) / 2); }
 .wechat-history-sentinel { block-size: var(--task-space-3); }
 .wechat-history-hint { margin: var(--task-space-1) 0 0; color: var(--wechat-secondary); font-size: var(--wechat-font-note); }
 .wechat-pane h3 { font-size: var(--wechat-font-body); margin: 0; overflow-wrap: break-word; }

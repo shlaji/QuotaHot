@@ -89,20 +89,20 @@ for (const timeoutMs of [-1, 0, 1.5, 2_147_483_648, Number.MAX_SAFE_INTEGER]) {
 }
 
 for (const body of ['{"ret":-14}', '{"ret":0,"errcode":-14}', '{"ret":5,"errcode":-14}']) {
-  test(`maps session expiry before generic upstream errors: ${body}`, async () => {
+  test(`uses HTTP status rather than response error fields: ${body}`, async () => {
     const { client } = fixture(body);
-    await assert.rejects(client.getUpdates(), safeError('auth_required'));
+    assert.deepEqual(await client.getUpdates(), { kind: 'updates', msgs: [] });
   });
 }
 
 for (const body of ['{"ret":5}', '{"errcode":8}', '{"ret":0,"errcode":3}']) {
-  test(`maps upstream rejection without leaking errmsg: ${body}`, async () => {
+  test(`ignores response error fields without leaking errmsg: ${body}`, async () => {
     const { client } = fixture(body.replace('}', ',"errmsg":"raw-secret context-secret upload-secret"}'));
-    await assert.rejects(client.getUpdates(), safeError('upstream_failure'));
+    assert.deepEqual(await client.getUpdates(), { kind: 'updates', msgs: [] });
   });
 }
 
-for (const status of [301, 307, 401, 403, 429, 503]) {
+for (const status of [201, 204, 301, 307, 401, 403, 429, 503]) {
   test(`maps HTTP ${status} without parsing or exposing response content`, async () => {
     const { client } = fixture('raw-secret upload-secret', status);
     await assert.rejects(client.getUpdates(), (error: unknown) => {
@@ -114,7 +114,7 @@ for (const status of [301, 307, 401, 403, 429, 503]) {
   });
 }
 
-for (const body of ['null', '[]', '{', '{"ret":"0"}', '{"errcode":null}', '{"msgs":{}}',
+for (const body of ['null', '[]', '{', '{"msgs":{}}',
   '{"get_updates_buf":3}', '{"longpolling_timeout_ms":-1}', '{"longpolling_timeout_ms":0}',
   '{"longpolling_timeout_ms":1.5}', '{"msgs":null}']) {
   test(`rejects malformed boundary value ${body}`, async () => {
@@ -154,7 +154,7 @@ test('does not log request secrets, raw upstream errors, or transport exceptions
     }
   });
   const { client } = fixture('{"ret":8,"errmsg":"bot-secret-sentinel context-secret cdn-secret upload-secret raw-secret"}');
-  await assert.rejects(client.getUpdates(), safeError('upstream_failure'));
+  assert.deepEqual(await client.getUpdates(), { kind: 'updates', msgs: [] });
   for (const log of logs) assert.equal(log.mock.callCount(), 0);
 });
 
@@ -175,7 +175,7 @@ test('uses the real HTTP transport against a loopback simulator and parses its e
   const server = createServer((req, res) => {
     assert.equal(req.url, '/ilink/bot/getupdates');
     assert.equal(req.headers.authorization, `Bearer ${binding.botToken}`);
-    res.end('{"ret":0,"msgs":[{"message_id":18446744073709551615,"message_type":1,"from_user_id":"contact"}],"get_updates_buf":"wire"}');
+    res.end('{"msgs":[{"message_id":18446744073709551615,"message_type":1,"from_user_id":"contact"}],"get_updates_buf":"wire"}');
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -209,8 +209,6 @@ for (const mode of ['timeout', 'aborted'] as const) {
   });
 }
 
-for (const body of ['{"ret":-14,"errcode":"raw-secret"}', '{"ret":null,"errcode":-14,"msgs":false}']) {
-  test('gives authentication expiry precedence over malformed envelope fields', async () => {
-    await assert.rejects(fixture(body).client.getUpdates(), safeError('auth_required'));
-  });
-}
+test('rejects malformed receive data even when an error field is present', async () => {
+  await assert.rejects(fixture('{"ret":null,"errcode":-14,"msgs":false}').client.getUpdates(), safeError('invalid_response'));
+});

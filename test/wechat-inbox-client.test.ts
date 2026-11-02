@@ -66,6 +66,7 @@ for (const operation of operations) {
   for (const [body, code] of [['null', 'invalid_response'], ['{', 'invalid_response'], ['[]', 'invalid_response'],
     ['{"ret":"0"}', 'invalid_response'], ['{"ret":null}', 'invalid_response'],
     ['{"ret":9,"errmsg":"raw-secret"}', 'upstream_failure']] as const) {
+    if (operation.path === 'sendmessage' && body.startsWith('{"ret"')) continue;
     test(`${operation.path} sanitizes invalid or rejected response ${body}`, async () => {
       const { client, calls } = fixture(body);
       await assert.rejects(operation.invoke(client), safeError(code));
@@ -99,18 +100,30 @@ for (const operation of operations) {
     const stream = Readable.from((async function* () { yield '{'; throw new Error(secrets.join(' ')); })());
     const client = new IlinkBotClient(binding, async () => new HttpResponse(200, new Headers(), stream));
     await assert.rejects(operation.invoke(client), safeError('transport_failed'));
-    await assert.rejects(operation.invoke(fixture(JSON.stringify({ ret: 5, errmsg: secrets.join(' ') })).client), safeError('upstream_failure'));
+    if (operation.path !== 'sendmessage') {
+      await assert.rejects(operation.invoke(fixture(JSON.stringify({ ret: 5, errmsg: secrets.join(' ') })).client), safeError('upstream_failure'));
+    }
     for (const log of logs) assert.equal(log.mock.callCount(), 0);
   });
 }
 
-test('sendMessage accepts only explicit ret zero and never returns a server message ID', async () => {
+test('sendMessage uses HTTP status rather than response ret and never returns a server message ID', async () => {
   assert.equal(await fixture('{"ret":0,"message_id":"9","errmsg":"raw-secret"}').client.sendMessage(outgoing), undefined);
   for (const body of ['{}', '{"message_id":"9"}']) {
-    await assert.rejects(fixture(body).client.sendMessage(outgoing), safeError('invalid_response'));
+    assert.equal(await fixture(body).client.sendMessage(outgoing), undefined);
   }
-  await assert.rejects(fixture('{"ret":-14,"errmsg":"raw-secret"}').client.sendMessage(outgoing), safeError('upstream_failure'));
+  assert.equal(await fixture('{"ret":-14,"errmsg":"raw-secret"}').client.sendMessage(outgoing), undefined);
 });
+
+test('sendMessage accepts the actual no-ret response without exposing its uint64 ID', async () => {
+  assert.equal(await fixture('{"message_id":7518649076676660872}').client.sendMessage(outgoing), undefined);
+});
+
+for (const status of [201, 204, 400, 503]) {
+  test(`sendMessage rejects HTTP ${status}`, async () => {
+    await assert.rejects(fixture('{"message_id":7518649076676660872}', status).client.sendMessage(outgoing), safeError('http_failure'));
+  });
+}
 
 test('upload and config responses expose only validated optional DTO fields', async () => {
   assert.deepEqual(await fixture('{"upload_param":"upload-secret","thumb_upload_param":"thumb","upload_full_url":"https://cdn.test/path","errmsg":"raw-secret","extra":{}}')

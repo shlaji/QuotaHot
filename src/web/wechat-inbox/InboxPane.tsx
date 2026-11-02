@@ -37,36 +37,39 @@ export function InboxView({ active, state, loader, controls }: { readonly contro
 
   useEffect(() => {
     const sentinel = olderSentinel.current;
-    if (!active || !sentinel || !state.bindingId || !state.hasMore) return;
+    const history = historyRef.current;
+    if (!active || !sentinel || !history || !state.bindingId || !state.hasMore) return;
     const loadOlder = () => {
       const bounds = sentinel.getBoundingClientRect();
-      if (state.messagesLoading || !armed.current || bounds.bottom < 0 || bounds.top > window.innerHeight) return;
+      const viewport = history.getBoundingClientRect();
+      if (state.messagesLoading || !armed.current || bounds.bottom < viewport.top || bounds.top > viewport.bottom) return;
       armed.current = false;
-      const element = [...(historyRef.current?.querySelectorAll('.wechat-messages > li') ?? [])].find((message) => {
+      const element = [...history.querySelectorAll('.wechat-messages > li')].find((message) => {
         const rect = message.getBoundingClientRect();
-        return rect.bottom > 0 && rect.top < window.innerHeight;
+        return rect.bottom > viewport.top && rect.top < viewport.bottom;
       });
-      if (element) prependAnchor.current = { bindingId: state.bindingId, element, top: element.getBoundingClientRect().top, count: state.messages.length };
+      if (element) prependAnchor.current = { bindingId: state.bindingId, element, top: element.getBoundingClientRect().top - viewport.top, count: state.messages.length };
       void loader.loadMore();
     };
     const onScroll = () => {
-      const next = window.scrollY;
+      const next = history.scrollTop;
       if (next < lastScrollTop.current) armed.current = true;
       lastScrollTop.current = next;
       loadOlder();
     };
-    lastScrollTop.current = window.scrollY;
-    const observer = new IntersectionObserver(loadOlder);
+    lastScrollTop.current = history.scrollTop;
+    const observer = new IntersectionObserver(loadOlder, { root: history });
     observer.observe(sentinel);
-    window.addEventListener('scroll', onScroll, { passive: true });
-    return () => { observer.disconnect(); window.removeEventListener('scroll', onScroll); };
+    history.addEventListener('scroll', onScroll, { passive: true });
+    return () => { observer.disconnect(); history.removeEventListener('scroll', onScroll); };
   }, [active, loader, state.bindingId, state.hasMore, state.messages.length, state.messagesLoading]);
 
   useLayoutEffect(() => {
     const anchor = prependAnchor.current;
-    if (!anchor || anchor.bindingId !== state.bindingId || state.messagesLoading || state.messages.length <= anchor.count) return;
-    window.scrollBy(0, anchor.element.getBoundingClientRect().top - anchor.top);
-    lastScrollTop.current = window.scrollY;
+    const history = historyRef.current;
+    if (!anchor || !history || anchor.bindingId !== state.bindingId || state.messagesLoading || state.messages.length <= anchor.count) return;
+    history.scrollTop += anchor.element.getBoundingClientRect().top - history.getBoundingClientRect().top - anchor.top;
+    lastScrollTop.current = history.scrollTop;
     prependAnchor.current = null;
   }, [state.bindingId, state.messages.length, state.messagesLoading]);
 
@@ -102,7 +105,7 @@ export function InboxView({ active, state, loader, controls }: { readonly contro
         {state.messagesError && <p role="alert">{state.messagesError} 请刷新消息。</p>}
         {state.messagesLoading && <p role="status">正在加载消息…</p>}
         {state.bindingId && <>
-          <div ref={historyRef} className="wechat-history" role="region" aria-label="消息历史，向上滚动加载更早消息">
+          <div ref={historyRef} className="wechat-history" role="region" tabIndex={0} aria-label="消息历史，向上滚动加载更早消息">
             {state.hasMore && <div ref={olderSentinel} className="wechat-history-sentinel" aria-hidden="true" />}
             {!state.messagesLoading && !state.messagesError && state.messages.length === 0 && <p className="empty" role="status">{canSend ? '暂无已保存消息。可手动发送文本，或稍后刷新。' : '暂无已保存消息，请稍后刷新。'}</p>}
             <InboxMessages messages={state.messages} />
@@ -121,6 +124,14 @@ export function InboxPane({ active }: { readonly active: boolean }) {
   const [controlState, setControlState] = useState(INITIAL_WECHAT_STATE);
   const [controls] = useState(() => createWechatLoader(setControlState));
   useEffect(() => { loader.setActive(active); return () => loader.setActive(false); }, [active, loader]);
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => {
+      const current = loader.getState();
+      if (!current.bindingsLoading) void loader.refresh();
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [active, loader]);
   useEffect(() => { controls.setActive(active); return () => controls.setActive(false); }, [active, controls]);
   useEffect(() => { if (active && controlState.revision > 0) void loader.refresh(); }, [active, controlState.revision, loader]);
   return <InboxView active={active} state={state} loader={loader} controls={{ state: controlState, loader: controls }} />;

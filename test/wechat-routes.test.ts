@@ -225,7 +225,7 @@ test('renders QR locally without fetching an external image or returning the raw
   const cookie = response.headers.get('set-cookie');
   assert.ok(cookie);
   assert.match(cookie, new RegExp(`^${flowCookieName}=[A-Za-z0-9_-]{43};`));
-  for (const attribute of ['HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/api/wechat', 'Max-Age=600']) assert.ok(cookie.includes(attribute));
+  for (const attribute of ['HttpOnly', 'SameSite=Strict', 'Path=/api/wechat', 'Max-Age=600']) assert.ok(cookie.includes(attribute));
 });
 
 test('confirms a binding without issuing a persistent browser cookie or session expiry', async (t) => {

@@ -9,7 +9,7 @@ export interface WechatRouteDependencies {
 }
 
 const FLOW_COOKIE = 'quotahot_wechat_flow';
-const COOKIE_OPTIONS = { httpOnly: true, secure: true, sameSite: 'Strict', path: '/api/wechat' } as const;
+const COOKIE_OPTIONS = { httpOnly: true, sameSite: 'Strict', path: '/api/wechat' } as const;
 
 class InvalidWechatRequest extends Error {}
 
@@ -56,7 +56,7 @@ export function wechatRoutes(dependencies: WechatRouteDependencies): Hono {
     const attempt = await login.start(getCookie(context, FLOW_COOKIE));
     try {
       const svg = await qrSvg(attempt.qrPayload);
-      setCookie(context, FLOW_COOKIE, attempt.flowToken, { ...COOKIE_OPTIONS, maxAge: 600 });
+      setCookie(context, FLOW_COOKIE, attempt.flowToken, { ...COOKIE_OPTIONS, secure: new URL(context.req.url).protocol === 'https:', maxAge: 600 });
       return context.json({ attemptId: attempt.attemptId, qrSvg: svg, expiresAt: attempt.expiresAt }, 201);
     } catch (error) {
       login.cancel(attempt.attemptId, attempt.flowToken);

@@ -213,16 +213,17 @@ test('confirmed list QR refreshes bindings without remounting selected history o
   const beforeCount = requests.filter((path) => path.endsWith('/bindings')).length;
   await page.getByRole('button', { name: '添加微信用户', exact: true }).click();
   await page.getByAltText('微信添加用户二维码', { exact: true }).waitFor();
-  await page.evaluate(() => window.scrollTo(0, 1000));
-  await page.waitForFunction(() => window.scrollY === 1000);
+  await history.evaluate((element) => { element.scrollTop = 500; });
+  const historyScroll = await history.evaluate((element) => element.scrollTop);
+  assert.ok(historyScroll > 0);
   confirmed.resolve();
   await page.getByText('扫码已确认', { exact: true }).waitFor();
   await page.waitForFunction(() => document.querySelector('[aria-labelledby="wechat-inbox-bindings-title"]')?.getAttribute('aria-busy') === 'false');
   assert.ok(requests.filter((path) => path.endsWith('/bindings')).length > beforeCount);
   assert.equal(await page.getByLabel('消息正文').inputValue(), '扫码前的草稿');
   assert.equal(await history.getAttribute('data-preserved'), 'yes');
-  assert.equal(await history.evaluate((element) => getComputedStyle(element).overflowY), 'visible');
-  assert.equal(await page.evaluate(() => window.scrollY), 1000);
+  assert.equal(await history.evaluate((element) => getComputedStyle(element).overflowY), 'auto');
+  assert.equal(await history.evaluate((element) => element.scrollTop), historyScroll);
   assert.equal(await page.getByRole('button', { name: /测试账号.*正在接收/ }).getAttribute('aria-current'), 'true');
 });
 

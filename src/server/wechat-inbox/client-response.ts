@@ -117,16 +117,15 @@ function message(value: unknown): IlinkMessageResult {
   }
 }
 
-export function parseResponse<Result>(raw: string, decode: (value: Record<string, unknown>) => Result, requireAccepted = false): Result {
+export function parseResponse<Result>(raw: string, decode: (value: Record<string, unknown>) => Result, statusOnly = false): Result {
   try {
     const value: unknown = parseLosslessJson(raw);
     if (!record(value)) throw new IlinkClientError('invalid_response');
-    if (!requireAccepted && [value.ret, value.errcode].some((code) => code instanceof LosslessNumber && Number(code.source) === -14)) {
+    if (statusOnly) return decode(value);
+    if ([value.ret, value.errcode].some((code) => code instanceof LosslessNumber && Number(code.source) === -14)) {
       throw new IlinkClientError('auth_required');
     }
     const ret = optionalInteger(value.ret);
-    if (requireAccepted && ret === undefined) throw new IlinkClientError('invalid_response');
-    if (requireAccepted && ret !== 0) throw new IlinkClientError('upstream_failure');
     const errcode = optionalInteger(value.errcode);
     if ((ret !== undefined && ret !== 0) || (errcode !== undefined && errcode !== 0)) throw new IlinkClientError('upstream_failure');
     return decode(value);

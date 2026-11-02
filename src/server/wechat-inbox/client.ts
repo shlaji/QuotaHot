@@ -60,7 +60,7 @@ export class IlinkBotClient {
   }
 
   async getUpdates(cursor = '', options: IlinkRequestOptions = {}): Promise<IlinkUpdates> {
-    return parseResponse(await this.botRequest('getupdates', { get_updates_buf: cursor }, options), parseUpdates);
+    return parseResponse(await this.botRequest('getupdates', { get_updates_buf: cursor }, options), parseUpdates, true);
   }
 
   async getUploadUrl(input: IlinkUploadUrlRequest, options: IlinkRequestOptions = {}): Promise<IlinkUploadUrlResponse> {
@@ -112,7 +112,7 @@ export class IlinkBotClient {
     } catch (error) {
       throw this.transportError(error, options.signal, deadline);
     }
-    if (!response.ok) {
+    if (!response.ok || ((endpoint === 'getupdates' || endpoint === 'sendmessage') && response.status !== 200)) {
       const cleanup = finished(response.body);
       response.body.destroy();
       await Promise.allSettled([cleanup]);

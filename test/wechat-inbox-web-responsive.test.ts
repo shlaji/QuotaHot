@@ -41,7 +41,7 @@ for (const width of [390, 1440]) {
   });
 }
 
-test('captures responsive light and dark inbox evidence without horizontal or unexpected nested scrolling', options, async (context) => {
+test('captures responsive light and dark inbox evidence with a bounded history scroller', options, async (context) => {
   const qrSvg = await QRCode.toString('synthetic-responsive-user', { type: 'svg' });
   for (const width of [390, 1440, 1920]) {
     for (const colorScheme of ['light', 'dark'] as const) {
@@ -54,10 +54,12 @@ test('captures responsive light and dark inbox evidence without horizontal or un
         const overflow = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth,
           nested: [...document.querySelectorAll('.wechat-pane *')].filter((element) => ['auto', 'scroll'].includes(getComputedStyle(element).overflowY) && element.scrollHeight > element.clientHeight).length }));
         assert.ok(overflow.scroll <= overflow.width, JSON.stringify(overflow));
-        assert.equal(overflow.nested, 0);
+        assert.equal(overflow.nested, 1);
         await harness.capture(page, `${width}-${colorScheme}-top`);
         await harness.captureElement(page, page.locator('.wechat-inbox'), `${width}-${colorScheme}-inbox`);
         const history = page.getByLabel('消息历史，向上滚动加载更早消息');
+        const historySize = await history.evaluate((element) => ({ client: element.clientHeight, scroll: element.scrollHeight }));
+        assert.ok(historySize.scroll > historySize.client && historySize.client <= 540, JSON.stringify(historySize));
         await history.locator('video').last().scrollIntoViewIfNeeded();
         const video = history.locator('video').last();
         assert.equal(await video.count(), 1);

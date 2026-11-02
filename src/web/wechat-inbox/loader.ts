@@ -33,6 +33,7 @@ export function createInboxLoader(onChange: (state: InboxState) => void) {
   let bindingRequest: AbortController | undefined;
   let messageRequest: AbortController | undefined;
   const targets = new Map<string, TargetState>();
+  const draftRevisions = new Map<string, number>();
   const sends = new Map<string, AbortController>();
   const typingChains = new Map<string, Promise<void>>();
   const update = (patch: Partial<InboxState>) => { state = { ...state, ...patch }; onChange(state); };
@@ -124,12 +125,13 @@ export function createInboxLoader(onChange: (state: InboxState) => void) {
     selectBinding,
     refreshMessages: () => readMessages(),
     loadMore: () => readMessages(true),
-    setDraft: (draft: string) => { if (state.bindingId) patchTarget(target(), { draft }); },
+    setDraft: (draft: string) => { if (state.bindingId) { const value = target(); draftRevisions.set(value, (draftRevisions.get(value) ?? 0) + 1); patchTarget(value, { draft }); } },
     typing: (status: 'typing' | 'cancel') => canSend() ? typingFor(target(), status) : Promise.resolve(),
     async send(input: InboxSend) {
       if (!canSend() || !state.bindingId || (input.kind === 'text' && !input.text.trim()) || input.kind === 'voice') return;
       const value = target();
       if (sends.has(value)) return;
+      const draftRevision = draftRevisions.get(value);
       const current = new AbortController();
       sends.set(value, current);
       cancelTyping();
@@ -138,7 +140,7 @@ export function createInboxLoader(onChange: (state: InboxState) => void) {
         const result = await inboxApi.send(value, input, current.signal);
         if (current.signal.aborted || sends.get(value) !== current) return;
         const draft = targets.get(value)?.draft ?? '';
-        patchTarget(value, { outcome: result.state, ...(result.state === 'accepted' && input.kind === 'text' && draft === input.text ? { draft: '' } : {}) });
+        patchTarget(value, { outcome: result.state, ...(result.state === 'accepted' && input.kind === 'text' && draft === input.text && draftRevisions.get(value) === draftRevision ? { draft: '' } : {}) });
         if (value === state.bindingId) void readMessages();
       } catch (error) {
         if (!current.signal.aborted && sends.get(value) === current) patchTarget(value, {

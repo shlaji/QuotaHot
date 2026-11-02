@@ -550,6 +550,8 @@ Web 页面顶栏会显示当前运行服务的版本号。
 
 浏览器只访问 QuotaHot 的同源 API，并显示服务端生成的本地二维码 SVG，不会取得 iLink 的原始二维码凭据或 `bot_token`。扫码确认后只保存或更新该微信用户的绑定凭证，不签发或要求持久 `quotahot_wechat` 浏览器会话 cookie。短期 `quotahot_wechat_flow` cookie 仍保留，仅用于保护本次二维码的轮询和取消，不是绑定列表或消息 API 的登录凭证。取消、切离微信页、二维码过期或重新扫码只结束或替换待完成流程，不停止已有绑定收发。
 
+扫码流程 cookie 保持 `HttpOnly`、`SameSite=Strict` 和 `/api/wechat` 路径；服务端请求为 HTTPS 时设置 `Secure`，HTTP 时不设置。服务端不信任 `Forwarded` 或 `X-Forwarded-Proto`：HTTPS 在反向代理终止、代理以 HTTP 连接 QuotaHot 时，服务端无法确认外部协议，代理必须为该 cookie 添加 `Secure` 并阻止通过外部 HTTP 访问。HTTP 直连会明文传输流程 cookie，应仅在可信网络中使用。
+
 列表内每个绑定提供解除操作：`DELETE /api/wechat/bindings/{bindingId}` 只操作路径指定的绑定，不依赖“当前浏览器登录的是谁”。解除成功返回 `status: unlinked`，停止该用户的本地收发但保留历史，不影响其他绑定，也不代表撤销微信上游授权；同一身份重新扫码授权后可恢复通信并查看原历史。绑定列表、解除、消息、typing 和附件统一受全局 Web `accessGuard`、按部署配置启用的 Basic Auth 及同源/跨站保护约束。选择绑定用户后直接查看其消息；界面保留实际连接及只读状态，须先收到该用户自己的有效入站消息上下文才可手动回复，语音出站仍禁用。
 
 **架构切换说明（2026-10-25）**：移除持久浏览器会话及基于进程内 QR 轮询能力的逐绑定核验功能，保留绑定 ID 解除和二维码新增/重新授权；旧 `/session`、单数 `/binding` 入口已移除。升级不删除既有 `wechat/wechat.db` 中的 `wechat_sessions` 哈希表及旧行，而让其惰性保留；代码不读取、续期、新建或接受这些会话，旧 cookie 也不再提供访问能力。

@@ -122,15 +122,15 @@ test('persists sending before one text request when the target is local', async 
   assert.notEqual(sent[0]?.client_id, sent[1]?.client_id);
 });
 
-for (const [status, body, state] of [[200, '{"ret":9,"errmsg":"secret"}', 'failed'], [400, '', 'failed'],
+for (const [status, body, state] of [[200, '{"ret":9,"errmsg":"secret"}', 'accepted'], [400, '', 'failed'],
   [401, '', 'failed'], [403, '', 'failed'], [408, '', 'unknown'], [425, '', 'unknown'], [500, '', 'unknown'],
   [200, 'invalid secret', 'unknown'], [0, '', 'unknown'], [-1, '', 'unknown']] as const) {
-  test(`classifies ${status}/${body} without retry when send fails`, async (t) => {
+  test(`classifies ${status}/${body} without retry`, async (t) => {
     let calls = 0;
     const fixture = setup(t, async () => { calls++; if (status === -1) throw new DOMException('secret', 'TimeoutError'); if (!status) throw new Error('secret transport'); return reply(body, status); });
     const result = await fixture.sender.send({ ...fixture.target, kind: 'text', text: 'secret text' });
     assert.equal(result.state, state);
-    assert.equal(result.errorCode, state === 'failed' ? 'send_rejected' : 'send_unknown');
+    assert.equal(result.errorCode, state === 'accepted' ? null : state === 'failed' ? 'send_rejected' : 'send_unknown');
     assert.equal(calls, 1);
     assert.doesNotMatch(JSON.stringify(result), /secret|client_id|context/);
   });
@@ -141,7 +141,7 @@ test('returns accepted when BOT echo precedes a rejected HTTP completion', async
     const body: { msg: { client_id: string } } = JSON.parse(options.body ?? '{}');
     fixture.store.saveBatch('owner', { nextCursor: 'echo', messages: [{ ...input('echo', 'contact'),
       direction: 'outbound', messageType: 2, state: 'accepted', clientId: body.msg.client_id }] });
-    return reply('{"ret":9}');
+    return reply('{"ret":9}', 400);
   });
   const result = await fixture.sender.send({ ...fixture.target, kind: 'text', text: 'hello' });
   assert.deepEqual(result, { messageId: result.messageId, state: 'accepted', errorCode: null });

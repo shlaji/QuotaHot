@@ -39,7 +39,7 @@ export function InboxComposer({ state, loader, canSend, waitingForInbound }: { r
       <option disabled value="voice">语音（暂未开放）</option>
     </select></label>
     <p id={voiceId} className="wechat-note">语音出站在本次范围内保持禁用。收到的语音可通过本地附件播放或下载。</p>
-    {kind === 'text' ? <label className="field task-field"><span>消息正文</span><textarea rows={3} value={state.draft} disabled={disabled} aria-describedby={helpId}
+    {kind === 'text' ? <label className="field task-field"><span>消息正文</span><textarea rows={3} value={state.draft} disabled={!canSend} aria-describedby={helpId}
        placeholder="输入要发送给所选绑定用户的文本" onChange={(event) => loader.setDraft(event.target.value)} /></label>
       : <label className="field"><span>选择{kind === 'image' ? '图片' : kind === 'video' ? '视频' : '文件'}</span><input ref={fileInput} type="file" disabled={disabled}
         accept={kind === 'image' ? 'image/*' : kind === 'video' ? 'video/*' : undefined} aria-describedby={helpId}
