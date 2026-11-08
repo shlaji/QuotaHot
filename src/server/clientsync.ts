@@ -229,6 +229,7 @@ function tokenPatches(source: string, acct: Account): Patch[] {
       { field: 'chatgpt-subscription.refresh', value: acct.refreshToken, kind: 'secret' },
       { field: 'chatgpt-subscription.expires', value: acct.expiresAt, kind: 'time' },
       { field: 'chatgpt-subscription.accountId', value: acct.accountId },
+      { field: 'chatgpt-subscription.email', value: acct.email },
     ];
   }
   // cli-proxy-api：字段名与本程序自己的存储完全一致

@@ -462,6 +462,7 @@ test('写回 Oh-My-OpenCode agent：只更新 ChatGPT 订阅项并保留其他 p
     refresh: 'codex-refresh',
     expires: 1_800_000_000_000,
     accountId: 'acct-123',
+    email: 'c@example.com',
   });
   assert.deepEqual(saved['opencode-go'], { type: 'api', key: 'sk-user-own-key' });
   assert.deepEqual(saved.agnes, { type: 'api', key: 'agnes-key' });
