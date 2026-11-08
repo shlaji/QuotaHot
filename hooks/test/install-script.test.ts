@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { access, copyFile, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -64,7 +64,7 @@ test('installer finds the bundle from the source tree, where it sits one level u
     await readFile(join(packageDir, 'dist', 'opencode-plugin-template.js'), 'utf8'));
 });
 
-test('shell installer rejects client selectors before installing', async (t) => {
+test('shell installer rejects unknown targets and extra arguments before installing', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'quotahot-hook-script-pi-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const packageDir = join(root, 'package');
@@ -73,24 +73,36 @@ test('shell installer rejects client selectors before installing', async (t) => 
   await copyFile(resolve('scripts/install.sh'), join(packageDir, 'install.sh'));
   await writeFile(join(packageDir, 'quotahot-hook'), `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(process.env.HOME + '/target', process.argv.slice(2).join(' '));\n`, { mode: 0o755 });
   await writeFile(join(packageDir, 'package.json'), '{"type":"commonjs"}\n');
-  assert.throws(() => execFileSync('sh', [join(packageDir, 'install.sh'), 'pi'], {
-    cwd: packageDir, env: { ...process.env, HOME: home }, encoding: 'utf8',
-  }));
+  for (const args of [['pi'], ['codex'], ['all'], ['omo', 'extra'], ['--help', 'extra']]) {
+    const result = await exec('sh', [join(packageDir, 'install.sh'), ...args], {
+      cwd: packageDir, env: { ...process.env, HOME: home },
+    }).then(() => ({ code: 0 }), (error: unknown) => {
+      if (error instanceof Error && 'code' in error) return { code: error.code };
+      throw error;
+    });
+    assert.equal(result.code, 2, args.join(' '));
+  }
   await assert.rejects(access(join(home, '.local', 'bin', 'quotahot-hook')));
 });
 
-test('shell installer installs without forwarding a client selector', async (t) => {
+test('shell installer reports failure when default OmO registration fails', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'quotahot-hook-script-default-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const packageDir = join(root, 'package');
   const home = join(root, 'home');
   await mkdir(packageDir, { recursive: true });
   await copyFile(resolve('scripts/install.sh'), join(packageDir, 'install.sh'));
-  await writeFile(join(packageDir, 'quotahot-hook'), `#!/usr/bin/env node\nrequire('node:fs').writeFileSync(process.env.HOME + '/target', process.argv.slice(2).join(' '));\n`, { mode: 0o755 });
+  await writeFile(join(packageDir, 'quotahot-hook'), '#!/usr/bin/env node\nprocess.exit(process.argv[3] === "omo" ? 7 : 0);\n', { mode: 0o755 });
   await writeFile(join(packageDir, 'package.json'), '{"type":"commonjs"}\n');
   await copyFile(resolve('src/opencode-plugin-template.js'), join(packageDir, 'opencode-plugin-template.js'));
   await copyFile(resolve('src/omo-plugin-template.js'), join(packageDir, 'omo-plugin-template.js'));
-  const stdout = execFileSync('sh', [join(packageDir, 'install.sh')], { cwd: packageDir, env: { ...process.env, HOME: home }, encoding: 'utf8' });
-  assert.match(stdout, /Installed/);
-  assert.equal(await readFile(join(home, 'target'), 'utf8'), 'install');
+  const result = await exec('sh', [join(packageDir, 'install.sh')], {
+    cwd: packageDir, env: { ...process.env, HOME: home },
+  }).then(({ stdout }) => ({ code: 0, stdout }), (error: unknown) => {
+    if (error instanceof Error && 'code' in error && 'stdout' in error) return { code: error.code, stdout: error.stdout };
+    throw error;
+  });
+  assert.equal(result.code, 7);
+  assert.equal(typeof result.stdout, 'string');
+  assert.doesNotMatch(String(result.stdout), /Installed/);
 });

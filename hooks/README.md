@@ -16,13 +16,15 @@
 tar -xzf quotahot-hook-1.0.0.tar.gz
 cd quotahot-hook-1.0.0
 sh install.sh
+# 仅安装独立 OmO Native 可改用：
+# sh install.sh omo
 export PATH="$HOME/.local/bin:$PATH"
 quotahot-hook help
 ```
 
-安装命令会把 bundle、`opencode-plugin-template.js` 和 `omo-plugin-template.js` 放到 `~/.local/bin/`，注册 OpenCode 插件，并清除旧版本中属于 QuotaHot 的 Codex/Pi 触发集成。模板必须与可执行文件保持同目录；OmO 扩展还需单独运行 `quotahot-hook install omo` 安装。安装前会拒绝 shell 脚本的客户端目标参数。旧集成清理不会碰 Codex/Pi `auth.json`。
+安装命令会把 bundle、`opencode-plugin-template.js` 和 `omo-plugin-template.js` 放到 `~/.local/bin/`。不带参数时同时注册 OpenCode 插件和独立 OmO Native 扩展，并清除旧版本中属于 QuotaHot 的 Codex/Pi 触发集成；`sh install.sh omo` 则只注册 OmO Native 扩展。模板必须与可执行文件保持同目录。脚本只接受可选的 `omo`，拒绝未知目标和多余参数。旧集成清理不会碰 Codex/Pi `auth.json`。
 
-完成后重启或重新加载 OpenCode。卸载时运行 `quotahot-hook uninstall`；它会移除 QuotaHot OpenCode 插件及可识别的旧 Codex/Pi 集成，不会修改账户文件。
+完成后重启或重新加载 OpenCode，并在 OmO 中执行 `/reload` 或重启 OmO。卸载 OpenCode 插件及可识别的旧 Codex/Pi 集成使用 `quotahot-hook uninstall`；卸载 OmO 扩展使用 `quotahot-hook uninstall omo`，都不会修改账户文件。
 
 Windows 可解压同一压缩包，在固定目录运行 `node quotahot-hook help` 或 `node quotahot-hook install`，并将 `package.json`、插件模板与 bundle 放在一起；OmO 使用 `node quotahot-hook install omo`。shell 安装脚本仅支持 Linux/macOS。
 
@@ -35,6 +37,8 @@ npm run typecheck
 npm test
 npm run build
 sh scripts/install.sh
+# 仅安装独立 OmO Native 可改用：
+# sh scripts/install.sh omo
 export PATH="$HOME/.local/bin:$PATH"
 quotahot-hook help
 ```

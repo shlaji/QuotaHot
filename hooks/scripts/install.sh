@@ -2,14 +2,20 @@
 set -eu
 
 usage() {
-  printf '%s\n' 'Usage: sh install.sh' \
+  printf '%s\n' 'Usage: sh install.sh [omo]' \
     'Installs quotahot-hook into ~/.local/bin.' \
-    'Requires Node.js >=24. Registers only the OpenCode plugin; no sudo needed.'
+    'Requires Node.js >=24; no sudo needed.' \
+    'Defaults to OpenCode and OmO Native; pass omo to register only the OmO Native extension.'
 }
 
+if [ "$#" -gt 1 ]; then
+  usage >&2
+  exit 2
+fi
 if [ "$#" -gt 0 ]; then
   case "$1" in
     -h|--help) usage; exit 0 ;;
+    omo) ;;
     *) usage >&2; exit 2 ;;
   esac
 fi
@@ -59,8 +65,15 @@ fi
 mv -f "$template_tmp" "$target_template"
 mv -f "$omo_template_tmp" "$target_omo_template"
 mv -f "$binary_tmp" "$target_binary"
-node "$target_binary" install
+node "$target_binary" install "$@"
+if [ "$#" -eq 0 ]; then
+  node "$target_binary" install omo
+fi
 printf '\n%s\n' 'Installed. Add the command directory to your shell PATH:' \
   '  export PATH="$HOME/.local/bin:$PATH"' \
-  'Then run: quotahot-hook help' \
-  'Restart OpenCode for the integration to take effect.'
+  'Then run: quotahot-hook help'
+if [ "${1:-}" = omo ]; then
+  printf '%s\n' 'Run /reload in OmO Native, or restart it, for the extension to take effect.'
+else
+  printf '%s\n' 'Restart OpenCode and run /reload in OmO Native (or restart it) for both integrations to take effect.'
+fi
