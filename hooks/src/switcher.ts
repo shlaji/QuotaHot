@@ -16,7 +16,7 @@ export const DEFAULT_MIN_INTERVAL_MS = 60_000;
 const FALLBACK_COOLDOWN_MS = 30 * 60_000;
 export const CLIENTS: Readonly<Record<string, string>> = {
   'codex-cli': 'Codex CLI', opencode: 'OpenCode', 'claude-cli': 'Claude Code',
-  'pi-claude': 'Pi Claude', 'pi-codex': 'Pi Codex',
+  'pi-claude': 'Pi Claude', 'pi-codex': 'Pi Codex', 'omo-agent': 'OmO Native',
 };
 
 export type AccountStatus = {
@@ -82,7 +82,7 @@ function options(partial: Partial<SwitchOptions>): SwitchOptions {
 }
 
 function clientsOf(provider: Provider): readonly string[] {
-  if (provider === 'codex') return ['codex-cli', 'opencode', 'pi-codex'];
+  if (provider === 'codex') return ['codex-cli', 'opencode', 'pi-codex', 'omo-agent'];
   if (provider === 'claude') return ['claude-cli', 'pi-claude'];
   return [];
 }
@@ -199,10 +199,13 @@ export async function surveyAccounts(
 async function switchLocked(config: SwitchOptions, network: NetworkConfig, accountOrder: Readonly<Record<string, readonly string[]>>): Promise<SwitchResult> {
   const state = await readState();
   const clients = config.clients.length > 0 ? config.clients : clientsOf(config.provider).filter((client) =>
-    !client.startsWith('pi-') || client === config.triggerClient || existsSync(clientPath(client)));
+    (!client.startsWith('pi-') && client !== 'omo-agent') || client === config.triggerClient || existsSync(clientPath(client)));
   if (clients.length === 0) return result(`${config.provider} 没有可切换的客户端`, config.reason);
   const trigger = config.triggerClient && clients.includes(config.triggerClient) ? config.triggerClient : clients[0];
   if (trigger === undefined) return result('没有可切换的客户端', config.reason);
+  if (trigger === 'omo-agent' && !(await readClientTokens(trigger, clientPath(trigger)))) {
+    return result('OmO 没有可管理的单账户 OAuth 凭证；多账户请使用 OmO 自带的切换', config.reason);
+  }
   const pool = (await loadAccounts(ACCOUNTS_DIR)).filter((account) => account.provider === config.provider && !account.disabled);
   if (pool.length < (config.recover ? 1 : 2)) return result(`账户目录里只有 ${pool.length} 个可用的 ${config.provider} 账户，没有可切换的对象`, config.reason);
   const current = await currentAccount(trigger, pool);

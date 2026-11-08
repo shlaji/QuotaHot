@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { accountIdOf, emailOf } from './account-files.js';
 import type { Account, ConfigChange, SyncResult } from './types.js';
+import { omoAuthSchema, syncOmo } from './omo-auth.js';
 
 type ClientTokens = {
   readonly accessToken: string;
@@ -37,7 +38,7 @@ export function opencodeAuthPath(): string {
 }
 
 export function omoAgentAuthPath(): string {
-  return join(homedir(), '.omo', 'agent', 'auth.json');
+  return join(process.env.OMO_CODING_AGENT_DIR?.trim() || join(homedir(), '.omo', 'agent'), 'auth.json');
 }
 
 export function piAuthPath(): string {
@@ -90,12 +91,11 @@ export async function readClientTokens(source: string, path: string): Promise<Cl
     return accessToken ? { accessToken, refreshToken: text(record.refresh), idToken: '', accountId: text(record.accountId), email: '', expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0 } : null;
   }
   if (source === 'omo-agent') {
-    const subscription = data['chatgpt-subscription'];
-    if (subscription === null || typeof subscription !== 'object' || Array.isArray(subscription)) return null;
-    const record = subscription as Record<string, unknown>;
-    const accessToken = text(record.access);
-    const expiresAt = Number(record.expires ?? 0);
-    return accessToken ? { accessToken, refreshToken: text(record.refresh), idToken: '', accountId: text(record.accountId), email: '', expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0 } : null;
+    const parsed = omoAuthSchema.safeParse(data);
+    if (!parsed.success) return null;
+    const record = parsed.data['chatgpt-subscription'];
+    const selected = record.accounts?.[0] ?? record;
+    return { accessToken: selected.access, refreshToken: selected.refresh, idToken: '', accountId: selected.accountId, email: '', expiresAt: selected.expires };
   }
   if (source === 'claude-cli') {
     const oauth = data.claudeAiOauth;
@@ -115,6 +115,7 @@ export async function readClientTokens(source: string, path: string): Promise<Cl
 
 export function clientPath(source: string): string {
   if (piProvider(source)) return piAuthPath();
+  if (source === 'omo-agent') return omoAgentAuthPath();
   if (source === 'codex-cli') return join(homedir(), '.codex', 'auth.json');
   if (source === 'opencode') return opencodeAuthPath();
   if (source === 'claude-cli') return join(homedir(), '.claude', '.credentials.json');
@@ -200,6 +201,7 @@ async function syncPi(account: Account, source: string, path: string, label: str
 
 async function syncOne(account: Account, source: string, path: string, label: string): Promise<SyncResult> {
   if (piProvider(source)) return syncPi(account, source, path, label);
+  if (source === 'omo-agent') return syncOmo(account, path, label);
   const base = { path, source, label };
   if (patches(source, account).length === 0) return { ...base, created: false, backupPath: '', changes: [], warning: '', error: 'Unknown client source' };
   try {

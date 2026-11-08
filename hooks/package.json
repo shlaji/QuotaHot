@@ -9,6 +9,7 @@
     "dist/quotahot-hook",
     "dist/opencode-plugin-template.js",
     "dist/opencode-notification-plugin-template.js",
+    "dist/omo-plugin-template.js",
     "dist/package.json",
     "README.md"
   ],

@@ -88,5 +88,17 @@ test('production build has no import.meta warning and resolves a relocated adjac
     assert.equal(result.status, 0, result.stderr);
     assert.equal(result.stdout, `# ${join(root, 'opencode/plugin/quotahot-session-notify.js')}\n${template.replace('"__QUOTAHOT_SESSION_NOTIFY_COMMAND_ARGS__"', JSON.stringify(command))}\n`);
   });
+  await context.test('relocated OmO plugin preview uses its adjacent template and agent directory', async () => {
+    const relocated = join(root, 'relocated omo package');
+    await cp(join(fixture, 'dist'), relocated, { recursive: true });
+    const binary = join(relocated, 'quotahot-hook');
+    const template = await readFile(join(relocated, 'omo-plugin-template.js'), 'utf8');
+    const agentDir = join(root, 'omo agent');
+    const result = spawnSync(process.execPath, [binary, 'install', 'omo', '--print'], {
+      cwd: root, env: { ...process.env, OMO_CODING_AGENT_DIR: agentDir }, encoding: 'utf8', timeout: 30_000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `# ${join(agentDir, 'extensions/quotahot.js')}\n${template.replace('"__QUOTAHOT_OMO_COMMAND_ARGS__"', JSON.stringify([process.execPath, binary]))}\n`);
+  });
   await rm(fixture, { recursive: true, force: true });
 });

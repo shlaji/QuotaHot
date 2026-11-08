@@ -71,11 +71,14 @@ function parse(input: string): Record<string, unknown> {
  * 那套判断，免得两处阈值各说各话。
  */
 export async function runHook(
-  _client: 'opencode',
+  client: 'opencode' | 'omo',
   input: string,
   opts: Partial<SwitchOptions> = {},
 ): Promise<HookOutput> {
   const payload = parse(input);
+  if (client === 'omo' && (payload.source !== 'omo' || payload.provider !== 'chatgpt-subscription')) {
+    return { stdout: JSON.stringify({ switched: false, outcome: 'skipped_no_signal' }), result: null, skipped: 'OmO 来源或模型不匹配', outcome: 'skipped_no_signal' };
+  }
 
   if (payload.source === 'opencode' && payload.recover === true && payload.provider === 'openai'
     && !opencodeSignal(payload).hit) {
@@ -107,7 +110,7 @@ export async function runHook(
   const result = await switchAccount({
     ...opts,
     provider: opts.provider ?? 'codex',
-    triggerClient: 'opencode',
+    triggerClient: client === 'omo' ? 'omo-agent' : 'opencode',
     exhausted: true,
     cacheMs: 0,
     threshold: 100,

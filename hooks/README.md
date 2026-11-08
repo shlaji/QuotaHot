@@ -1,8 +1,10 @@
 # QuotaHot Hook
 
-`quotahot-hook` 是独立账户切换命令。自动触发入口只有 **OpenCode 插件**：OpenCode 的 OpenAI（Codex）请求出现明确额度用尽信号时，hook 会选择可用的 Codex 账户并同步本机客户端凭证。OpenCode 的 Anthropic/Claude 额度错误不会触发自动切换；要切换 Claude 账户，请手动运行 `quotahot-hook switch --provider claude`。hook 不启动也不调用 QuotaHot Web 服务；与主程序共享的只有 `QUOTAHOT_DATA_DIR` 下的配置和账户文件。
+`quotahot-hook` 是独立账户切换命令。默认自动触发入口是 **OpenCode 插件**：OpenCode 的 OpenAI（Codex）请求出现明确额度用尽信号时，hook 会选择可用的 Codex 账户并同步本机客户端凭证。OpenCode 的 Anthropic/Claude 额度错误不会触发自动切换；要切换 Claude 账户，请手动运行 `quotahot-hook switch --provider claude`。hook 不启动也不调用 QuotaHot Web 服务；与主程序共享的只有 `QUOTAHOT_DATA_DIR` 下的配置和账户文件。
 
-一次 Codex 切换会同步 Codex CLI、OpenCode，以及已经存在的 Pi Codex 凭证；手动切换 Claude 会同步 Claude Code 和已经存在的 Pi Claude 凭证。Codex CLI 和 Pi 不再安装 QuotaHot hook 或插件，也不会独立触发切换；安装时仅保留对可识别为 QuotaHot 自有的旧 Codex hook 条目和 Pi 扩展的清理。缺少 Pi `auth.json` 时不会创建该文件，清理也不会删除账户凭证或其他工具的 hook。
+独立 OmO Native 可单独安装 `quotahot-hook install omo` 扩展。它只在 OmO 自身的账户轮换、重试及模型 fallback 已结束，且 ChatGPT Subscription 模型最终明确报额度错误时切换 QuotaHot 的 Codex 账户；成功后重新加载 OmO 凭证并续跑一次。OmO 已有多个凭证槽时由 OmO 自己处理账户切换，QuotaHot 不覆盖它的账户池。扩展不处理 Claude 或普通网络错误。
+
+一次 Codex 切换会同步 Codex CLI、OpenCode，以及已经存在的 Pi Codex 和 OmO Native 凭证；手动切换 Claude 会同步 Claude Code 和已经存在的 Pi Claude 凭证。Codex CLI 和 Pi 不再安装 QuotaHot hook 或插件，也不会独立触发切换；安装时仅保留对可识别为 QuotaHot 自有的旧 Codex hook 条目和 Pi 扩展的清理。缺少 Pi `auth.json` 时不会创建该文件，清理也不会删除账户凭证或其他工具的 hook。
 
 ## 构建与安装
 
@@ -18,11 +20,11 @@ export PATH="$HOME/.local/bin:$PATH"
 quotahot-hook help
 ```
 
-安装命令会把 bundle 和 `opencode-plugin-template.js` 一起放到 `~/.local/bin/`，注册 OpenCode 插件，并清除旧版本中属于 QuotaHot 的 Codex/Pi 触发集成。模板必须与可执行文件保持同目录，`install` 与 `install --print` 都会读取它并填入当前可执行文件的完整命令参数。安装前会拒绝客户端目标参数。旧集成清理不会碰 Codex/Pi `auth.json`。
+安装命令会把 bundle、`opencode-plugin-template.js` 和 `omo-plugin-template.js` 放到 `~/.local/bin/`，注册 OpenCode 插件，并清除旧版本中属于 QuotaHot 的 Codex/Pi 触发集成。模板必须与可执行文件保持同目录；OmO 扩展还需单独运行 `quotahot-hook install omo` 安装。安装前会拒绝 shell 脚本的客户端目标参数。旧集成清理不会碰 Codex/Pi `auth.json`。
 
 完成后重启或重新加载 OpenCode。卸载时运行 `quotahot-hook uninstall`；它会移除 QuotaHot OpenCode 插件及可识别的旧 Codex/Pi 集成，不会修改账户文件。
 
-Windows 可解压同一压缩包，在固定目录运行 `node quotahot-hook help` 或 `node quotahot-hook install`，并将 `package.json`、`opencode-plugin-template.js` 与 bundle 放在一起；shell 安装脚本仅支持 Linux/macOS。
+Windows 可解压同一压缩包，在固定目录运行 `node quotahot-hook help` 或 `node quotahot-hook install`，并将 `package.json`、插件模板与 bundle 放在一起；OmO 使用 `node quotahot-hook install omo`。shell 安装脚本仅支持 Linux/macOS。
 
 ### 从源码构建
 
@@ -37,13 +39,16 @@ export PATH="$HOME/.local/bin:$PATH"
 quotahot-hook help
 ```
 
-构建产物 `hooks/dist/quotahot-hook` 是包含依赖的 bundle，`hooks/dist/opencode-plugin-template.js` 是独立维护的插件运行时模板；两者须一起分发。`npm run build` 还会生成 `hooks/release/quotahot-hook-1.0.0.tar.gz`；打包需要系统安装 `tar`。
+构建产物 `hooks/dist/quotahot-hook` 是包含依赖的 bundle；`hooks/dist/opencode-plugin-template.js` 和 `hooks/dist/omo-plugin-template.js` 是独立维护的运行时模板，须与 bundle 一起分发。`npm run build` 还会生成 `hooks/release/quotahot-hook-1.0.0.tar.gz`；打包需要系统安装 `tar`。
 
 ## 命令
 
 ```bash
 quotahot-hook version
 quotahot-hook install                 # 安装 OpenCode 插件并清理旧的 QuotaHot Codex/Pi 触发集成
+quotahot-hook install omo             # 单独安装 OmO Native 扩展
+quotahot-hook install omo --print     # 只预览 OmO 扩展
+quotahot-hook uninstall omo           # 只卸载 OmO 扩展
 quotahot-hook install --print         # 只预览 OpenCode 插件，不修改文件
 quotahot-hook uninstall               # 移除额度切换插件及可识别的旧 Codex/Pi 触发集成
 quotahot-hook status --provider codex
@@ -51,6 +56,7 @@ quotahot-hook switch --dry-run
 quotahot-hook switch --no-check
 quotahot-hook switch --provider claude # 手动切换 Claude 并同步 Claude Code/Pi 凭证
 quotahot-hook run opencode             # OpenCode 插件使用的事件入口
+quotahot-hook run omo                  # OmO Native 扩展使用的事件入口
 quotahot-hook recovery-status         # 查看额度恢复轮询和等待会话
 quotahot-hook recovery-status --json  # 机器可读的本地轮询状态
 quotahot-hook recovery                # recovery-status 的简写
@@ -58,7 +64,9 @@ quotahot-hook recovery --json         # 机器可读的本地轮询状态
 quotahot-hook install --help           # 仅打印帮助，不写文件
 ```
 
-`install` 不接收 `codex`、`pi`、`all` 等客户端目标；`run` 只接受 `opencode`。Codex/Pi 插件安装入口已移除，仅保留旧 QuotaHot 集成的归属识别与清理；凭证写回仍可使用。OpenCode 插件写入 `$XDG_CONFIG_HOME/opencode/plugin/quotahot.js`（若已有 `plugins/` 目录则使用它），文件由 QuotaHot 标记以便安全更新和卸载。
+`install` 仅额外接受 `omo`，不接收 `codex`、`pi`、`all`；`run` 接受 `opencode` 和 `omo`。OmO 扩展写入 `$OMO_CODING_AGENT_DIR/extensions/quotahot.js`（未设置时为 `~/.omo/agent/extensions/quotahot.js`），只使用该 OmO agent 目录下已有的 `auth.json`，不创建登录凭证。使用项目级 OmO agent 目录时，安装和运行须指向同一目录；扩展执行时会以 OmO 当前 `ctx.agentDir` 为准。加载扩展可在 OmO 中执行 `/reload`。安装或卸载仅操作带 QuotaHot 标记的扩展文件，不会删除其他扩展或账户凭证。
+
+OmO 多账户池中已有多个槽位时，扩展不会写回，继续使用 OmO 内置的账户轮换。单一 OAuth 槽位会连同顶层兼容字段一起更新；凭证写回备份为 `auth.json.quotahot-bak`。已经开始输出的模型请求不会被重放，续跑也不保证工具调用位置精确恢复；适配器每次真实用户输入至多自动续跑一次。
 
 长参数提供单字母简写：`-c` 等价于 `--cache-seconds`（`status`、`switch`）；`-i` 等价于 `--min-interval-seconds`（`switch`、`run`）。两组参数的值仍以秒为单位，默认值不变；旧参数名继续支持。值可写在空格后或用等号连接，例如 `quotahot-hook switch -c=300 -i=60`。
 
@@ -173,7 +181,7 @@ CLI 夹具创建临时 `HOME`、`QUOTAHOT_DATA_DIR`，将 fake `dws` 放在 `PAT
 - 切换走 `switch.lock`；凭证刷新使用按账户分的 SQLite 锁。
 - `--dry-run` 不写切换状态、缓存或凭证；已过期且必须刷新才能判断的账户，无法在只读预览里评估。
 - hook 出错时 fail-open，不会阻塞 OpenCode 的对话流程。
-- hook 仅将 OpenCode 的 OpenAI（Codex）额度错误作为自动触发源；Claude 只支持手动切换并同步凭证，Codex CLI 与 Pi 不作为自动触发源。
+- hook 将 OpenCode 的 OpenAI（Codex）额度错误和单独安装的 OmO Native 扩展确认为账户额度错误的事件作为自动触发源；Claude 只支持手动切换并同步凭证，Codex CLI 与 Pi 不作为自动触发源。
 
 ```bash
 cd hooks

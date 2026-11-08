@@ -3,12 +3,12 @@ export const HELP = `QuotaHot Hook - 独立的账户额度检查与切换命令�
 用法：
   quotahot-hook status [选项]          查看账户额度和本机当前登录账户
   quotahot-hook switch [选项]          手动切换账户并同步客户端凭证
-  quotahot-hook run opencode [选项]    OpenCode 插件的事件入口
+  quotahot-hook run opencode|omo [选项] OpenCode 或 OmO 插件的事件入口
   quotahot-hook notify <命令>          管理 OpenCode 会话群通知
   quotahot-hook recovery-status [--json]  查看本地额度恢复等待状态
   quotahot-hook recovery [--json]         recovery-status 的简写
-  quotahot-hook install [--print]      安装 OpenCode 插件，清理旧触发器
-  quotahot-hook uninstall              移除 QuotaHot 的触发集成
+  quotahot-hook install [omo] [--print] 安装 OpenCode 或独立 OmO 插件
+  quotahot-hook uninstall [omo]         移除对应的 QuotaHot 插件
   quotahot-hook help [命令]             查看全局或命令帮助
   quotahot-hook version | --version    查看版本号
 
@@ -34,7 +34,7 @@ export const COMMAND_HELP: Readonly<Record<string, string>> = {
 
 手动选择可用账户并覆盖目标客户端的当前登录凭证；切换前可用 --dry-run 预览。
   --provider <codex|claude>  选择账户类型（默认 codex）。
-  --client <名称列表>       指定逗号分隔的写回目标：codex-cli、opencode、claude-cli、pi-claude、pi-codex；
+  --client <名称列表>       指定逗号分隔的写回目标：codex-cli、opencode、omo-agent、claude-cli、pi-claude、pi-codex；
                             默认按 provider 同步对应客户端（Pi 仅在已有凭证时写入）。覆盖登录有风险。
   --threshold <percent>     上游未明确给出可用结论时，用于判断额度用尽的已用百分比（0–100，默认 80）。
   -c, --cache-seconds <seconds> 使用额度缓存的秒数（默认 300）。
@@ -45,9 +45,9 @@ export const COMMAND_HELP: Readonly<Record<string, string>> = {
   --dry-run                只预览，不写状态、缓存或凭证；过期令牌无法只读刷新。
   --json                   输出完整切换结果（可能包含账户邮箱）。
 `,
-  run: `用法：quotahot-hook run opencode [选项]
+  run: `用法：quotahot-hook run opencode|omo [选项]
 
-从标准输入读取 OpenCode 事件；只对 OpenAI/Codex 明确额度信号尝试切换，运行故障时不阻断插件。
+从标准输入读取 OpenCode 或独立 OmO 事件；只对 Codex 明确额度信号尝试切换，运行故障时不阻断插件。
 额度事件固定按 OpenCode 的来源、原因及额度阈值处理，不接受手动切换参数。
   -i, --min-interval-seconds <seconds> 切换间隔（默认 60）；设为 0 会绕过间隔保护。
   --no-check               不查询上游额度，可能按旧缓存或未知用量选错账户。
@@ -64,11 +64,11 @@ configure 用精确 openConversationId 核验群身份并保存为未启用；en
   install [--print]                       安装独立通知插件；--print 只预览。
   uninstall                               只移除独立通知插件。
 `,
-  install: `用法：quotahot-hook install [--print]
+  install: `用法：quotahot-hook install [omo] [--print]
 
-安装 QuotaHot OpenCode 插件并清理自有的旧 Codex/Pi 触发器，不修改账户凭证。
+默认安装 OpenCode 插件并清理自有的旧 Codex/Pi 触发器；指定 omo 则只安装独立 OmO 插件。都不修改账户凭证。
   --print  只打印插件路径及内容，不安装、不清理、不写文件。
 `,
-  uninstall: '用法：quotahot-hook uninstall\n\n移除 QuotaHot 自有的 OpenCode 插件和旧触发器，不删除账户凭证。\n',
+  uninstall: '用法：quotahot-hook uninstall [omo]\n\n默认移除 OpenCode 插件和旧触发器；指定 omo 只移除独立 OmO 插件，不删除账户凭证。\n',
   version: '用法：quotahot-hook version\n\n打印当前独立 hook 程序的版本号，不启动服务。\n',
 };

@@ -11,11 +11,12 @@ import { isSea } from 'node:sea';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import lockfile from 'proper-lockfile';
-import { opencodeNotificationPlugin, opencodePlugin } from './opencode-plugin.js';
-import { piAuthPath } from './client-auth.js';
+import { omoPlugin, opencodeNotificationPlugin, opencodePlugin } from './opencode-plugin.js';
+import { omoAgentAuthPath, piAuthPath } from './client-auth.js';
 const PI_EXTENSION_MARKER = '// quotahot:pi-extension';
+const OMO_EXTENSION_MARKER = '// quotahot:omo-extension';
 
-export { opencodePlugin } from './opencode-plugin.js';
+export { omoPlugin, opencodePlugin } from './opencode-plugin.js';
 
 function shellArg(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
@@ -226,4 +227,30 @@ export async function uninstallPi(): Promise<InstallReport> {
     await rm(path);
     return { changes: [`已删除 ${path}`], paths: [path] };
   });
+}
+
+export function omoExtensionPath(): string {
+  return join(dirname(omoAgentAuthPath()), 'extensions', 'quotahot.js');
+}
+
+export async function installOmo(command: string | readonly string[]): Promise<InstallReport> {
+  const path = omoExtensionPath();
+  const previous = await readPiExtension(path);
+  if (previous !== null && !previous.startsWith(`${OMO_EXTENSION_MARKER}\n`)) {
+    return { changes: [`${path} 不是本程序生成的，没有动它`], paths: [] };
+  }
+  await writeAtomic(path, omoPlugin(command));
+  return { changes: [`${previous === null ? '新增' : '更新'} OmO 插件 ${path}`], paths: [path] };
+}
+
+export async function uninstallOmo(): Promise<InstallReport> {
+  const path = omoExtensionPath();
+  if (!(await lstat(dirname(path)).catch(() => null))) return { changes: ['OmO 那边没有装过'], paths: [] };
+  const previous = await readPiExtension(path);
+  if (previous === null) return { changes: ['OmO 那边没有装过'], paths: [] };
+  if (!previous.startsWith(`${OMO_EXTENSION_MARKER}\n`)) {
+    return { changes: [`${path} 不是本程序生成的，没有动它`], paths: [] };
+  }
+  await rm(path);
+  return { changes: [`已删除 ${path}`], paths: [path] };
 }

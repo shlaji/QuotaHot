@@ -10,16 +10,7 @@ import {
   type SwitchOptions,
 } from './switcher.js';
 import { runHook } from './runtime.js';
-import {
-  installOpencode,
-  opencodePlugin,
-  opencodePluginPath,
-  selfInvocation,
-  uninstallCodex,
-  uninstallOpencode,
-  uninstallPi,
-  type InstallReport,
-} from './install.js';
+import { install } from './install-cli.js';
 import type { Provider } from './types.js';
 import { readRecoveryStatus } from './recovery-status.js';
 import { APP_VERSION } from './version.js';
@@ -114,7 +105,7 @@ async function readStdin(): Promise<string> {
 }
 
 async function runEvent(client: string | undefined, flags: Flags): Promise<number> {
-  if (client !== 'opencode' || flags.positional.length !== 1) throw new UsageError('run 只接受 opencode 作为事件来源');
+  if ((client !== 'opencode' && client !== 'omo') || flags.positional.length !== 1) throw new UsageError('run 只接受 opencode 或 omo 作为事件来源');
   try {
     const output = await runHook(client, await readStdin(), switchOptions(flags));
     console.log(output.stdout);
@@ -124,19 +115,6 @@ async function runEvent(client: string | undefined, flags: Flags): Promise<numbe
     console.error('quotahot-hook outcome: unknown');
     console.log('{"switched":false,"outcome":"unknown"}');
   }
-  return 0;
-}
-
-async function install(flags: Flags, remove: boolean): Promise<number> {
-  if (flags.positional.length > 0) throw new UsageError(`Unexpected target: ${flags.positional[0]}`);
-  if (flags.bools.has('print')) {
-    console.log(`# ${await opencodePluginPath()}\n${opencodePlugin([...selfInvocation(), 'run', 'opencode'])}`);
-    return 0;
-  }
-  const reports: InstallReport[] = remove
-    ? await Promise.all([uninstallOpencode(), uninstallCodex(), uninstallPi()])
-    : [await installOpencode([...selfInvocation(), 'run', 'opencode']), await uninstallCodex(), await uninstallPi()];
-  for (const report of reports) for (const change of report.changes) console.log(change);
   return 0;
 }
 
@@ -174,7 +152,7 @@ export async function run(argv: readonly string[]): Promise<number> {
           throw new UsageError(`${command} 的 --${option} 需要${option === 'threshold' ? ' 0 到 100 的百分比' : '非负秒数'}`);
         }
       }
-      if (command !== 'run' && command !== 'switch' && command !== 'notify' && flags.positional.length > 0) throw new UsageError(`${command} 不接受额外参数`);
+      if (command !== 'run' && command !== 'switch' && command !== 'notify' && command !== 'install' && command !== 'uninstall' && flags.positional.length > 0) throw new UsageError(`${command} 不接受额外参数`);
     }
     if (command === 'run') {
     }
@@ -229,8 +207,8 @@ export async function run(argv: readonly string[]): Promise<number> {
       }
       case 'run': return await runEvent(flags.positional[0], flags);
       case 'notify': return await notify(flags);
-      case 'install': return await install(flags, false);
-      case 'uninstall': return await install(flags, true);
+      case 'install': return await install(flags.positional, { remove: false, print: flags.bools.has('print') });
+      case 'uninstall': return await install(flags.positional, { remove: true, print: false });
       case 'help':
       case '--help':
       case '-h':
