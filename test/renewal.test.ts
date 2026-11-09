@@ -20,6 +20,7 @@ after(async () => {
 
 let calls = 0;
 let replacementId = 'A';
+let replacementIdToken = '';
 const jwt = (id: string) => `header.${Buffer.from(JSON.stringify({ chatgpt_account_id: id })).toString('base64url')}.signature`;
 mock.module('../src/server/http.js', { exports: {
   request: async () => {
@@ -27,6 +28,7 @@ mock.module('../src/server/http.js', { exports: {
     await new Promise<void>((resolve) => setImmediate(resolve));
     return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify({
       access_token: jwt(replacementId), refresh_token: 'rotated-refresh', expires_in: 3600,
+      ...(replacementIdToken ? { id_token: replacementIdToken } : {}),
     }) };
   }, noteError: () => {}, recordOutbound: () => {},
 } });
@@ -79,6 +81,22 @@ async function fixture(autoRefresh = true, clientAccountId = 'B') {
     auto_refresh: autoRefresh, sync_source: 'codex-cli', sync_path: client }));
   return { dir, accounts, path, client };
 }
+
+test('OAuth 续期后立即使用新令牌中的订阅有效期', async (t) => {
+  const f = await fixture();
+  t.after(() => rm(f.dir, { recursive: true, force: true }));
+  const expiry = 1_900_000_000;
+  replacementIdToken = `header.${Buffer.from(JSON.stringify({
+    chatgpt_account_id: 'A', chatgpt_subscription_active_until: expiry,
+  })).toString('base64url')}.signature`;
+  t.after(() => { replacementIdToken = ''; });
+  const [account] = await loadAccounts(f.accounts);
+  assert.ok(account);
+
+  assert.equal(await refreshViaOAuth(account, () => {}), true);
+
+  assert.equal(account.subscriptionEndsAt, expiry * 1000);
+});
 
 test('OAuth 刷新后只回写同账户的本机客户端', async (t) => {
   const f = await fixture(true, 'A');

@@ -602,6 +602,7 @@ async function syncFromClient(
 
   acct.accessToken = tokens.accessToken;
   acct.idToken = idToken;
+  readClaims({ id_token: idToken, access_token: tokens.accessToken }, acct);
   if (tokens.refreshToken) acct.refreshToken = tokens.refreshToken;
   if (!acct.accountId) acct.accountId = tokens.accountId || accountIdOf(idToken || tokens.accessToken);
   // 客户端文件没写到期时间、令牌本身也不是 JWT 时无从得知，按上游常见的一小时估一个：
@@ -740,6 +741,7 @@ async function performOAuthRefresh(
 
   acct.accessToken = accessToken;
   acct.idToken = idToken;
+  readClaims({ id_token: idToken, access_token: accessToken }, acct);
   if (body.refresh_token) acct.refreshToken = String(body.refresh_token);
   acct.expiresAt = Date.now() + Number(body.expires_in ?? 3600) * 1000;
   if (!acct.accountId) acct.accountId = accountIdOf(idToken || accessToken);
