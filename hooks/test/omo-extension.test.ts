@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { watch } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -75,6 +76,7 @@ test('OmO quota event switches the selected single-slot credential and preserves
   const env = { ...process.env, HOME: home, OMO_CODING_AGENT_DIR: agentDir, QUOTAHOT_DATA_DIR: data, XDG_DATA_HOME: join(home, 'xdg') };
   const result = await invoke(['run', 'omo', '--no-check'], env, JSON.stringify({
     source: 'omo', provider: 'chatgpt-subscription', error: { message: 'usage limit has been reached' },
+    omoRequest: { accountId: 'acct-a', email: 'a@x.com', loginId: 'old-login' },
   }));
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).switched, true);
@@ -117,6 +119,7 @@ test('OmO multi-account pool keeps its native credentials on quota errors', asyn
   const env = { ...process.env, HOME: home, OMO_CODING_AGENT_DIR: agentDir, QUOTAHOT_DATA_DIR: join(home, 'data') };
   const result = await invoke(['run', 'omo', '--no-check'], env, JSON.stringify({
     source: 'omo', provider: 'chatgpt-subscription', error: { message: 'quota exhausted' },
+    omoRequest: { accountId: 'acct-a', email: '', loginId: '' },
   }));
   assert.equal(result.code, 0, result.stderr);
   assert.equal(JSON.parse(result.stdout).switched, false);
@@ -149,6 +152,9 @@ test('OmO distinguishes different users in the same account from a token refresh
   assert.equal((await syncOmo({ ...account, accessToken: 'refreshed-token' }, auth, 'test')).error, '');
   const refreshed = JSON.parse(await readFile(auth, 'utf8'))['chatgpt-subscription'];
   assert.equal(refreshed.loginId, switched.loginId);
+  const stale = await syncOmo(account, auth, 'test', { accountId: 'shared', email: 'a@x.com', loginId: 'old-login' });
+  assert.notEqual(stale.error, '');
+  assert.equal(JSON.parse(await readFile(auth, 'utf8'))['chatgpt-subscription'].access, 'refreshed-token');
 });
 
 test('OmO extension continues once after final Codex quota failure and reloads live credentials', async (t) => {
@@ -170,11 +176,15 @@ printf '%s' '{"switched":true}'
   const settle = handlers.get('agent_before_settle');
   const input = handlers.get('input');
   const response = handlers.get('after_provider_response');
-  assert.ok(turnEnd && settle && input && response);
+  const beforeRequest = handlers.get('before_provider_request');
+  assert.ok(turnEnd && settle && input && response && beforeRequest);
   let reloads = 0;
   const ctx = {
     model: { provider: 'chatgpt-subscription' }, agentDir: join(home, 'agent'),
-    modelRegistry: { authStorage: { reload: () => { reloads += 1; return 'loaded'; } } }, hasUI: false,
+    modelRegistry: { authStorage: {
+      get: () => ({ type: 'oauth', accountId: 'old-account', email: 'a@x.com', loginId: 'old-login' }),
+      reload: () => { reloads += 1; return 'loaded'; },
+    } }, hasUI: false,
   };
   const boundary = { outcome: 'error', entries: [{ type: 'custom', customType: 'other-extension' }], context: { canContinue: false } };
   await turnEnd({ message: { role: 'assistant', provider: 'anthropic', stopReason: 'error', errorMessage: 'quota exhausted' } });
@@ -185,6 +195,7 @@ printf '%s' '{"switched":true}'
     errorMessage: 'quota exhausted', errorCause: { type: 'usage_limit', scope: 'model' } } });
   assert.equal(await settle(boundary, ctx), undefined);
   await assert.rejects(lstat(calls));
+  await beforeRequest({}, ctx);
   await turnEnd({ message: { role: 'assistant', provider: 'chatgpt-subscription', stopReason: 'error', errorMessage: 'quota exhausted' } });
   assert.partialDeepStrictEqual(await settle(boundary, ctx), {
     continue: true,
@@ -192,16 +203,145 @@ printf '%s' '{"switched":true}'
   });
   assert.equal(reloads, 1);
   assert.equal(JSON.parse(await readFile(calls, 'utf8')).provider, 'chatgpt-subscription');
+  assert.partialDeepStrictEqual(JSON.parse(await readFile(calls, 'utf8')).omoRequest, {
+    accountId: 'old-account', email: 'a@x.com', loginId: 'old-login',
+  });
   assert.equal(await settle(boundary, ctx), undefined);
   assert.equal(reloads, 1);
   await input({ attribution: 'user' });
+  await beforeRequest({}, ctx);
   await response({ status: 429 }, ctx);
   await turnEnd({ message: { role: 'assistant', provider: 'chatgpt-subscription', stopReason: 'error', errorMessage: 'HTTP failed' } });
   assert.partialDeepStrictEqual(await settle(boundary, ctx), { continue: true });
   assert.equal(JSON.parse(await readFile(calls, 'utf8')).error.statusCode, 429);
   await input({ attribution: 'user' });
+  await beforeRequest({}, ctx);
   await turnEnd({ message: { role: 'assistant', provider: 'chatgpt-subscription', stopReason: 'error',
     errorCause: { type: 'usage_limit', scope: 'account' }, errorMessage: 'limit' } });
   assert.partialDeepStrictEqual(await settle(boundary, ctx), { continue: true });
   assert.equal(JSON.parse(await readFile(calls, 'utf8')).error.message, 'quota exhausted');
+});
+
+test('concurrent OmO sessions both resume after one real hook switches accounts', { timeout: 20_000 }, async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-concurrent-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const agentDir = join(home, 'agent');
+  const data = join(home, 'data');
+  await mkdir(join(data, 'accounts'), { recursive: true });
+  await mkdir(agentDir);
+  for (const name of ['a', 'b']) {
+    await writeFile(join(data, 'accounts', `codex-${name}.json`), JSON.stringify({
+      type: 'codex', email: `${name}@x.com`, account_id: `acct-${name}`,
+      access_token: `token-${name}`, refresh_token: `refresh-${name}`,
+      expired: new Date(Date.now() + 86_400_000).toISOString(), auto_refresh: true,
+    }));
+  }
+  const authPath = join(agentDir, 'auth.json');
+  const initial = {
+    type: 'oauth', access: 'token-a', refresh: 'refresh-a', expires: Date.now() + 86_400_000,
+    accountId: 'acct-a', email: 'a@x.com', loginId: 'initial-login',
+  };
+  await writeFile(authPath, JSON.stringify({ 'chatgpt-subscription': initial }));
+  const original = { ...process.env };
+  Object.assign(process.env, {
+    HOME: home, XDG_CONFIG_HOME: join(home, 'config'), XDG_DATA_HOME: join(home, 'xdg'),
+    QUOTAHOT_DATA_DIR: data, OMO_CODING_AGENT_DIR: agentDir, PI_CODING_AGENT_DIR: join(home, 'pi'),
+  });
+  t.after(() => {
+    for (const key of ['HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'QUOTAHOT_DATA_DIR', 'OMO_CODING_AGENT_DIR', 'PI_CODING_AGENT_DIR']) {
+      if (original[key] === undefined) delete process.env[key];
+      else process.env[key] = original[key];
+    }
+  });
+  const command = join(home, 'hook');
+  await writeFile(command, `#!/bin/sh
+printf ready > ${JSON.stringify(join(home, 'ready-'))}$$
+exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.resolve('tsx'))} ${JSON.stringify(entry)} run omo --no-check
+`);
+  await chmod(command, 0o700);
+  const pluginPath = join(home, 'quotahot.mjs');
+  await writeFile(pluginPath, omoPlugin([command]));
+  const pluginModule = await import(pathToFileURL(pluginPath).href);
+  const sessions = Array.from({ length: 2 }, () => {
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown>();
+    pluginModule.default({ on: (name: string, handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown) => handlers.set(name, handler) });
+    let reloads = 0;
+    const ctx = {
+      model: { provider: 'chatgpt-subscription' }, agentDir,
+      modelRegistry: { authStorage: { get: () => initial, reload: () => { reloads += 1; return 'loaded'; } } },
+      hasUI: false,
+    };
+    return { handlers, ctx, reloadCount: () => reloads };
+  });
+  const lock = join(data, 'switch.lock');
+  await writeFile(lock, 'test');
+  const ready = new Set<string>();
+  let resolveReady: () => void = () => {};
+  let rejectReady: (error: Error) => void = () => {};
+  const bothStarted = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const watcher = watch(home, (_event, name) => {
+    if (name?.toString().startsWith('ready-')) ready.add(name.toString());
+    if (ready.size === 2) resolveReady();
+  });
+  watcher.on('error', rejectReady);
+  const timeout = setTimeout(() => rejectReady(new Error('hook processes did not start')), 10_000);
+  t.after(() => { clearTimeout(timeout); watcher.close(); });
+  for (const session of sessions) {
+    await session.handlers.get('before_provider_request')?.({}, session.ctx);
+    await session.handlers.get('turn_end')?.({ message: {
+      role: 'assistant', provider: 'chatgpt-subscription', stopReason: 'error', errorMessage: 'quota exhausted',
+    } });
+  }
+  const results = sessions.map((session) => session.handlers.get('agent_before_settle')?.({ outcome: 'error', entries: [] }, session.ctx));
+  await bothStarted;
+  await rm(lock);
+  for (const result of await Promise.all(results)) assert.partialDeepStrictEqual(result, { continue: true });
+  assert.deepEqual(sessions.map((session) => session.reloadCount()), [1, 1]);
+  assert.equal(JSON.parse(await readFile(authPath, 'utf8'))['chatgpt-subscription'].accountId, 'acct-b');
+});
+
+test('cancelling OmO while the hook runs stops recovery and credential reload', { timeout: 10_000 }, async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-cancel-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const command = join(home, 'hook.mjs');
+  const marker = join(home, 'ready');
+  await writeFile(command, `
+import { writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
+process.stdin.resume();
+process.stdin.on('end', () => {
+  const server = createServer();
+  server.listen(0, '127.0.0.1', () => writeFileSync(${JSON.stringify(marker)}, 'ready'));
+  process.on('SIGTERM', () => server.close(() => process.exit(0)));
+});
+`);
+  const pluginPath = join(home, 'quotahot.mjs');
+  await writeFile(pluginPath, omoPlugin([process.execPath, command]));
+  const pluginModule = await import(pathToFileURL(pluginPath).href);
+  const handlers = new Map<string, (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown>();
+  pluginModule.default({ on: (name: string, handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown) => handlers.set(name, handler) });
+  const controller = new AbortController();
+  let reloads = 0;
+  const ctx = {
+    model: { provider: 'chatgpt-subscription' }, agentDir: join(home, 'agent'), signal: controller.signal,
+    modelRegistry: { authStorage: {
+      get: () => ({ type: 'oauth', accountId: 'acct-a', email: 'a@x.com', loginId: 'old' }),
+      reload: () => { reloads += 1; return 'loaded'; },
+    } }, hasUI: false,
+  };
+  let ready: () => void = () => {};
+  let fail: (error: Error) => void = () => {};
+  const started = new Promise<void>((resolve, reject) => { ready = resolve; fail = reject; });
+  const watcher = watch(home, (_event, name) => { if (name?.toString() === 'ready') ready(); });
+  watcher.on('error', fail);
+  t.after(() => watcher.close());
+  await handlers.get('before_provider_request')?.({}, ctx);
+  await handlers.get('turn_end')?.({ message: {
+    role: 'assistant', provider: 'chatgpt-subscription', stopReason: 'error', errorMessage: 'quota exhausted',
+  } });
+  const result = handlers.get('agent_before_settle')?.({ outcome: 'error', entries: [] }, ctx);
+  await started;
+  controller.abort();
+  assert.equal(await result, undefined);
+  assert.equal(reloads, 0);
 });

@@ -107,11 +107,22 @@ export async function runHook(
   if (!signal.hit) {
     return { stdout: JSON.stringify({ switched: false, message: '', outcome: 'skipped_no_signal' }), result: null, skipped: '事件里没有限额迹象', outcome: 'skipped_no_signal' };
   }
+  const request = payload.omoRequest;
+  const omoRequest = client === 'omo' && request !== null && typeof request === 'object' && !Array.isArray(request)
+    && 'accountId' in request && typeof request.accountId === 'string' && request.accountId.length > 0
+    && 'email' in request && typeof request.email === 'string'
+    && 'loginId' in request && typeof request.loginId === 'string'
+    ? { accountId: request.accountId, email: request.email, loginId: request.loginId }
+    : undefined;
+  if (client === 'omo' && !omoRequest) {
+    return { stdout: JSON.stringify({ switched: false, outcome: 'skipped_no_signal' }), result: null, skipped: '缺少 OmO 请求账户身份', outcome: 'skipped_no_signal' };
+  }
   const result = await switchAccount({
     ...opts,
     provider: opts.provider ?? 'codex',
     triggerClient: client === 'omo' ? 'omo-agent' : 'opencode',
-    exhausted: true,
+    exhausted: client === 'omo' ? opts.check === false : true,
+    ...(omoRequest ? { omoRequest } : {}),
     cacheMs: 0,
     threshold: 100,
     ...(typeof payload.quotaCheckAfter === 'number' && Number.isFinite(payload.quotaCheckAfter)
@@ -120,10 +131,12 @@ export async function runHook(
     usageQuery: opts.usageQuery ?? queryHookUsage,
   });
   const latestData = result.quotaCheck?.latestData ?? result.checked.some((account) => account.source === 'live');
-  const outcome: HookOutcome = result.lockContended ? 'lock_contended' : result.quotaCheck?.outcome ?? quotaCheckOutcome(result, false);
+  const resume = client === 'omo' && !result.switched && result.checked[0]?.usable === true;
+  const outcome: HookOutcome = result.lockContended ? 'lock_contended' : resume ? 'available' : result.quotaCheck?.outcome ?? quotaCheckOutcome(result, false);
   return {
       stdout: JSON.stringify({
         switched: result.switched,
+        ...(resume ? { resume: true } : {}),
         outcome,
         message: result.switched ? '账户已切换' : '',
         reason: result.reason,

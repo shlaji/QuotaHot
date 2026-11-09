@@ -1,6 +1,8 @@
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { watch } from 'node:fs';
 import { join } from 'node:path';
 import { DATA_DIR } from './config.js';
+import type { OmoIdentity } from './omo-auth.js';
 
 export type AccountMemo = {
   readonly usedPercent: number | null;
@@ -22,7 +24,12 @@ export type QuotaCheckReceipt = {
 
 export type SwitchState = {
   readonly accounts: Record<string, AccountMemo>;
-  readonly clients: Record<string, { readonly accountId: string; readonly email: string; readonly switchedAt: number }>;
+  readonly clients: Record<string, {
+    readonly accountId: string;
+    readonly email: string;
+    readonly switchedAt: number;
+    readonly omoChange?: { readonly from: OmoIdentity; readonly to: OmoIdentity };
+  }>;
   readonly lastQuotaCheck?: QuotaCheckReceipt;
 };
 
@@ -81,5 +88,42 @@ export async function withSwitchLock<T>(work: () => Promise<T>): Promise<T | nul
     return await work();
   } finally {
     await rm(LOCK_PATH, { force: true });
+  }
+}
+
+export async function waitForSwitchLock<T>(work: () => Promise<T>): Promise<T | null> {
+  await mkdir(DATA_DIR, { recursive: true });
+  let changed = false;
+  let expired = false;
+  let failure: Error | undefined;
+  let wake: (() => void) | undefined;
+  const watcher = watch(DATA_DIR, (_event, name) => {
+    if (name !== null && name.toString() !== 'switch.lock') return;
+    changed = true;
+    wake?.();
+  });
+  watcher.on('error', (error) => { failure = error; wake?.(); });
+  const timer = setTimeout(() => { expired = true; wake?.(); }, 110_000);
+  try {
+    while (!expired) {
+      if (failure) throw failure;
+      changed = false;
+      const result = await withSwitchLock(work);
+      if (result !== null) return result;
+      const age = await lockAge();
+      if (age === null) continue;
+      if (!changed && !expired && !failure) {
+        await new Promise<void>((resolve) => {
+          const staleTimer = setTimeout(resolve, Math.max(1, Math.ceil(LOCK_STALE_MS - age)));
+          wake = () => { clearTimeout(staleTimer); resolve(); };
+        });
+        wake = undefined;
+      }
+    }
+    if (failure) throw failure;
+    return null;
+  } finally {
+    clearTimeout(timer);
+    watcher.close();
   }
 }

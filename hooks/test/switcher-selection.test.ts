@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import {
@@ -7,6 +7,7 @@ import {
   accountsDir,
   codexAuthPath,
   dataDir,
+  home,
   nested,
   observations,
   opencodeAuthPath,
@@ -205,4 +206,191 @@ test('another hook reuses a quota check completed after its request began', asyn
   assert.deepEqual(observations.queried, queriesAfterWinner);
   assert.equal(reused.quotaCheck?.switched, true);
   assert.equal(reused.quotaCheck?.outcome, 'switched');
+});
+
+test('concurrent OmO quota failures reuse one switch and do not exhaust the new account', async () => {
+  reset();
+  const agentDir = join(home, '.omo', 'agent');
+  mkdirSync(agentDir, { recursive: true });
+  const authPath = join(agentDir, 'auth.json');
+  writeFileSync(authPath, JSON.stringify({
+    'chatgpt-subscription': {
+      type: 'oauth', access: 'token-a@x.com', refresh: 'refresh-a@x.com',
+      expires: Date.now() + 86_400_000, accountId: 'acct-a@x.com', email: 'a@x.com', loginId: 'old-login',
+    },
+  }));
+  const { switchAccount } = await import('../src/switcher.js');
+  let release: () => void = () => {};
+  let started: () => void = () => {};
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const request = { accountId: 'acct-a@x.com', email: 'a@x.com', loginId: 'old-login' };
+  const options = { triggerClient: 'omo-agent', exhausted: true, omoRequest: request } as const;
+  const first = switchAccount({
+    ...options,
+    usageQuery: async (account) => {
+      started();
+      await gate;
+      return {
+        accountId: account.id, provider: account.provider, email: account.email, ok: true,
+        status: 200, error: '', plan: '', subscriptionEndsAt: null, userId: '',
+        quotaAvailable: true, windows: [], endpoint: 'test',
+      };
+    },
+  });
+  await entered;
+  const laterOptions = { ...options, omoRequest: { ...request } };
+  const second = switchAccount(laterOptions);
+  release();
+  const [winner, other] = await Promise.all([first, second]);
+
+  assert.equal(winner.switched, true);
+  assert.equal(other.switched, true);
+  assert.equal(nested(authPath, 'chatgpt-subscription', 'accountId'), 'acct-b@x.com');
+  assert.equal(nested(statePath, 'accounts', 'codex:b@x.com', 'blockedUntil'), 0);
+  const late = await switchAccount(laterOptions);
+  assert.equal(late.switched, true);
+  assert.equal(nested(authPath, 'chatgpt-subscription', 'accountId'), 'acct-b@x.com');
+});
+
+test('OmO does not reuse an unrecorded credential change or mark the new account exhausted', async () => {
+  reset();
+  const agentDir = join(home, '.omo', 'agent');
+  mkdirSync(agentDir, { recursive: true });
+  const authPath = join(agentDir, 'auth.json');
+  writeFileSync(authPath, JSON.stringify({
+    'chatgpt-subscription': {
+      type: 'oauth', access: 'token-b@x.com', refresh: 'refresh-b@x.com',
+      expires: Date.now() + 86_400_000, accountId: 'acct-b@x.com', email: 'b@x.com', loginId: 'new-login',
+    },
+  }));
+  const { switchAccount } = await import('../src/switcher.js');
+  const result = await switchAccount({
+    triggerClient: 'omo-agent', exhausted: true, check: false, minIntervalMs: 0,
+    omoRequest: { accountId: 'acct-a@x.com', email: 'a@x.com', loginId: 'old-login' },
+  });
+  assert.equal(result.switched, false);
+  assert.equal(nested(authPath, 'chatgpt-subscription', 'accountId'), 'acct-b@x.com');
+  assert.equal(existsSync(statePath), false);
+});
+
+test('a quota error from the newly switched OmO account is not treated as the previous error', async () => {
+  reset();
+  writeAccount('c@x.com');
+  const agentDir = join(home, '.omo', 'agent');
+  mkdirSync(agentDir, { recursive: true });
+  const authPath = join(agentDir, 'auth.json');
+  writeFileSync(authPath, JSON.stringify({
+    'chatgpt-subscription': {
+      type: 'oauth', access: 'token-a@x.com', refresh: 'refresh-a@x.com',
+      expires: Date.now() + 86_400_000, accountId: 'acct-a@x.com', email: 'a@x.com', loginId: 'old-login',
+    },
+  }));
+  const { switchAccount } = await import('../src/switcher.js');
+  const { readOmoIdentity } = await import('../src/omo-auth.js');
+  const first = await switchAccount({
+    triggerClient: 'omo-agent', exhausted: true, check: false, minIntervalMs: 0,
+    omoRequest: { accountId: 'acct-a@x.com', email: 'a@x.com', loginId: 'old-login' },
+  });
+  assert.equal(first.switched, true);
+  const identity = await readOmoIdentity(authPath);
+  assert.ok(identity);
+  const second = await switchAccount({
+    triggerClient: 'omo-agent', exhausted: true, check: false, minIntervalMs: 0, omoRequest: identity,
+  });
+  assert.equal(second.switched, true);
+  assert.equal(nested(authPath, 'chatgpt-subscription', 'accountId'), 'acct-c@x.com');
+});
+
+test('OmO verifies the current account before acting on an ambiguously attributed quota error', async () => {
+  const { runHook } = await import('../src/runtime.js');
+  for (const available of [true, null]) {
+    reset();
+    const agentDir = join(home, '.omo', 'agent');
+    mkdirSync(agentDir, { recursive: true });
+    const authPath = join(agentDir, 'auth.json');
+    writeFileSync(authPath, JSON.stringify({
+      'chatgpt-subscription': {
+        type: 'oauth', access: 'token-b@x.com', refresh: 'refresh-b@x.com',
+        expires: Date.now() + 86_400_000, accountId: 'acct-b@x.com', email: 'b@x.com', loginId: 'new-login',
+      },
+    }));
+    const output = await runHook('omo', JSON.stringify({
+      source: 'omo', provider: 'chatgpt-subscription', error: { message: 'quota exhausted' },
+      omoRequest: { accountId: 'acct-b@x.com', email: 'b@x.com', loginId: 'new-login' },
+    }), {
+      usageQuery: async (account) => ({
+        accountId: account.id, provider: account.provider, email: account.email,
+        ok: available !== null, status: available === null ? 503 : 200,
+        error: available === null ? 'usage_network_error' : '', plan: '', subscriptionEndsAt: null,
+        userId: '', quotaAvailable: available, windows: [], endpoint: 'test',
+      }),
+    });
+    assert.equal(JSON.parse(output.stdout).switched, false);
+    assert.equal(JSON.parse(output.stdout).resume === true, available === true);
+    assert.equal(nested(authPath, 'chatgpt-subscription', 'accountId'), 'acct-b@x.com');
+    if (available === true) assert.equal(nested(statePath, 'accounts', 'codex:b@x.com', 'blockedUntil'), 0);
+    else assert.equal(existsSync(statePath), false);
+  }
+});
+
+test('OmO does not overwrite a login changed during the quota query', async () => {
+  reset();
+  const agentDir = join(home, '.omo', 'agent');
+  mkdirSync(agentDir, { recursive: true });
+  const authPath = join(agentDir, 'auth.json');
+  const auth = (name: string) => JSON.stringify({ 'chatgpt-subscription': {
+    type: 'oauth', access: `token-${name}@x.com`, refresh: `refresh-${name}@x.com`,
+    expires: Date.now() + 86_400_000, accountId: `acct-${name}@x.com`, email: `${name}@x.com`, loginId: `login-${name}`,
+  } });
+  writeFileSync(authPath, auth('a'));
+  const { switchAccount } = await import('../src/switcher.js');
+  const result = await switchAccount({
+    triggerClient: 'omo-agent', omoRequest: { accountId: 'acct-a@x.com', email: 'a@x.com', loginId: 'login-a' },
+    usageQuery: async (account) => {
+      if (account.email === 'a@x.com') writeFileSync(authPath, auth('c'));
+      return {
+        accountId: account.id, provider: account.provider, email: account.email,
+        ok: true, status: 200, error: '', plan: '', subscriptionEndsAt: null, userId: '',
+        quotaAvailable: account.email !== 'a@x.com', windows: [], endpoint: 'test',
+      };
+    },
+  });
+  assert.equal(result.switched, false);
+  assert.equal(nested(authPath, 'chatgpt-subscription', 'accountId'), 'acct-c@x.com');
+  assert.equal(nested(codexAuthPath, 'tokens', 'access_token'), 'token-a@x.com');
+});
+
+test('OmO identifies the right user when accounts share an account ID', async () => {
+  reset();
+  for (const name of ['a', 'b']) {
+    writeFileSync(join(accountsDir, `codex-${name}@x.com.json`), JSON.stringify({
+      type: 'codex', email: `${name}@x.com`, account_id: 'shared',
+      access_token: `token-${name}`, refresh_token: `refresh-${name}`,
+      expired: new Date(Date.now() + 86_400_000).toISOString(), auto_refresh: true,
+    }));
+  }
+  const agentDir = join(home, '.omo', 'agent');
+  mkdirSync(agentDir, { recursive: true });
+  const authPath = join(agentDir, 'auth.json');
+  writeFileSync(authPath, JSON.stringify({ 'chatgpt-subscription': {
+    type: 'oauth', access: 'refreshed-b', refresh: 'refresh-b',
+    expires: Date.now() + 86_400_000, accountId: 'shared', email: 'b@x.com', loginId: 'login-b',
+  } }));
+  const { switchAccount } = await import('../src/switcher.js');
+  const queried: string[] = [];
+  const result = await switchAccount({
+    triggerClient: 'omo-agent', omoRequest: { accountId: 'shared', email: 'b@x.com', loginId: 'login-b' },
+    usageQuery: async (account) => {
+      queried.push(account.email);
+      return {
+        accountId: account.id, provider: account.provider, email: account.email,
+        ok: true, status: 200, error: '', plan: '', subscriptionEndsAt: null, userId: '',
+        quotaAvailable: true, windows: [], endpoint: 'test',
+      };
+    },
+  });
+  assert.equal(result.switched, false);
+  assert.deepEqual(queried, ['b@x.com']);
+  assert.equal(nested(authPath, 'chatgpt-subscription', 'accountId'), 'shared');
 });

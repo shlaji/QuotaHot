@@ -11,12 +11,14 @@ export default function (pi) {
   let quotaStatus = false;
   let revision = 0;
   let pendingChild;
+  let requestIdentity;
 
   pi.on('input', (event) => {
     if (event.attribution !== 'user') return;
     attempted = false;
     lastError = '';
     quotaStatus = false;
+    requestIdentity = undefined;
     revision += 1;
     pendingChild?.kill('SIGTERM');
   });
@@ -24,9 +26,24 @@ export default function (pi) {
     pi.on(name, () => {
       revision += 1;
       lastError = '';
+      requestIdentity = undefined;
       pendingChild?.kill('SIGTERM');
     });
   }
+
+  pi.on('before_provider_request', (event, ctx) => {
+    requestIdentity = undefined;
+    if ((event.model ?? ctx.model)?.provider !== 'chatgpt-subscription') return;
+    const credential = ctx.modelRegistry.authStorage.get('chatgpt-subscription');
+    if (credential?.type !== 'oauth' || (credential.accounts && credential.accounts.length !== 1)) return;
+    const selected = credential.accounts?.[0] ?? credential;
+    if (typeof selected.accountId !== 'string' || !selected.accountId) return;
+    requestIdentity = {
+      accountId: selected.accountId,
+      email: typeof selected.email === 'string' ? selected.email : typeof credential.email === 'string' ? credential.email : '',
+      loginId: typeof credential.loginId === 'string' ? credential.loginId : '',
+    };
+  });
 
   pi.on('after_provider_response', (event, ctx) => {
     if (ctx.model?.provider === 'chatgpt-subscription' && event.status === 429) quotaStatus = true;
@@ -48,7 +65,7 @@ export default function (pi) {
 
   pi.on('agent_before_settle', async (event, ctx) => {
     if (attempted || !lastError || event.outcome !== 'error'
-      || ctx.model?.provider !== 'chatgpt-subscription') return;
+      || ctx.model?.provider !== 'chatgpt-subscription' || !requestIdentity || ctx.signal?.aborted) return;
     attempted = true;
     const started = revision;
     const error = lastError;
@@ -59,9 +76,12 @@ export default function (pi) {
         stdio: ['pipe', 'pipe', 'ignore'],
       });
       pendingChild = child;
+      const cancel = () => child.kill('SIGTERM');
+      ctx.signal?.addEventListener('abort', cancel, { once: true });
+      if (ctx.signal?.aborted) cancel();
       let output = '';
       const timer = setTimeout(() => child.kill('SIGKILL'), 120_000);
-      child.on('error', () => { clearTimeout(timer); resolve(null); });
+      child.on('error', () => { clearTimeout(timer); ctx.signal?.removeEventListener('abort', cancel); resolve(null); });
       child.stdin.on('error', () => child.kill('SIGTERM'));
       child.stdout.on('data', (chunk) => {
         output += chunk.toString();
@@ -69,20 +89,25 @@ export default function (pi) {
       });
       child.on('close', (code) => {
         clearTimeout(timer);
+        ctx.signal?.removeEventListener('abort', cancel);
         if (pendingChild === child) pendingChild = undefined;
-        if (code !== 0 || output.length > 65_536) return resolve(null);
+        if (code !== 0 || output.length > 65_536 || ctx.signal?.aborted) return resolve(null);
         try { resolve(JSON.parse(output)); } catch { resolve(null); }
       });
       child.stdin.end(JSON.stringify({ source: 'omo', provider: 'chatgpt-subscription',
-        error: { message: error, ...(error === '429' ? { statusCode: 429 } : {}) } }));
+        error: { message: error, ...(error === '429' ? { statusCode: 429 } : {}) },
+        ...(requestIdentity ? { omoRequest: requestIdentity } : {}) }));
     });
-    if (!result?.switched || revision !== started || ctx.model?.provider !== 'chatgpt-subscription') return;
+    if ((!result?.switched && !result?.resume) || revision !== started || ctx.signal?.aborted
+      || ctx.model?.provider !== 'chatgpt-subscription') return;
     if (ctx.modelRegistry.authStorage.reload() !== 'loaded') return;
     if (ctx.hasUI) ctx.ui.notify('继续当前任务', 'info');
     return {
       entries: [...event.entries, {
         type: 'custom_message', customType: 'quotahot-recovery', display: false,
-        content: '额度账户已切换。继续当前任务，先核对已经完成的工具操作，避免重复执行。',
+        content: result.switched
+          ? '额度账户已切换。继续当前任务，先核对已经完成的工具操作，避免重复执行。'
+          : '当前账户额度可用。继续当前任务，先核对已经完成的工具操作，避免重复执行。',
       }],
       continue: true,
     };

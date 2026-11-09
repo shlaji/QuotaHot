@@ -46,6 +46,7 @@ mock.module('../src/state.js', {
     readState: async () => ({ accounts: {}, clients: {} }),
     writeState: async () => {},
     withSwitchLock: async (work: () => Promise<unknown>) => work(),
+    waitForSwitchLock: async (work: () => Promise<unknown>) => work(),
   },
 });
 mock.module('../src/usage.js', { exports: { queryHookUsage: async () => { throw new Error('unused'); } } });

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { copyFile, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { isDeepStrictEqual } from 'node:util';
 import lockfile from 'proper-lockfile';
 import { z } from 'zod';
 import { accountIdOf } from './account-files.js';
@@ -19,7 +20,32 @@ export const omoAuthSchema = z.looseObject({
   }),
 });
 
-export async function syncOmo(account: Account, path: string, label: string): Promise<SyncResult> {
+export type OmoIdentity = {
+  readonly accountId: string;
+  readonly email: string;
+  readonly loginId: string;
+};
+
+function identityOf(record: z.infer<typeof omoAuthSchema>['chatgpt-subscription']): OmoIdentity {
+  const selected = record.accounts?.[0] ?? record;
+  return {
+    accountId: selected.accountId,
+    email: typeof selected.email === 'string' ? selected.email : typeof record.email === 'string' ? record.email : '',
+    loginId: typeof record.loginId === 'string' ? record.loginId : '',
+  };
+}
+
+export async function readOmoIdentity(path: string): Promise<OmoIdentity | null> {
+  try {
+    const parsed = omoAuthSchema.safeParse(JSON.parse(await readFile(path, 'utf8')));
+    if (!parsed.success) return null;
+    return identityOf(parsed.data['chatgpt-subscription']);
+  } catch {
+    return null;
+  }
+}
+
+export async function syncOmo(account: Account, path: string, label: string, expected?: OmoIdentity): Promise<SyncResult> {
   const base = { path, source: 'omo-agent', label, created: false, backupPath: '', warning: '' };
   if (!account.accessToken || !account.refreshToken || !account.accountId || !Number.isFinite(account.expiresAt) || account.expiresAt <= 0
     || [account.idToken, account.accessToken].some((token) => accountIdOf(token) && accountIdOf(token) !== account.accountId)) {
@@ -32,6 +58,9 @@ export async function syncOmo(account: Account, path: string, label: string): Pr
       if (!parsed.success) return { ...base, changes: [], error: 'OmO requires one complete OAuth credential; native account pools are not overwritten' };
       const data = parsed.data;
       const record = data['chatgpt-subscription'];
+      if (expected && !isDeepStrictEqual(identityOf(record), expected)) {
+        return { ...base, changes: [], error: 'OmO credentials changed during quota check' };
+      }
       const changes: ConfigChange[] = [];
       const accountChanged = record.accountId !== account.accountId
         || typeof record.email === 'string' && record.email !== account.email;

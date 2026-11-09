@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { accountIdOf, emailOf } from './account-files.js';
 import type { Account, ConfigChange, SyncResult } from './types.js';
-import { omoAuthSchema, syncOmo } from './omo-auth.js';
+import { omoAuthSchema, syncOmo, type OmoIdentity } from './omo-auth.js';
 
 type ClientTokens = {
   readonly accessToken: string;
@@ -95,7 +95,8 @@ export async function readClientTokens(source: string, path: string): Promise<Cl
     if (!parsed.success) return null;
     const record = parsed.data['chatgpt-subscription'];
     const selected = record.accounts?.[0] ?? record;
-    return { accessToken: selected.access, refreshToken: selected.refresh, idToken: '', accountId: selected.accountId, email: '', expiresAt: selected.expires };
+    return { accessToken: selected.access, refreshToken: selected.refresh, idToken: '', accountId: selected.accountId,
+      email: text(selected.email) || text(record.email), expiresAt: selected.expires };
   }
   if (source === 'claude-cli') {
     const oauth = data.claudeAiOauth;
@@ -199,9 +200,9 @@ async function syncPi(account: Account, source: string, path: string, label: str
   }
 }
 
-async function syncOne(account: Account, source: string, path: string, label: string): Promise<SyncResult> {
+async function syncOne(account: Account, source: string, path: string, label: string, expectedOmo?: OmoIdentity): Promise<SyncResult> {
   if (piProvider(source)) return syncPi(account, source, path, label);
-  if (source === 'omo-agent') return syncOmo(account, path, label);
+  if (source === 'omo-agent') return syncOmo(account, path, label, expectedOmo);
   const base = { path, source, label };
   if (patches(source, account).length === 0) return { ...base, created: false, backupPath: '', changes: [], warning: '', error: 'Unknown client source' };
   try {
@@ -228,7 +229,7 @@ async function syncOne(account: Account, source: string, path: string, label: st
   }
 }
 
-export async function syncToClients(account: Account, only: readonly string[]): Promise<SyncResult[]> {
+export async function syncToClients(account: Account, only: readonly string[], expectedOmo?: OmoIdentity): Promise<SyncResult[]> {
   if (!account.accessToken && !only.some((source) => piProvider(source))) return [];
   const targets: Array<readonly [string, string, string]> = [];
   if (account.provider === 'codex') {
@@ -244,8 +245,13 @@ export async function syncToClients(account: Account, only: readonly string[]): 
     targets.push(['claude-cli', path, 'Claude Code']);
     if (only.includes('pi-claude') || await exists(piAuthPath())) targets.push(['pi-claude', piAuthPath(), 'Pi Claude']);
   }
-  const selected = only.length === 0 ? targets : targets.filter(([source]) => only.includes(source));
+  const selected = (only.length === 0 ? targets : targets.filter(([source]) => only.includes(source)))
+    .sort(([a], [b]) => expectedOmo ? Number(b === 'omo-agent') - Number(a === 'omo-agent') : 0);
   const results: SyncResult[] = [];
-  for (const [source, path, label] of selected) results.push(await syncOne(account, source, path, label));
+  for (const [source, path, label] of selected) {
+    const result = await syncOne(account, source, path, label, expectedOmo);
+    results.push(result);
+    if (expectedOmo && source === 'omo-agent' && result.error) break;
+  }
   return results;
 }

@@ -34,6 +34,29 @@ mock.module('../src/switcher.js', {
 
 const { runHook, opencodeSignal } = await import('../src/runtime.js');
 
+test('OmO quota events without a request identity never switch an account', async () => {
+  calls = [];
+  const out = await runHook('omo', JSON.stringify({
+    source: 'omo', provider: 'chatgpt-subscription', error: { message: 'quota exhausted' },
+  }));
+  assert.equal(out.outcome, 'skipped_no_signal');
+  assert.deepEqual(calls, []);
+});
+
+test('OmO verifies current account quota before marking it exhausted', async () => {
+  calls = [];
+  reply = { ...reply, switched: false, written: [], checked: [{
+    id: 'current', email: 'current@example.invalid', usable: true, usedPercent: 10,
+    resetAt: 0, source: 'live', error: '',
+  }] };
+  const out = await runHook('omo', JSON.stringify({
+    source: 'omo', provider: 'chatgpt-subscription', error: { message: 'quota exhausted' },
+    omoRequest: { accountId: 'current', email: '', loginId: 'login' },
+  }));
+  assert.equal(calls[0].exhausted, false);
+  assert.equal(JSON.parse(out.stdout).resume, true);
+});
+
 test('认得出 OpenCode 事件里的限额', () => {
   assert.equal(opencodeSignal({ event: { properties: { error: { status: 429 } } } }).hit, true);
   assert.equal(opencodeSignal({ event: { message: 'You have hit your usage limit' } }).hit, true);

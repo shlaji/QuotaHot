@@ -6,7 +6,8 @@ import { clientPath, readClientTokens, syncToClients } from './client-auth.js';
 import { ensureFresh } from './credentials.js';
 import type { NetworkConfig } from './network.js';
 import { queryHookUsage } from './usage.js';
-import { readState, STATE_PATH, withSwitchLock, writeState, type AccountMemo, type QuotaCheckOutcome, type QuotaCheckReceipt, type SwitchState } from './state.js';
+import { readState, STATE_PATH, waitForSwitchLock, withSwitchLock, writeState, type AccountMemo, type QuotaCheckOutcome, type QuotaCheckReceipt, type SwitchState } from './state.js';
+import { readOmoIdentity, type OmoIdentity } from './omo-auth.js';
 import type { Account, Provider, SyncResult, UsageResult, Window } from './types.js';
 
 export { STATE_PATH };
@@ -45,6 +46,7 @@ export type SwitchOptions = {
   readonly dryRun: boolean;
   readonly usageQuery?: UsageQuery;
   readonly quotaCheckAfter?: number;
+  readonly omoRequest?: OmoIdentity;
 };
 
 export type SwitchResult = {
@@ -92,9 +94,16 @@ export async function currentAccount(source: string, accounts: readonly Account[
   if (!path) return null;
   const tokens = await readClientTokens(source, path);
   if (!tokens) return null;
+  const id = tokens.accountId || accountIdOf(tokens.idToken || tokens.accessToken);
+  if (source === 'omo-agent') {
+    const email = tokens.email.toLowerCase();
+    const sameId = accounts.filter((account) => account.accountId === id);
+    const matches = email ? sameId.filter((account) => account.email.toLowerCase() === email)
+      : sameId.length === 1 ? sameId : sameId.filter((account) => account.accessToken === tokens.accessToken);
+    return matches.length === 1 ? matches[0] ?? null : null;
+  }
   const byToken = accounts.find((account) => account.accessToken && account.accessToken === tokens.accessToken);
   if (byToken) return byToken;
-  const id = tokens.accountId || accountIdOf(tokens.idToken || tokens.accessToken);
   const byId = id ? accounts.find((account) => account.accountId === id) : undefined;
   if (byId) return byId;
   const email = (tokens.email || emailOf(tokens.idToken || tokens.accessToken)).toLowerCase();
@@ -143,7 +152,8 @@ export async function switchAccount(partial: Partial<SwitchOptions> = {}): Promi
   const network = { proxy: appConfig.proxy, noProxy: appConfig.noProxy };
   const recordCheck = !config.dryRun && config.check && config.triggerClient === 'opencode' &&
     (config.provider === 'codex' || config.provider === 'claude');
-  const locked = config.dryRun ? await switchLocked(config, network, appConfig.accountOrder) : await withSwitchLock(async () => {
+  const acquire = config.triggerClient === 'omo-agent' && config.omoRequest ? waitForSwitchLock : withSwitchLock;
+  const locked = config.dryRun ? await switchLocked(config, network, appConfig.accountOrder) : await acquire(async () => {
     const result = await switchLocked(config, network, appConfig.accountOrder);
     if (!recordCheck) return result;
     const state = await readState();
@@ -209,6 +219,20 @@ async function switchLocked(config: SwitchOptions, network: NetworkConfig, accou
   const pool = (await loadAccounts(ACCOUNTS_DIR)).filter((account) => account.provider === config.provider && !account.disabled);
   if (pool.length < (config.recover ? 1 : 2)) return result(`账户目录里只有 ${pool.length} 个可用的 ${config.provider} 账户，没有可切换的对象`, config.reason);
   const current = await currentAccount(trigger, pool);
+  if (trigger === 'omo-agent' && config.omoRequest) {
+    if (!current) return result('无法确认 OmO 当前账户', config.reason);
+    const identity = await readOmoIdentity(clientPath(trigger));
+    if (!identity) return result('OmO 凭证不可管理，未复用切换', config.reason);
+    const request = config.omoRequest;
+    if (!isDeepStrictEqual(identity, request)) {
+      const previous = state.clients['omo-agent'];
+      if (current && previous?.accountId === current.id && isDeepStrictEqual(previous.omoChange?.from, request)
+          && isDeepStrictEqual(previous.omoChange?.to, identity)) {
+        return result('复用另一会话完成的 OmO 账户切换', config.reason, { switched: true });
+      }
+      return result('OmO 凭证已变化，无法确认切换来源', config.reason);
+    }
+  }
   const now = Date.now();
   const last = state.clients[trigger]?.switchedAt ?? 0;
   if (!config.dryRun && now - last < config.minIntervalMs) return result(`${Math.round((now - last) / 1000)} 秒前刚切换过，这次跳过`, config.reason, { from: current?.email ?? '' });
@@ -219,6 +243,9 @@ async function switchLocked(config: SwitchOptions, network: NetworkConfig, accou
   }
   const checked: AccountStatus[] = [];
   if (current) checked.push(config.exhausted ? status(current, state.accounts[current.id], 'live') : await assess(current, state, config, network));
+  if (trigger === 'omo-agent' && config.omoRequest && checked[0]?.source === 'error') {
+    return result('无法核实 OmO 当前账户额度', config.reason, { from: current?.email ?? '', checked });
+  }
   if (current && checked[0]?.usable) {
     if (!config.dryRun) await writeState(state);
     return result(`${current.email} 仍有额度，不切换`, config.reason, { from: current.email, checked });
@@ -241,8 +268,18 @@ async function switchLocked(config: SwitchOptions, network: NetworkConfig, accou
       checked[checked.length - 1] = { ...candidateStatus, usable: false, source: 'error', error: '令牌续期失败' };
       continue;
     }
-    const written = await syncToClients(candidate, clients);
-    for (const write of written.filter((entry) => !entry.error)) state.clients[write.source] = { accountId: candidate.id, email: candidate.email, switchedAt: now };
+    const omoBefore = clients.includes('omo-agent') ? await readOmoIdentity(clientPath('omo-agent')) : null;
+    if (config.omoRequest && !isDeepStrictEqual(omoBefore, config.omoRequest)) {
+      return result('额度查询期间 OmO 凭证已变化，未切换', config.reason, { checked });
+    }
+    const written = await syncToClients(candidate, clients, config.omoRequest);
+    const omoAfter = omoBefore && written.some((entry) => entry.source === 'omo-agent' && !entry.error)
+      ? await readOmoIdentity(clientPath('omo-agent')) : null;
+    for (const write of written.filter((entry) => !entry.error)) state.clients[write.source] = {
+      accountId: candidate.id, email: candidate.email, switchedAt: now,
+      ...(write.source === 'omo-agent' && omoBefore && omoAfter && !isDeepStrictEqual(omoBefore, omoAfter)
+        ? { omoChange: { from: omoBefore, to: omoAfter } } : {}),
+    };
     await writeState(state);
     const triggerWrite = written.find((write) => write.source === trigger);
     if (!triggerWrite || triggerWrite.error) {
