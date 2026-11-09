@@ -171,7 +171,15 @@ printf '%s' '{"switched":true}'
   await writeFile(pluginPath, omoPlugin([command]));
   const pluginModule = await import(pathToFileURL(pluginPath).href);
   const handlers = new Map<string, (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown>();
-  pluginModule.default({ on: (name: string, handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown) => handlers.set(name, handler) });
+  let providerBlocked = true;
+  let modelResetSucceeds = true;
+  pluginModule.default({
+    on: (name: string, handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown) => handlers.set(name, handler),
+    setSessionModel: async () => {
+      if (modelResetSucceeds) providerBlocked = false;
+      return modelResetSucceeds;
+    },
+  });
   const turnEnd = handlers.get('turn_end');
   const settle = handlers.get('agent_before_settle');
   const input = handlers.get('input');
@@ -209,6 +217,7 @@ printf '%s' '{"switched":true}'
   assert.equal(await settle(boundary, ctx), undefined);
   assert.equal(reloads, 1);
   await input({ attribution: 'user' });
+  assert.equal(providerBlocked, false, 'the next user message must not inherit the old account limit');
   await beforeRequest({}, ctx);
   await response({ status: 429 }, ctx);
   await turnEnd({ message: { role: 'assistant', provider: 'chatgpt-subscription', stopReason: 'error', errorMessage: 'HTTP failed' } });
@@ -220,6 +229,12 @@ printf '%s' '{"switched":true}'
     errorCause: { type: 'usage_limit', scope: 'account' }, errorMessage: 'limit' } });
   assert.partialDeepStrictEqual(await settle(boundary, ctx), { continue: true });
   assert.equal(JSON.parse(await readFile(calls, 'utf8')).error.message, 'quota exhausted');
+  await input({ attribution: 'user' });
+  await beforeRequest({}, ctx);
+  await turnEnd({ message: { role: 'assistant', provider: 'chatgpt-subscription', stopReason: 'error',
+    errorCause: { type: 'usage_limit', scope: 'account' } } });
+  modelResetSucceeds = false;
+  assert.equal(await settle(boundary, ctx), undefined);
 });
 
 test('concurrent OmO sessions both resume after one real hook switches accounts', { timeout: 20_000 }, async (t) => {
@@ -264,7 +279,10 @@ exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.r
   const pluginModule = await import(pathToFileURL(pluginPath).href);
   const sessions = Array.from({ length: 2 }, () => {
     const handlers = new Map<string, (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown>();
-    pluginModule.default({ on: (name: string, handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown) => handlers.set(name, handler) });
+    pluginModule.default({
+      on: (name: string, handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown) => handlers.set(name, handler),
+      setSessionModel: async () => true,
+    });
     let reloads = 0;
     const ctx = {
       model: { provider: 'chatgpt-subscription' }, agentDir,

@@ -101,6 +101,9 @@ export default function (pi) {
     if ((!result?.switched && !result?.resume) || revision !== started || ctx.signal?.aborted
       || ctx.model?.provider !== 'chatgpt-subscription') return;
     if (ctx.modelRegistry.authStorage.reload() !== 'loaded') return;
+    // 同一模型的会话级重设会清除 OmO 为旧账户保留的 provider 额度冷却。
+    if (!await pi.setSessionModel(ctx.model) || revision !== started || ctx.signal?.aborted
+      || ctx.model?.provider !== 'chatgpt-subscription') return;
     if (ctx.hasUI) ctx.ui.notify('继续当前任务', 'info');
     return {
       entries: [...event.entries, {
