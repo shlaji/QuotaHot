@@ -16,7 +16,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test --experimental-test-module-mocks test/*.test.ts"
+    "test": "node scripts/test.mjs"
   },
   "dependencies": {
     "proper-lockfile": "^4.1.2",

@@ -15,6 +15,8 @@ export const statePath = join(dataDir, 'switch-state.json');
 process.env.HOME = home;
 process.env.XDG_DATA_HOME = join(home, '.local', 'share');
 process.env.QUOTAHOT_DATA_DIR = dataDir;
+process.env.OMO_CODING_AGENT_DIR = join(home, '.omo', 'agent');
+process.env.PI_CODING_AGENT_DIR = join(home, '.pi', 'agent');
 
 after(() => rmSync(home, { recursive: true, force: true }));
 

@@ -17,6 +17,7 @@ async function cli(args: readonly string[], home?: string): Promise<CliResult> {
       ...process.env, HOME: home, QUOTAHOT_DATA_DIR: join(home, '.quotahot'),
       XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local', 'share'),
       PI_CODING_AGENT_DIR: join(home, '.pi', 'agent'),
+      OMO_CODING_AGENT_DIR: join(home, '.omo', 'agent'),
     },
       timeout: 30_000,
     }, (error, stdout, stderr) => {
@@ -328,13 +329,13 @@ test('default install removes owned legacy triggers but preserves other hooks an
   const piDir = join(home, '.pi', 'agent');
   await Promise.all([
     mkdir(codexDir, { recursive: true }), mkdir(join(piDir, 'extensions'), { recursive: true }),
-    writeFile(join(codexDir, 'hooks.json'), JSON.stringify({ hooks: {
+  ]);
+  await writeFile(join(codexDir, 'hooks.json'), JSON.stringify({ hooks: {
       SessionStart: [{ hooks: [
         { type: 'command', command: 'quotahot-hook run codex' },
         { type: 'command', command: 'keep-this-hook' },
       ] }],
-    } })),
-  ]);
+    } }));
   await writeFile(join(piDir, 'extensions', 'quotahot-hook.ts'), '// quotahot:pi-extension\nold integration');
   await writeFile(join(piDir, 'auth.json'), '{"openai-codex":{"access":"keep-auth"}}');
 

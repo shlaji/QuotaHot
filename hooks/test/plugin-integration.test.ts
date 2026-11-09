@@ -244,6 +244,8 @@ test('generated plugin quota phrases drive the real OpenCode hook switch path', 
 export HOME=${JSON.stringify(root)}
 export XDG_DATA_HOME=${JSON.stringify(dataHome)}
 export QUOTAHOT_DATA_DIR=${JSON.stringify(dataDir)}
+export OMO_CODING_AGENT_DIR=${JSON.stringify(join(root, 'omo-agent'))}
+export PI_CODING_AGENT_DIR=${JSON.stringify(join(root, 'pi-agent'))}
 exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.resolve('tsx'))} ${JSON.stringify(resolve('src/index.ts'))} run opencode --no-check --min-interval-seconds 0
 `);
   await chmod(wrapper, 0o700);
@@ -300,6 +302,7 @@ test('OpenCode quota event switches Codex CLI and existing Pi Codex without chan
 export HOME=${JSON.stringify(root)}
 export XDG_DATA_HOME=${JSON.stringify(dataHome)}
 export QUOTAHOT_DATA_DIR=${JSON.stringify(dataDir)}
+export OMO_CODING_AGENT_DIR=${JSON.stringify(join(root, 'omo-agent'))}
 export PI_CODING_AGENT_DIR=${JSON.stringify(piDir)}
 exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.resolve('tsx'))} ${JSON.stringify(resolve('src/index.ts'))} run opencode --no-check --min-interval-seconds 0
 `);

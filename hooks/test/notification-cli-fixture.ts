@@ -43,6 +43,10 @@ export function runNotificationCliResult(fixture: NotificationCliFixture, args: 
     env: {
       ...process.env,
       HOME: fixture.home,
+      XDG_CONFIG_HOME: join(fixture.home, '.config'),
+      XDG_DATA_HOME: join(fixture.home, '.local', 'share'),
+      OMO_CODING_AGENT_DIR: join(fixture.home, '.omo', 'agent'),
+      PI_CODING_AGENT_DIR: join(fixture.home, '.pi', 'agent'),
       QUOTAHOT_DATA_DIR: fixture.dataDir,
       PATH: `${fixture.binDir}:${process.env.PATH ?? ''}`,
     },
