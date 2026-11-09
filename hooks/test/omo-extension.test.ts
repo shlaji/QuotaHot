@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 import { omoPlugin } from '../src/install.js';
+import { syncOmo } from '../src/omo-auth.js';
 
 const entry = resolve('src/index.ts');
 
@@ -65,7 +66,7 @@ test('OmO quota event switches the selected single-slot credential and preserves
   await writeFile(auth, JSON.stringify({
     'chatgpt-subscription': {
       type: 'oauth', access: 'token-a', refresh: 'refresh-a', expires: Date.now() + 86_400_000, accountId: 'acct-a',
-      email: 'a@x.com', route: 'siwc',
+      email: 'a@x.com', route: 'siwc', loginId: 'old-login',
       accounts: [{ name: 'default', access: 'token-a', refresh: 'refresh-a', expires: Date.now() + 86_400_000,
         accountId: 'acct-a', email: 'a@x.com', signedOut: true, route: 'siwc' }],
     },
@@ -79,6 +80,8 @@ test('OmO quota event switches the selected single-slot credential and preserves
   assert.equal(JSON.parse(result.stdout).switched, true);
   const changed = JSON.parse(await readFile(auth, 'utf8'));
   assert.equal(changed['chatgpt-subscription'].access, 'token-b');
+  assert.match(changed['chatgpt-subscription'].loginId, /^[0-9a-f-]{36}$/);
+  assert.notEqual(changed['chatgpt-subscription'].loginId, 'old-login');
   assert.equal(changed['chatgpt-subscription'].accounts[0].access, 'token-b');
   assert.equal(changed['chatgpt-subscription'].email, 'b@x.com');
   assert.equal(changed['chatgpt-subscription'].accounts[0].email, 'b@x.com');
@@ -120,6 +123,32 @@ test('OmO multi-account pool keeps its native credentials on quota errors', asyn
   assert.equal(await readFile(auth, 'utf8'), original);
   await assert.rejects(lstat(`${auth}.quotahot-bak`));
   await assert.rejects(lstat(join(home, '.codex', 'auth.json')));
+});
+
+test('OmO distinguishes different users in the same account from a token refresh', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-identity-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const auth = join(home, 'auth.json');
+  await writeFile(auth, JSON.stringify({
+    'chatgpt-subscription': {
+      type: 'oauth', access: 'token-a', refresh: 'refresh-a', expires: 100,
+      accountId: 'shared', email: 'a@x.com', loginId: 'old-login', route: 'siwc',
+    },
+  }));
+  const account = {
+    id: 'b', provider: 'codex' as const, email: 'b@x.com', path: '', accountId: 'shared',
+    accessToken: 'token-b', refreshToken: 'refresh-b', expiresAt: 200, disabled: false,
+    plan: '', subscriptionEndsAt: 0, userId: '', source: '', autoRefresh: false,
+    syncPath: '', syncSource: '', idToken: '',
+  };
+  assert.equal((await syncOmo(account, auth, 'test')).error, '');
+  const switched = JSON.parse(await readFile(auth, 'utf8'))['chatgpt-subscription'];
+  assert.equal(switched.email, 'b@x.com');
+  assert.equal(switched.route, undefined);
+  assert.notEqual(switched.loginId, 'old-login');
+  assert.equal((await syncOmo({ ...account, accessToken: 'refreshed-token' }, auth, 'test')).error, '');
+  const refreshed = JSON.parse(await readFile(auth, 'utf8'))['chatgpt-subscription'];
+  assert.equal(refreshed.loginId, switched.loginId);
 });
 
 test('OmO extension continues once after final Codex quota failure and reloads live credentials', async (t) => {

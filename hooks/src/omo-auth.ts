@@ -33,12 +33,14 @@ export async function syncOmo(account: Account, path: string, label: string): Pr
       const data = parsed.data;
       const record = data['chatgpt-subscription'];
       const changes: ConfigChange[] = [];
+      const accountChanged = record.accountId !== account.accountId
+        || typeof record.email === 'string' && record.email !== account.email;
       const credentials = [
         { value: record, prefix: 'chatgpt-subscription' },
         ...(record.accounts ?? []).map((value) => ({ value, prefix: 'chatgpt-subscription.accounts[0]' })),
       ];
       for (const { value, prefix } of credentials) {
-        if (value.accountId !== account.accountId) {
+        if (value.accountId !== account.accountId || typeof value.email === 'string' && value.email !== account.email) {
           for (const field of ['route', 'issuer', 'subject', 'clientId', 'scopes', 'planUsageEnabled', 'signedOut', 'displayName']) {
             delete value[field];
           }
@@ -60,6 +62,7 @@ export async function syncOmo(account: Account, path: string, label: string): Pr
         Object.assign(value, { access: account.accessToken, refresh: account.refreshToken, expires: account.expiresAt, accountId: account.accountId });
       }
       if (changes.length === 0) return { ...base, changes, error: '' };
+      if (accountChanged) record.loginId = randomUUID();
       const backupPath = `${path}.quotahot-bak`;
       await copyFile(path, backupPath);
       const temporary = `${path}.quotahot-tmp-${randomUUID()}`;
