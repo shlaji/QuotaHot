@@ -12,6 +12,7 @@ export default function (pi) {
   let revision = 0;
   let pendingChild;
   let requestIdentity;
+  let recoveryTimer;
 
   pi.on('input', (event) => {
     if (event.attribution !== 'user') return;
@@ -20,11 +21,13 @@ export default function (pi) {
     quotaStatus = false;
     requestIdentity = undefined;
     revision += 1;
+    clearTimeout(recoveryTimer);
     pendingChild?.kill('SIGTERM');
   });
   for (const name of ['session_shutdown', 'model_select']) {
     pi.on(name, () => {
       revision += 1;
+      clearTimeout(recoveryTimer);
       lastError = '';
       requestIdentity = undefined;
       pendingChild?.kill('SIGTERM');
@@ -63,25 +66,19 @@ export default function (pi) {
       ? quotaStatus ? '429' : 'quota exhausted' : '';
   });
 
-  pi.on('agent_before_settle', async (event, ctx) => {
-    if (attempted || !lastError || event.outcome !== 'error'
-      || ctx.model?.provider !== 'chatgpt-subscription' || !requestIdentity || ctx.signal?.aborted) return;
-    attempted = true;
-    const started = revision;
-    const error = lastError;
-    lastError = '';
-    const result = await new Promise((resolve) => {
+  function runCheck(ctx, identity, error, recover, signal) {
+    return new Promise((resolve) => {
       const child = spawn(COMMAND[0], [...COMMAND.slice(1), 'run', 'omo'], {
         env: { ...process.env, OMO_CODING_AGENT_DIR: ctx.agentDir },
         stdio: ['pipe', 'pipe', 'ignore'],
       });
       pendingChild = child;
       const cancel = () => child.kill('SIGTERM');
-      ctx.signal?.addEventListener('abort', cancel, { once: true });
-      if (ctx.signal?.aborted) cancel();
+      signal?.addEventListener('abort', cancel, { once: true });
+      if (signal?.aborted) cancel();
       let output = '';
       const timer = setTimeout(() => child.kill('SIGKILL'), 120_000);
-      child.on('error', () => { clearTimeout(timer); ctx.signal?.removeEventListener('abort', cancel); resolve(null); });
+      child.on('error', () => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); resolve(null); });
       child.stdin.on('error', () => child.kill('SIGTERM'));
       child.stdout.on('data', (chunk) => {
         output += chunk.toString();
@@ -89,15 +86,61 @@ export default function (pi) {
       });
       child.on('close', (code) => {
         clearTimeout(timer);
-        ctx.signal?.removeEventListener('abort', cancel);
+        signal?.removeEventListener('abort', cancel);
         if (pendingChild === child) pendingChild = undefined;
-        if (code !== 0 || output.length > 65_536 || ctx.signal?.aborted) return resolve(null);
+        if (code !== 0 || output.length > 65_536 || signal?.aborted) return resolve(null);
         try { resolve(JSON.parse(output)); } catch { resolve(null); }
       });
       child.stdin.end(JSON.stringify({ source: 'omo', provider: 'chatgpt-subscription',
         error: { message: error, ...(error === '429' ? { statusCode: 429 } : {}) },
-        ...(requestIdentity ? { omoRequest: requestIdentity } : {}) }));
+        omoRequest: identity, ...(recover ? { recover: true } : {}) }));
     });
+  }
+
+  function scheduleRecovery(ctx, identity, error, started, result, delay = 60_000) {
+    const due = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now()
+      ? result.waitUntil + 5_000 : Date.now() + delay;
+    const arm = () => {
+      recoveryTimer = setTimeout(async () => {
+        try {
+          if (revision !== started) return;
+          if (Date.now() < due) return arm();
+          if (!ctx.isIdle() || ctx.model?.provider !== 'chatgpt-subscription') return;
+          const check = await runCheck(ctx, identity, error, true);
+          if (revision !== started || !ctx.isIdle() || ctx.model?.provider !== 'chatgpt-subscription') return;
+          if (check?.switched || check?.resume) {
+            if (ctx.modelRegistry.authStorage.reload() !== 'loaded' || !await pi.setSessionModel(ctx.model)
+              || revision !== started || !ctx.isIdle()) return;
+            if (ctx.hasUI) ctx.ui.notify('额度已恢复，继续当前任务', 'info');
+            await pi.sendUserMessage('额度已恢复。继续当前任务，先核对已经完成的工具操作，避免重复执行。');
+            return;
+          }
+          scheduleRecovery(ctx, identity, error, started, check, Math.min(delay * 2, 480_000));
+        } catch (error) {
+          console.error('QuotaHot: 额度恢复失败', error);
+          if (ctx.hasUI) ctx.ui.notify('额度恢复失败，请手动检查会话', 'warning');
+        }
+      }, Math.min(2_147_483_647, Math.max(0, due - Date.now())));
+      recoveryTimer.unref?.();
+    };
+    arm();
+  }
+
+  pi.on('agent_before_settle', async (event, ctx) => {
+    if (attempted || !lastError || event.outcome !== 'error'
+      || ctx.model?.provider !== 'chatgpt-subscription' || !requestIdentity || ctx.signal?.aborted) return;
+    attempted = true;
+    const started = revision;
+    const identity = requestIdentity;
+    const error = lastError;
+    lastError = '';
+    const result = await runCheck(ctx, identity, error, false, ctx.signal);
+    if (revision !== started || ctx.signal?.aborted || ctx.model?.provider !== 'chatgpt-subscription') return;
+    if (!result?.switched && !result?.resume) {
+      scheduleRecovery(ctx, identity, error, started, result);
+      if (ctx.hasUI) ctx.ui.notify('已启动后台额度恢复检查', 'info');
+      return;
+    }
     if ((!result?.switched && !result?.resume) || revision !== started || ctx.signal?.aborted
       || ctx.model?.provider !== 'chatgpt-subscription') return;
     if (ctx.modelRegistry.authStorage.reload() !== 'loaded') return;

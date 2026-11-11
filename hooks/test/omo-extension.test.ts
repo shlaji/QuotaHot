@@ -237,6 +237,87 @@ printf '%s' '{"switched":true}'
   assert.equal(await settle(boundary, ctx), undefined);
 });
 
+test('OmO waits for quota recovery and resumes the idle session', { timeout: 20_000 }, async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-recovery-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const command = join(home, 'hook');
+  const marker = join(home, 'checked');
+  await writeFile(command, `#!/bin/sh
+if [ -e ${JSON.stringify(marker)} ]; then
+  printf '%s' '{"switched":false,"resume":true}'
+else
+  touch ${JSON.stringify(marker)}
+  printf '%s' '{"switched":false,"outcome":"no_candidate"}'
+fi
+`);
+  await chmod(command, 0o700);
+  const pluginPath = join(home, 'quotahot.mjs');
+  await writeFile(pluginPath, omoPlugin([command]));
+  const plugin = await import(pathToFileURL(pluginPath).href);
+  const handlers = new Map<string, (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown>();
+  let resumed!: () => void;
+  const continuation = new Promise<void>((resolve) => { resumed = resolve; });
+  plugin.default({
+    on: (name: string, handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown) => handlers.set(name, handler),
+    setSessionModel: async () => true,
+    sendUserMessage: () => resumed(),
+  });
+  const ctx = {
+    model: { provider: 'chatgpt-subscription' }, agentDir: join(home, 'agent'),
+    isIdle: () => true, hasUI: false,
+    modelRegistry: { authStorage: {
+      get: () => ({ type: 'oauth', accountId: 'old-account' }),
+      reload: () => 'loaded',
+    } },
+  };
+  const beforeRequest = handlers.get('before_provider_request');
+  const turnEnd = handlers.get('turn_end');
+  const settle = handlers.get('agent_before_settle');
+  assert.ok(beforeRequest && turnEnd && settle);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  await beforeRequest({}, ctx);
+  await turnEnd({ message: { role: 'assistant', provider: 'chatgpt-subscription', stopReason: 'error', errorMessage: 'quota exhausted' } });
+  assert.equal(await settle({ outcome: 'error', entries: [] }, ctx), undefined);
+  t.mock.timers.tick(60_000);
+  await continuation;
+});
+
+test('OmO cancels the recovery wait when the user starts another task', { timeout: 20_000 }, async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-cancel-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const command = join(home, 'hook');
+  const calls = join(home, 'calls');
+  await writeFile(command, `#!/bin/sh
+echo check >> ${JSON.stringify(calls)}
+printf '%s' '{"switched":false,"outcome":"no_candidate"}'
+`);
+  await chmod(command, 0o700);
+  const pluginPath = join(home, 'quotahot.mjs');
+  await writeFile(pluginPath, omoPlugin([command]));
+  const plugin = await import(pathToFileURL(pluginPath).href);
+  const handlers = new Map<string, (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown>();
+  plugin.default({
+    on: (name: string, handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown) => handlers.set(name, handler),
+  });
+  const ctx = {
+    model: { provider: 'chatgpt-subscription' }, agentDir: join(home, 'agent'),
+    isIdle: () => true, hasUI: false,
+    modelRegistry: { authStorage: { get: () => ({ type: 'oauth', accountId: 'old-account' }) } },
+  };
+  const beforeRequest = handlers.get('before_provider_request');
+  const turnEnd = handlers.get('turn_end');
+  const settle = handlers.get('agent_before_settle');
+  const input = handlers.get('input');
+  assert.ok(beforeRequest && turnEnd && settle && input);
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  await beforeRequest({}, ctx);
+  await turnEnd({ message: { role: 'assistant', provider: 'chatgpt-subscription', stopReason: 'error', errorMessage: 'quota exhausted' } });
+  await settle({ outcome: 'error', entries: [] }, ctx);
+  await input({ attribution: 'user' });
+  t.mock.timers.tick(600_000);
+  assert.equal(await readFile(calls, 'utf8'), 'check\n');
+});
+
 test('concurrent OmO sessions both resume after one real hook switches accounts', { timeout: 20_000 }, async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-concurrent-'));
   t.after(() => rm(home, { recursive: true, force: true }));

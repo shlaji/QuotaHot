@@ -250,7 +250,7 @@ async function switchLocked(config: SwitchOptions, network: NetworkConfig, accou
     if (!config.dryRun) await writeState(state);
     return result(`${current.email} 仍有额度，不切换`, config.reason, { from: current.email, checked });
   }
-  let waitUntil = 0;
+  let waitUntil = checked[0]?.resetAt && checked[0].resetAt > now ? checked[0].resetAt : 0;
   const order = accountOrder[config.provider] ?? [];
   const ranks = new Map<string, number>();
   for (const id of order) if (!ranks.has(id)) ranks.set(id, ranks.size);

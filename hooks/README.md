@@ -2,7 +2,7 @@
 
 `quotahot-hook` 是独立账户切换命令。默认自动触发入口是 **OpenCode 插件**：OpenCode 的 OpenAI（Codex）请求出现明确额度用尽信号时，hook 会选择可用的 Codex 账户并同步本机客户端凭证。OpenCode 的 Anthropic/Claude 额度错误不会触发自动切换；要切换 Claude 账户，请手动运行 `quotahot-hook switch --provider claude`。hook 不启动也不调用 QuotaHot Web 服务；与主程序共享的只有 `QUOTAHOT_DATA_DIR` 下的配置和账户文件。
 
-独立 OmO Native 可单独安装 `quotahot-hook install omo` 扩展。它只在 OmO 自身的账户轮换、重试及模型 fallback 已结束，且 ChatGPT Subscription 模型最终明确报额度错误时切换 QuotaHot 的 Codex 账户；成功后重新加载 OmO 凭证并续跑一次。OmO 已有多个凭证槽时由 OmO 自己处理账户切换，QuotaHot 不覆盖它的账户池。扩展不处理 Claude 或普通网络错误。
+独立 OmO Native 可单独安装 `quotahot-hook install omo` 扩展。它只在 OmO 自身的账户轮换、重试及模型 fallback 已结束，且 ChatGPT Subscription 模型最终明确报额度错误时切换 QuotaHot 的 Codex 账户；成功后重新加载 OmO 凭证并续跑一次。如果暂时没有可用账户，扩展会在当前会话保持运行时后台检查额度，并在额度恢复后续跑；用户输入、切换模型或关闭会话会取消等待。等待状态不跨重启保存。OmO 已有多个凭证槽时由 OmO 自己处理账户切换，QuotaHot 不覆盖它的账户池。扩展不处理 Claude 或普通网络错误。
 
 一次 Codex 切换会同步 Codex CLI、OpenCode，以及已经存在的 Pi Codex 和 OmO Native 凭证；手动切换 Claude 会同步 Claude Code 和已经存在的 Pi Claude 凭证。Codex CLI 和 Pi 不再安装 QuotaHot hook 或插件，也不会独立触发切换；安装时仅保留对可识别为 QuotaHot 自有的旧 Codex hook 条目和 Pi 扩展的清理。缺少 Pi `auth.json` 时不会创建该文件，清理也不会删除账户凭证或其他工具的 hook。
 
