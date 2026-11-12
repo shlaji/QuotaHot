@@ -133,7 +133,8 @@ export async function runHook(
     usageQuery: opts.usageQuery ?? queryHookUsage,
   });
   const latestData = result.quotaCheck?.latestData ?? result.checked.some((account) => account.source === 'live');
-  const resume = client === 'omo' && !result.switched && result.checked[0]?.usable === true;
+  const resume = client === 'omo' && !result.switched &&
+    (result.checked[0]?.usable === true || result.quotaCheck?.outcome === 'available');
   const outcome: HookOutcome = result.lockContended ? 'lock_contended' : resume ? 'available' : result.quotaCheck?.outcome ?? quotaCheckOutcome(result, false);
   return {
       stdout: JSON.stringify({

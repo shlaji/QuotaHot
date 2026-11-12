@@ -150,20 +150,23 @@ export async function switchAccount(partial: Partial<SwitchOptions> = {}): Promi
   }
   const appConfig = loadConfig();
   const network = { proxy: appConfig.proxy, noProxy: appConfig.noProxy };
-  const recordCheck = !config.dryRun && config.check && config.triggerClient === 'opencode' &&
+  const recordCheck = !config.dryRun && config.check &&
+    (config.triggerClient === 'opencode' || config.triggerClient === 'omo-agent'
+      && config.omoRequest !== undefined && Number.isFinite(config.quotaCheckAfter)) &&
     (config.provider === 'codex' || config.provider === 'claude');
   const acquire = config.triggerClient === 'omo-agent' && config.omoRequest ? waitForSwitchLock : withSwitchLock;
   const locked = config.dryRun ? await switchLocked(config, network, appConfig.accountOrder) : await acquire(async () => {
     const result = await switchLocked(config, network, appConfig.accountOrder);
-    if (!recordCheck) return result;
+    if (!recordCheck || result.quotaCheck || config.triggerClient === 'omo-agent' && result.checked.length === 0) return result;
     const state = await readState();
-    const outcome = quotaCheckOutcome(result, config.recover);
+    const outcome = quotaCheckOutcome(result, config.recover || config.triggerClient === 'omo-agent');
     const receipt: QuotaCheckReceipt = {
       provider: config.provider, completedAt: Date.now(), outcome,
       switched: result.switched, latestData: result.checked.some((account) => account.source === 'live'),
       waitUntil: result.waitUntil,
+      ...(config.triggerClient === 'omo-agent' && config.omoRequest ? { omoRequest: config.omoRequest } : {}),
     };
-    await writeState({ ...state, lastQuotaCheck: receipt });
+    await writeState({ ...state, [config.triggerClient === 'omo-agent' ? 'lastOmoQuotaCheck' : 'lastQuotaCheck']: receipt });
     return result;
   });
   return locked ?? result('另一处正在切换账户，这次跳过', config.reason, { lockContended: true });
@@ -231,6 +234,14 @@ async function switchLocked(config: SwitchOptions, network: NetworkConfig, accou
         return result('复用另一会话完成的 OmO 账户切换', config.reason, { switched: true });
       }
       return result('OmO 凭证已变化，无法确认切换来源', config.reason);
+    }
+    const receipt = state.lastOmoQuotaCheck;
+    if (receipt?.provider === config.provider && !receipt.switched && Number.isFinite(config.quotaCheckAfter)
+        && receipt.completedAt >= (config.quotaCheckAfter ?? Infinity)
+        && isDeepStrictEqual(receipt.omoRequest, request)) {
+      return result('复用同一 OmO 请求账户的额度查询结果', config.reason, {
+        waitUntil: receipt.waitUntil, quotaCheck: receipt,
+      });
     }
   }
   const now = Date.now();

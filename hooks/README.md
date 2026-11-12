@@ -2,7 +2,7 @@
 
 `quotahot-hook` 是独立账户切换命令。默认自动触发入口是 **OpenCode 插件**：OpenCode 的 OpenAI（Codex）请求出现明确额度用尽信号时，hook 会选择可用的 Codex 账户并同步本机客户端凭证。OpenCode 的 Anthropic/Claude 额度错误不会触发自动切换；要切换 Claude 账户，请手动运行 `quotahot-hook switch --provider claude`。hook 不启动也不调用 QuotaHot Web 服务；与主程序共享的只有 `QUOTAHOT_DATA_DIR` 下的配置和账户文件。
 
-独立 OmO Native 可单独安装 `quotahot-hook install omo` 扩展。它只在 OmO 自身的账户轮换、重试及模型 fallback 已结束，且 ChatGPT Subscription 模型最终明确报额度错误时切换 QuotaHot 的 Codex 账户；成功后重新加载 OmO 凭证并续跑一次。如果暂时没有可用账户，扩展会在当前会话保持运行时后台检查额度，并在额度恢复后续跑；用户输入、切换模型或关闭会话会取消等待。等待状态不跨重启保存。OmO 已有多个凭证槽时由 OmO 自己处理账户切换，QuotaHot 不覆盖它的账户池。扩展不处理 Claude 或普通网络错误。
+独立 OmO Native 可单独安装 `quotahot-hook install omo` 扩展。它只在 OmO 自身的账户轮换、重试及模型 fallback 已结束，且 ChatGPT Subscription 模型最终明确报额度错误时切换 QuotaHot 的 Codex 账户；成功后重新加载 OmO 凭证并续跑一次。如果暂时没有可用账户，扩展按与 OpenCode 相同的额度恢复策略等待，并在额度恢复后续跑；用户输入、切换模型、成功完成、中止或关闭会话会取消等待。等待状态不跨重启保存。OmO 已有多个凭证槽时由 OmO 自己处理账户切换，QuotaHot 不覆盖它的账户池。扩展不处理 Claude 或单独的网络错误。
 
 一次 Codex 切换会同步 Codex CLI、OpenCode，以及已经存在的 Pi Codex 和 OmO Native 凭证；手动切换 Claude 会同步 Claude Code 和已经存在的 Pi Claude 凭证。Codex CLI 和 Pi 不再安装 QuotaHot hook 或插件，也不会独立触发切换；安装时仅保留对可识别为 QuotaHot 自有的旧 Codex hook 条目和 Pi 扩展的清理。缺少 Pi `auth.json` 时不会创建该文件，清理也不会删除账户凭证或其他工具的 hook。
 
@@ -76,7 +76,14 @@ OmO 多账户池中已有多个槽位时，扩展不会写回，继续使用 OmO
 
 ### 自动恢复与重试边界
 
-额度自动恢复仅由 OpenCode 的 OpenAI（Codex）明确配额信号建立等待。额度可用且会话空闲后，插件至多提交一次续跑；OpenCode 仍在内部重试时不会重放任务。这不是从工具指令位置断点恢复，模型须核对已完成的工具动作，避免重复执行。
+额度自动恢复由 OpenCode 的 OpenAI（Codex）明确配额信号，或独立 OmO Native 的 ChatGPT Subscription 最终额度错误建立等待。额度可用且会话空闲后，插件至多提交一次续跑；客户端仍在内部重试时不会重放任务。这不是从工具指令位置断点恢复，模型须核对已完成的工具动作，避免重复执行。
+
+两端的额度查询使用同一套频率规则：
+
+- 有新鲜额度数据时，只在最早重置时间加一分钟后再查询；没有未来重置时间就等待 `switch-state.json` 中的额度或查询回执发生变化。
+- 缺少新鲜数据时，普通查询失败按 10、20、40、80 分钟退避；网络失败从 5 秒开始翻倍退避，最多五分钟。连续五次未取得新鲜数据后停止 API 轮询，继续监听本地状态变化。
+- 切换锁竞争后等待一秒，并复用同一轮检查的查询回执。同一模块中请求账户身份相同的 OmO 会话共享一次检查；不同登录身份的回执不会直接用于续跑。
+- 定时器唤醒不等于请求 API。OmO 每段等待最多一分钟，只核对本地时间，以便机器休眠或校时后及时识别已经到期的恢复时间。文件监听异常时每秒尝试恢复本地监听，也不会因此每秒查询额度。
 
 - 真实用户新输入（包括附件）、主动中止（abort）、成功完成、会话删除或插件销毁都会终止对应恢复等待。关闭或重载插件也会取消进程内等待，不跨重启持久化。
 - OmO 内部通知只有在合成标记（synthetic）或既定内部标记的来源已确认时，才不会被当作用户输入取消等待；不能只凭正文相似就认定为内部通知。

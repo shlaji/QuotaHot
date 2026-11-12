@@ -24,5 +24,10 @@ export function opencodeNotificationPlugin(command: string | readonly string[]):
 export function omoPlugin(command: string | readonly string[]): string {
   const template = readFileSync(join(import.meta.dirname, 'omo-plugin-template.js'), 'utf8');
   if (template.split(omoPlaceholder).length !== 2) throw new Error('OmO plugin template must contain exactly one command placeholder');
-  return template.replace(omoPlaceholder, JSON.stringify(typeof command === 'string' ? [command] : command));
+  const marker = '// __QUOTAHOT_OMO_RECOVERY__';
+  if (template.split(marker).length > 2) throw new Error('OmO plugin template has duplicate recovery markers');
+  const source = template.includes(marker)
+    ? template.replace(marker, readFileSync(join(import.meta.dirname, 'omo-recovery-template.js'), 'utf8'))
+    : template;
+  return source.replace(omoPlaceholder, JSON.stringify(typeof command === 'string' ? [command] : command));
 }

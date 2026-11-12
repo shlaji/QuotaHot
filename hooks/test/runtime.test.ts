@@ -57,6 +57,23 @@ test('OmO verifies current account quota before marking it exhausted', async () 
   assert.equal(JSON.parse(out.stdout).resume, true);
 });
 
+test('OmO resumes from a verified available quota receipt without a repeated live check', async (t) => {
+  const previous = reply;
+  t.after(() => { reply = previous; });
+  reply = { ...reply, switched: false, checked: [], quotaCheck: {
+    provider: 'codex', completedAt: Date.now(), outcome: 'available',
+    switched: false, latestData: true, waitUntil: 0,
+  } };
+  const out = await runHook('omo', JSON.stringify({
+    source: 'omo', provider: 'chatgpt-subscription', recover: true,
+    error: { message: 'quota exhausted' },
+    omoRequest: { accountId: 'current', email: '', loginId: 'login' },
+  }));
+  assert.equal(JSON.parse(out.stdout).resume, true);
+  assert.equal(JSON.parse(out.stdout).latestData, true);
+  assert.equal(out.outcome, 'available');
+});
+
 test('认得出 OpenCode 事件里的限额', () => {
   assert.equal(opencodeSignal({ event: { properties: { error: { status: 429 } } } }).hit, true);
   assert.equal(opencodeSignal({ event: { message: 'You have hit your usage limit' } }).hit, true);

@@ -237,50 +237,57 @@ printf '%s' '{"switched":true}'
   assert.equal(await settle(boundary, ctx), undefined);
 });
 
-test('OmO waits for quota recovery and resumes the idle session', { timeout: 20_000 }, async (t) => {
-  const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-recovery-'));
-  t.after(() => rm(home, { recursive: true, force: true }));
-  const command = join(home, 'hook');
-  const marker = join(home, 'checked');
-  await writeFile(command, `#!/bin/sh
+for (const suspended of [false, true]) {
+  test(suspended ? 'OmO rechecks quota after suspension advances the wall clock' : 'OmO waits for quota recovery and resumes the idle session', { timeout: 20_000 }, async (t) => {
+    const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-recovery-'));
+    t.after(() => rm(home, { recursive: true, force: true }));
+    const command = join(home, 'hook');
+    const marker = join(home, 'checked');
+    let wallClock = Date.now();
+    const waitUntil = suspended ? wallClock + 3_600_000 : 0;
+    await writeFile(command, `#!/bin/sh
 if [ -e ${JSON.stringify(marker)} ]; then
   printf '%s' '{"switched":false,"resume":true}'
 else
   touch ${JSON.stringify(marker)}
-  printf '%s' '{"switched":false,"outcome":"no_candidate"}'
+  printf '%s' '{"switched":false,"outcome":"no_candidate","waitUntil":${waitUntil}}'
 fi
 `);
-  await chmod(command, 0o700);
-  const pluginPath = join(home, 'quotahot.mjs');
-  await writeFile(pluginPath, omoPlugin([command]));
-  const plugin = await import(pathToFileURL(pluginPath).href);
-  const handlers = new Map<string, (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown>();
-  let resumed!: () => void;
-  const continuation = new Promise<void>((resolve) => { resumed = resolve; });
-  plugin.default({
-    on: (name: string, handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown) => handlers.set(name, handler),
-    setSessionModel: async () => true,
-    sendUserMessage: () => resumed(),
+    await chmod(command, 0o700);
+    const pluginPath = join(home, 'quotahot.mjs');
+    await writeFile(pluginPath, omoPlugin([command]));
+    const plugin = await import(pathToFileURL(pluginPath).href);
+    const handlers = new Map<string, (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown>();
+    let resumed!: () => void;
+    const continuation = new Promise<void>((resolve) => { resumed = resolve; });
+    plugin.default({
+      on: (name: string, handler: (event: Record<string, unknown>, ctx?: Record<string, unknown>) => Promise<unknown> | unknown) => handlers.set(name, handler),
+      setSessionModel: async () => true,
+      sendUserMessage: () => resumed(),
+    });
+    const ctx = {
+      model: { provider: 'chatgpt-subscription' }, agentDir: join(home, 'agent'),
+      isIdle: () => true, hasUI: false,
+      modelRegistry: { authStorage: {
+        get: () => ({ type: 'oauth', accountId: 'old-account' }),
+        reload: () => 'loaded',
+      } },
+    };
+    const beforeRequest = handlers.get('before_provider_request');
+    const turnEnd = handlers.get('turn_end');
+    const settle = handlers.get('agent_before_settle');
+    assert.ok(beforeRequest && turnEnd && settle);
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    t.mock.method(Date, 'now', () => wallClock);
+    await beforeRequest({}, ctx);
+    await turnEnd({ message: { role: 'assistant', provider: 'chatgpt-subscription', stopReason: 'error', errorMessage: 'quota exhausted' } });
+    assert.equal(await settle({ outcome: 'error', entries: [] }, ctx), undefined);
+    if (suspended) wallClock = waitUntil + 60_000;
+    else wallClock += 600_000;
+    t.mock.timers.tick(suspended ? 60_000 : 600_000);
+    await continuation;
   });
-  const ctx = {
-    model: { provider: 'chatgpt-subscription' }, agentDir: join(home, 'agent'),
-    isIdle: () => true, hasUI: false,
-    modelRegistry: { authStorage: {
-      get: () => ({ type: 'oauth', accountId: 'old-account' }),
-      reload: () => 'loaded',
-    } },
-  };
-  const beforeRequest = handlers.get('before_provider_request');
-  const turnEnd = handlers.get('turn_end');
-  const settle = handlers.get('agent_before_settle');
-  assert.ok(beforeRequest && turnEnd && settle);
-  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
-  await beforeRequest({}, ctx);
-  await turnEnd({ message: { role: 'assistant', provider: 'chatgpt-subscription', stopReason: 'error', errorMessage: 'quota exhausted' } });
-  assert.equal(await settle({ outcome: 'error', entries: [] }, ctx), undefined);
-  t.mock.timers.tick(60_000);
-  await continuation;
-});
+}
 
 test('OmO cancels the recovery wait when the user starts another task', { timeout: 20_000 }, async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-cancel-'));
@@ -318,7 +325,7 @@ printf '%s' '{"switched":false,"outcome":"no_candidate"}'
   assert.equal(await readFile(calls, 'utf8'), 'check\n');
 });
 
-test('concurrent OmO sessions both resume after one real hook switches accounts', { timeout: 20_000 }, async (t) => {
+test('concurrent OmO sessions share one real hook and both resume after switching accounts', { timeout: 20_000 }, async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-concurrent-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const agentDir = join(home, 'agent');
@@ -377,13 +384,13 @@ exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.r
   const ready = new Set<string>();
   let resolveReady: () => void = () => {};
   let rejectReady: (error: Error) => void = () => {};
-  const bothStarted = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const hookStarted = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
   const watcher = watch(home, (_event, name) => {
     if (name?.toString().startsWith('ready-')) ready.add(name.toString());
-    if (ready.size === 2) resolveReady();
+    if (ready.size === 1) resolveReady();
   });
   watcher.on('error', rejectReady);
-  const timeout = setTimeout(() => rejectReady(new Error('hook processes did not start')), 10_000);
+  const timeout = setTimeout(() => rejectReady(new Error('hook process did not start')), 10_000);
   t.after(() => { clearTimeout(timeout); watcher.close(); });
   for (const session of sessions) {
     await session.handlers.get('before_provider_request')?.({}, session.ctx);
@@ -392,10 +399,11 @@ exec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.r
     } });
   }
   const results = sessions.map((session) => session.handlers.get('agent_before_settle')?.({ outcome: 'error', entries: [] }, session.ctx));
-  await bothStarted;
+  await hookStarted;
   await rm(lock);
   for (const result of await Promise.all(results)) assert.partialDeepStrictEqual(result, { continue: true });
   assert.deepEqual(sessions.map((session) => session.reloadCount()), [1, 1]);
+  assert.equal(ready.size, 1);
   assert.equal(JSON.parse(await readFile(authPath, 'utf8'))['chatgpt-subscription'].accountId, 'acct-b');
 });
 

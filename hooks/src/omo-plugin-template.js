@@ -1,18 +1,29 @@
 // quotahot:omo-extension
 // 只在 OmO 内建账户轮换和重试结束后，尝试一次 QuotaHot 账户切换与续跑。
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+
+// __QUOTAHOT_OMO_RECOVERY__
 
 const COMMAND = "__QUOTAHOT_OMO_COMMAND_ARGS__";
 const QUOTA_ERROR = /\brate[ _-]?limit(?:_exceeded| exceeded|ed)?\b|\busage[ _-]?limit(?:[ _-]reached| has been reached)?\b|\bquota(?:[ _-](?:exhausted|exceeded)| has been exhausted)\b|\btoo many requests\b|you'?ve (?:hit|reached) your|\binsufficient_quota\b|\bresets? (?:at|in)\b/i;
+const recovery = createOmoRecovery();
 
 export default function (pi) {
   let lastError = '';
   let attempted = false;
   let quotaStatus = false;
   let revision = 0;
-  let pendingChild;
   let requestIdentity;
-  let recoveryTimer;
+  let recoveryEntry;
+  let stopSignal;
+
+  function cancelRecovery() {
+    if (recoveryEntry) recovery.cancel(recoveryEntry);
+    recoveryEntry = undefined;
+    stopSignal?.();
+    stopSignal = undefined;
+  }
 
   pi.on('input', (event) => {
     if (event.attribution !== 'user') return;
@@ -21,16 +32,14 @@ export default function (pi) {
     quotaStatus = false;
     requestIdentity = undefined;
     revision += 1;
-    clearTimeout(recoveryTimer);
-    pendingChild?.kill('SIGTERM');
+    cancelRecovery();
   });
   for (const name of ['session_shutdown', 'model_select']) {
     pi.on(name, () => {
       revision += 1;
-      clearTimeout(recoveryTimer);
+      cancelRecovery();
       lastError = '';
       requestIdentity = undefined;
-      pendingChild?.kill('SIGTERM');
     });
   }
 
@@ -54,6 +63,11 @@ export default function (pi) {
 
   pi.on('turn_end', (event) => {
     const message = event.message;
+    if (recoveryEntry && message?.role === 'assistant'
+      && ['stop', 'length', 'aborted'].includes(message.stopReason)) {
+      revision += 1;
+      cancelRecovery();
+    }
     lastError = message?.role === 'assistant' && message.stopReason === 'error'
       && message.provider === 'chatgpt-subscription' && message.failureSource !== 'local'
       && !message.content?.length
@@ -66,13 +80,12 @@ export default function (pi) {
       ? quotaStatus ? '429' : 'quota exhausted' : '';
   });
 
-  function runCheck(ctx, identity, error, recover, signal) {
+  function runCheck(ctx, identity, error, recover, signal, quotaCheckAfter) {
     return new Promise((resolve) => {
       const child = spawn(COMMAND[0], [...COMMAND.slice(1), 'run', 'omo'], {
         env: { ...process.env, OMO_CODING_AGENT_DIR: ctx.agentDir },
         stdio: ['pipe', 'pipe', 'ignore'],
       });
-      pendingChild = child;
       const cancel = () => child.kill('SIGTERM');
       signal?.addEventListener('abort', cancel, { once: true });
       if (signal?.aborted) cancel();
@@ -87,43 +100,14 @@ export default function (pi) {
       child.on('close', (code) => {
         clearTimeout(timer);
         signal?.removeEventListener('abort', cancel);
-        if (pendingChild === child) pendingChild = undefined;
         if (code !== 0 || output.length > 65_536 || signal?.aborted) return resolve(null);
         try { resolve(JSON.parse(output)); } catch { resolve(null); }
       });
       child.stdin.end(JSON.stringify({ source: 'omo', provider: 'chatgpt-subscription',
         error: { message: error, ...(error === '429' ? { statusCode: 429 } : {}) },
-        omoRequest: identity, ...(recover ? { recover: true } : {}) }));
+        omoRequest: identity, ...(recover ? { recover: true } : {}),
+        ...(Number.isFinite(quotaCheckAfter) ? { quotaCheckAfter } : {}) }));
     });
-  }
-
-  function scheduleRecovery(ctx, identity, error, started, result, delay = 60_000) {
-    const due = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now()
-      ? result.waitUntil + 5_000 : Date.now() + delay;
-    const arm = () => {
-      recoveryTimer = setTimeout(async () => {
-        try {
-          if (revision !== started) return;
-          if (Date.now() < due) return arm();
-          if (!ctx.isIdle() || ctx.model?.provider !== 'chatgpt-subscription') return;
-          const check = await runCheck(ctx, identity, error, true);
-          if (revision !== started || !ctx.isIdle() || ctx.model?.provider !== 'chatgpt-subscription') return;
-          if (check?.switched || check?.resume) {
-            if (ctx.modelRegistry.authStorage.reload() !== 'loaded' || !await pi.setSessionModel(ctx.model)
-              || revision !== started || !ctx.isIdle()) return;
-            if (ctx.hasUI) ctx.ui.notify('额度已恢复，继续当前任务', 'info');
-            await pi.sendUserMessage('额度已恢复。继续当前任务，先核对已经完成的工具操作，避免重复执行。');
-            return;
-          }
-          scheduleRecovery(ctx, identity, error, started, check, Math.min(delay * 2, 480_000));
-        } catch (error) {
-          console.error('QuotaHot: 额度恢复失败', error);
-          if (ctx.hasUI) ctx.ui.notify('额度恢复失败，请手动检查会话', 'warning');
-        }
-      }, Math.min(2_147_483_647, Math.max(0, due - Date.now())));
-      recoveryTimer.unref?.();
-    };
-    arm();
   }
 
   pi.on('agent_before_settle', async (event, ctx) => {
@@ -134,13 +118,35 @@ export default function (pi) {
     const identity = requestIdentity;
     const error = lastError;
     lastError = '';
-    const result = await runCheck(ctx, identity, error, false, ctx.signal);
+    const entry = {
+      key: JSON.stringify([ctx.agentDir, identity]),
+      identity,
+      sessionID: ctx.sessionManager?.getSessionId?.() ?? randomUUID(),
+      active: () => revision === started && !ctx.signal?.aborted && ctx.model?.provider === 'chatgpt-subscription',
+      idle: () => ctx.isIdle(),
+      run: (options, signal) => runCheck(ctx, identity, error, options.recover, signal, options.quotaCheckAfter),
+      notify: (message, kind) => { if (ctx.hasUI) ctx.ui.notify(message, kind); },
+      resume: async () => {
+        if (!entry.active() || !ctx.isIdle()) return false;
+        if (ctx.modelRegistry.authStorage.reload() !== 'loaded' || !await pi.setSessionModel(ctx.model)
+          || !entry.active() || !ctx.isIdle()) return false;
+        cancelRecovery();
+        if (ctx.hasUI) ctx.ui.notify('额度已恢复，继续当前任务', 'info');
+        await pi.sendUserMessage('额度已恢复。继续当前任务，先核对已经完成的工具操作，避免重复执行。');
+        return true;
+      },
+    };
+    recoveryEntry = entry;
+    const abort = () => recovery.cancel(entry);
+    ctx.signal?.addEventListener('abort', abort, { once: true });
+    stopSignal = () => ctx.signal?.removeEventListener('abort', abort);
+    const result = await recovery.check(entry);
     if (revision !== started || ctx.signal?.aborted || ctx.model?.provider !== 'chatgpt-subscription') return;
     if (!result?.switched && !result?.resume) {
-      scheduleRecovery(ctx, identity, error, started, result);
       if (ctx.hasUI) ctx.ui.notify('已启动后台额度恢复检查', 'info');
       return;
     }
+    cancelRecovery();
     if ((!result?.switched && !result?.resume) || revision !== started || ctx.signal?.aborted
       || ctx.model?.provider !== 'chatgpt-subscription') return;
     if (ctx.modelRegistry.authStorage.reload() !== 'loaded') return;

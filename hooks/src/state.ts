@@ -20,6 +20,7 @@ export type QuotaCheckReceipt = {
   readonly switched: boolean;
   readonly latestData: boolean;
   readonly waitUntil: number;
+  readonly omoRequest?: OmoIdentity;
 };
 
 export type SwitchState = {
@@ -31,25 +32,29 @@ export type SwitchState = {
     readonly omoChange?: { readonly from: OmoIdentity; readonly to: OmoIdentity };
   }>;
   readonly lastQuotaCheck?: QuotaCheckReceipt;
+  readonly lastOmoQuotaCheck?: QuotaCheckReceipt;
 };
 
 export const STATE_PATH = join(DATA_DIR, 'switch-state.json');
 const LOCK_PATH = join(DATA_DIR, 'switch.lock');
 const LOCK_STALE_MS = 120_000;
 
+function validQuotaCheck(check: QuotaCheckReceipt | undefined): check is QuotaCheckReceipt {
+  return !!check && (check.provider === 'codex' || check.provider === 'claude') &&
+    Number.isFinite(check.completedAt) && Number.isFinite(check.waitUntil) && typeof check.switched === 'boolean' &&
+    typeof check.latestData === 'boolean' && ['switched', 'available', 'no_candidate', 'network_error', 'check_failed'].includes(check.outcome);
+}
+
 export async function readState(): Promise<SwitchState> {
   try {
     const parsed: unknown = JSON.parse(await readFile(STATE_PATH, 'utf8'));
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { accounts: {}, clients: {} };
     const record = parsed as Partial<SwitchState>;
-    const check = record.lastQuotaCheck;
-    const validCheck = check && (check.provider === 'codex' || check.provider === 'claude') &&
-      Number.isFinite(check.completedAt) && Number.isFinite(check.waitUntil) && typeof check.switched === 'boolean' &&
-      typeof check.latestData === 'boolean' && ['switched', 'available', 'no_candidate', 'network_error', 'check_failed'].includes(check.outcome);
     return {
       accounts: record.accounts && typeof record.accounts === 'object' ? record.accounts : {},
       clients: record.clients && typeof record.clients === 'object' ? record.clients : {},
-      ...(validCheck ? { lastQuotaCheck: check } : {}),
+      ...(validQuotaCheck(record.lastQuotaCheck) ? { lastQuotaCheck: record.lastQuotaCheck } : {}),
+      ...(validQuotaCheck(record.lastOmoQuotaCheck) ? { lastOmoQuotaCheck: record.lastOmoQuotaCheck } : {}),
     };
   } catch {
     return { accounts: {}, clients: {} };

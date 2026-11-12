@@ -24,7 +24,10 @@ const result = await build({
 await chmod('dist/quotahot-hook', 0o755);
 await copyFile('src/opencode-plugin-template.js', 'dist/opencode-plugin-template.js');
 await copyFile('src/opencode-notification-plugin-template.js', 'dist/opencode-notification-plugin-template.js');
-await copyFile('src/omo-plugin-template.js', 'dist/omo-plugin-template.js');
+const omoTemplate = await readFile('src/omo-plugin-template.js', 'utf8');
+const recoveryMarker = '// __QUOTAHOT_OMO_RECOVERY__';
+if (omoTemplate.split(recoveryMarker).length !== 2) throw new Error('OmO plugin template must contain exactly one recovery marker');
+await writeFile('dist/omo-plugin-template.js', omoTemplate.replace(recoveryMarker, await readFile('src/omo-recovery-template.js', 'utf8')));
 await writeFile('dist/package.json', '{"type":"commonjs"}\n');
 await writeFile('dist/meta.json', `${JSON.stringify(result.metafile, null, 2)}\n`);
 
