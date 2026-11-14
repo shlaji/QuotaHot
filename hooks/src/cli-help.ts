@@ -18,7 +18,7 @@ export const HELP = `QuotaHot Hook - 独立的账户额度检查与切换命令�
 export const COMMAND_HELP: Readonly<Record<string, string>> = {
   'recovery-status': `用法：quotahot-hook recovery-status [--json]
 
-只检查本地 OpenCode 额度恢复快照，不查询上游、不切换账户；读取时会删除超过三分钟无心跳的 stale 快照。
+只检查本地 OpenCode / OmO 额度恢复快照，不查询上游、不切换账户；读取时会删除超过三分钟无心跳的 stale 快照。
   --json  输出含等待会话和插件实例的结构化状态，便于诊断。
 `,
   status: `用法：quotahot-hook status [选项]

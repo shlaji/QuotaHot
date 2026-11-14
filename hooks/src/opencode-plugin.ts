@@ -29,5 +29,9 @@ export function omoPlugin(command: string | readonly string[]): string {
   const source = template.includes(marker)
     ? template.replace(marker, readFileSync(join(import.meta.dirname, 'omo-recovery-template.js'), 'utf8'))
     : template;
-  return source.replace(omoPlaceholder, JSON.stringify(typeof command === 'string' ? [command] : command));
+  const statusMarker = '// __QUOTAHOT_OMO_RECOVERY_STATUS__';
+  const withStatus = source.includes(statusMarker)
+    ? source.replace(statusMarker, readFileSync(join(import.meta.dirname, 'omo-recovery-status-template.js'), 'utf8'))
+    : source;
+  return withStatus.replace(omoPlaceholder, JSON.stringify(typeof command === 'string' ? [command] : command));
 }

@@ -23,6 +23,7 @@ export type RecoverySession = {
 
 export type RecoveryInstance = {
   readonly version: 1;
+  readonly source: 'opencode' | 'omo';
   readonly id: string;
   readonly pid: number;
   readonly updatedAt: number;
@@ -54,6 +55,7 @@ function isTimestamp(value: unknown): value is number {
 
 function parseInstance(value: unknown, now: number): RecoveryInstance | null {
   if (!isRecord(value) || value.version !== 1 || typeof value.id !== 'string' || !value.id ||
+      (value.source !== undefined && value.source !== 'opencode' && value.source !== 'omo') ||
       !Number.isSafeInteger(value.pid) || typeof value.pid !== 'number' || value.pid <= 0 ||
       !isTimestamp(value.updatedAt) || !isPhase(value.phase) ||
       !isTimestamp(value.waitingCount) || !Array.isArray(value.sessions) ||
@@ -69,6 +71,7 @@ function parseInstance(value: unknown, now: number): RecoveryInstance | null {
   }
   return {
     version: 1,
+    source: value.source === 'omo' ? 'omo' : 'opencode',
     id: value.id,
     pid: value.pid,
     updatedAt: value.updatedAt,

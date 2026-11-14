@@ -177,13 +177,13 @@ export async function run(argv: readonly string[]): Promise<number> {
         if (flags.positional.length > 0 || flags.values.provider !== undefined) throw new UsageError('recovery-status accepts only --json');
         const state = readRecoveryStatus();
         if (flags.bools.has('json')) console.log(JSON.stringify(state, null, 2));
-        else if (state.totalWaiting === 0) console.log('没有正在等待的 OpenCode 额度恢复任务');
+        else if (state.totalWaiting === 0) console.log('没有正在等待的 OpenCode / OmO 额度恢复任务');
         else {
           const active = state.instances.filter((instance) => !instance.stale);
           console.log(`等待恢复的会话: ${state.totalWaiting} · 插件实例: ${active.length}`);
           for (const instance of active) {
             const next = instance.nextCheckAt === null ? '未安排' : new Date(instance.nextCheckAt).toLocaleString();
-            console.log(`进程 ${instance.pid} · ${instance.stale ? '状态可能过期' : instance.phase} · 下次检查: ${next}`);
+            console.log(`${instance.source === 'omo' ? 'OmO' : 'OpenCode'} · 进程 ${instance.pid} · ${instance.stale ? '状态可能过期' : instance.phase} · 下次检查: ${next}`);
             for (const session of instance.sessions) console.log(`  ${session.sessionID}: ${session.phase}`);
           }
         }

@@ -9,6 +9,7 @@ function createOmoRecovery() {
   const MAX_FAILURES = 5;
   const statePath = omoJoin(process.env.QUOTAHOT_DATA_DIR ?? omoJoin(omoHome(), '.quotahot'), 'switch-state.json');
   const groups = new Map();
+  const publishStatus = createOmoRecoveryStatus(groups, omoDirname(statePath));
   let watcher, watchTimer, reading;
   let readAgain = false;
   let state = { signature: '', receiptAt: 0, receiptKey: '', resetAt: Infinity };
@@ -17,8 +18,10 @@ function createOmoRecovery() {
     const group = groups.get(entry.key);
     if (!group) return;
     group.entries.delete(entry);
+    publishStatus();
     if (group.entries.size) return;
     clearTimeout(group.timer);
+    group.nextCheckAt = null;
     group.controller?.abort();
     groups.delete(entry.key);
     if (groups.size) return;
@@ -114,10 +117,14 @@ function createOmoRecovery() {
     const due = resetDeadline(group);
     if (!group.ready && delay === undefined && (group.hasData ? !Number.isFinite(due) : group.failures >= MAX_FAILURES)) {
       group.timer = undefined;
+      group.nextCheckAt = null;
+      publishStatus();
       return;
     }
     const deadline = group.ready ? Date.now() + 1_000 : group.retryAt > Date.now() ? group.retryAt
       : Date.now() + (delay ?? (Number.isFinite(due) ? due - Date.now() : group.delay));
+    group.nextCheckAt = deadline;
+    publishStatus();
     const arm = () => {
       const timer = setTimeout(async () => {
         if (group.timer !== timer || !prune(group)) return;
@@ -152,6 +159,8 @@ function createOmoRecovery() {
     group.running = true;
     clearTimeout(group.timer);
     group.timer = undefined;
+    group.nextCheckAt = null;
+    publishStatus();
     group.controller = new AbortController();
     const checkAfter = group.checkAfter ?? Date.now();
     let retryDelay;
@@ -165,6 +174,8 @@ function createOmoRecovery() {
       const result = await owner.run({ recover, quotaCheckAfter: checkAfter }, group.controller.signal);
       if (!prune(group)) return result;
       const outcome = result?.switched ? 'switched' : result?.resume ? 'available' : result?.outcome;
+      group.lastCheckedAt = Date.now();
+      group.lastOutcome = outcome ?? 'check_failed';
       const available = outcome === 'available' || outcome === 'switched';
       contended = outcome === 'lock_contended';
       retryDelay = outcome === 'network_error' ? group.networkDelay : undefined;
@@ -193,6 +204,8 @@ function createOmoRecovery() {
     } catch (error) {
       console.error('QuotaHot: 额度检查失败', error);
       group.hasData = false;
+      group.lastCheckedAt = Date.now();
+      group.lastOutcome = 'check_failed';
       group.failures += 1;
       return null;
     } finally {
@@ -204,6 +217,7 @@ function createOmoRecovery() {
         else if (group.hasData || group.failures < MAX_FAILURES) schedule(group, retryDelay);
       }
       group.receiptPending = false;
+      publishStatus();
     }
   }
 
@@ -215,10 +229,12 @@ function createOmoRecovery() {
         group = { key: entry.key, identityKey: JSON.stringify([entry.identity.accountId, entry.identity.email, entry.identity.loginId]),
           entries: new Set(), initials: new Set(), failures: 0, delay: INTERVAL,
           networkDelay: 5_000, retryAt: 0, waitUntil: 0, hasData: false, running: false,
+          nextCheckAt: null, lastCheckedAt: null, lastOutcome: null,
           checkAfter: null, ready: null, receiptPending: false };
         groups.set(entry.key, group);
       }
       group.entries.add(entry);
+      publishStatus();
       group.initials.add(entry);
       if (!group.inFlight) group.inFlight = perform(group, false);
       return group.inFlight.then((result) => {

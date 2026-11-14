@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 // __QUOTAHOT_OMO_RECOVERY__
+// __QUOTAHOT_OMO_RECOVERY_STATUS__
 
 const COMMAND = "__QUOTAHOT_OMO_COMMAND_ARGS__";
 const QUOTA_ERROR = /\brate[ _-]?limit(?:_exceeded| exceeded|ed)?\b|\busage[ _-]?limit(?:[ _-]reached| has been reached)?\b|\bquota(?:[ _-](?:exhausted|exceeded)| has been exhausted)\b|\btoo many requests\b|you'?ve (?:hit|reached) your|\binsufficient_quota\b|\bresets? (?:at|in)\b/i;
@@ -131,8 +132,8 @@ export default function (pi) {
         if (ctx.modelRegistry.authStorage.reload() !== 'loaded' || !await pi.setSessionModel(ctx.model)
           || !entry.active() || !ctx.isIdle()) return false;
         cancelRecovery();
-        if (ctx.hasUI) ctx.ui.notify('额度已恢复，继续当前任务', 'info');
-        await pi.sendUserMessage('额度已恢复。继续当前任务，先核对已经完成的工具操作，避免重复执行。');
+        if (ctx.hasUI) ctx.ui.notify('继续当前任务', 'info');
+        await pi.sendUserMessage('继续当前任务');
         return true;
       },
     };
@@ -158,8 +159,8 @@ export default function (pi) {
       entries: [...event.entries, {
         type: 'custom_message', customType: 'quotahot-recovery', display: false,
         content: result.switched
-          ? '额度账户已切换。继续当前任务，先核对已经完成的工具操作，避免重复执行。'
-          : '当前账户额度可用。继续当前任务，先核对已经完成的工具操作，避免重复执行。',
+          ? '继续当前任务'
+          : '继续当前任务',
       }],
       continue: true,
     };

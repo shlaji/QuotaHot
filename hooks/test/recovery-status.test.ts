@@ -47,13 +47,13 @@ test('aggregates separate instances and exposes only allowed fields when snapsho
   assert.equal(result.totalWaiting, 3);
   assert.deepEqual(result.instances, [
     {
-      version: 1, id: 'a', pid: 12345, updatedAt,
+      version: 1, source: 'opencode', id: 'a', pid: 12345, updatedAt,
       phase: 'waiting', waitingCount: 2,
       sessions: [{ sessionID: 's1', phase: 'waiting' }],
       nextCheckAt: null, lastCheckedAt: null, lastOutcome: null, stale: false,
     },
     {
-      version: 1, id: 'b', pid: 12345, updatedAt,
+      version: 1, source: 'opencode', id: 'b', pid: 12345, updatedAt,
       phase: 'checking', waitingCount: 1,
       sessions: [{ sessionID: 'session-1', phase: 'waiting' }],
       nextCheckAt: null, lastCheckedAt: null, lastOutcome: null, stale: false,
@@ -80,6 +80,7 @@ test('ignores malformed, unknown-version, and invalid-shape snapshots', (context
   writeSnapshot(dataDir, 'version.json', snapshot('version', { version: 2 }));
   writeSnapshot(dataDir, 'shape.json', snapshot('shape', { sessions: [{ sessionID: 3, phase: 'ready' }] }));
   writeSnapshot(dataDir, 'negative.json', snapshot('negative', { waitingCount: -1 }));
+  writeSnapshot(dataDir, 'source.json', snapshot('source', { source: 'unknown' }));
   writeSnapshot(dataDir, 'valid.json', snapshot('valid', { waitingCount: 1 }));
 
   const result = readRecoveryStatus(dataDir);

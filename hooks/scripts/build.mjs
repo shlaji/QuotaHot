@@ -27,7 +27,11 @@ await copyFile('src/opencode-notification-plugin-template.js', 'dist/opencode-no
 const omoTemplate = await readFile('src/omo-plugin-template.js', 'utf8');
 const recoveryMarker = '// __QUOTAHOT_OMO_RECOVERY__';
 if (omoTemplate.split(recoveryMarker).length !== 2) throw new Error('OmO plugin template must contain exactly one recovery marker');
-await writeFile('dist/omo-plugin-template.js', omoTemplate.replace(recoveryMarker, await readFile('src/omo-recovery-template.js', 'utf8')));
+const statusMarker = '// __QUOTAHOT_OMO_RECOVERY_STATUS__';
+if (omoTemplate.split(statusMarker).length !== 2) throw new Error('OmO plugin template must contain exactly one status marker');
+await writeFile('dist/omo-plugin-template.js', omoTemplate
+  .replace(recoveryMarker, await readFile('src/omo-recovery-template.js', 'utf8'))
+  .replace(statusMarker, await readFile('src/omo-recovery-status-template.js', 'utf8')));
 await writeFile('dist/package.json', '{"type":"commonjs"}\n');
 await writeFile('dist/meta.json', `${JSON.stringify(result.metafile, null, 2)}\n`);
 
