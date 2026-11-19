@@ -22,7 +22,7 @@ function createOmoRecoveryStatus(groups, dataDir) {
       phase: sessions.some((entry) => entry.phase === 'checking') ? 'checking'
         : sessions.some((entry) => entry.phase === 'waiting') ? 'waiting' : 'ready',
       waitingCount: sessions.length, sessions,
-      nextCheckAt: deadlines.length ? Math.min(...deadlines) : null,
+      nextCheckAt: deadlines.length ? Math.ceil(Math.min(...deadlines)) : null,
       lastCheckedAt: latest?.lastCheckedAt ?? null, lastOutcome: latest?.lastOutcome ?? null,
     }) : null;
     if (snapshot && !heartbeat) {

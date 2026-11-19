@@ -61,12 +61,15 @@ test('OmO exposes state-change-only waits without inventing a polling deadline',
   assert.equal(state.files.size, 0);
 });
 
-test('recovery CLI reads an OmO-produced snapshot alongside legacy OpenCode snapshots', async (t) => {
+test('recovery CLI lists an OmO timer with a fractional upstream deadline alongside legacy OpenCode', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-status-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const state = omoRecoveryFixture(t);
   state.jumpWallClock(Date.now() - state.now());
-  await state.session('omo-session').fail({ outcome: 'no_candidate', latestData: true });
+  const now = state.now();
+  await state.session('omo-session').fail({
+    outcome: 'no_candidate', latestData: true, waitUntil: now + 120_000.25,
+  });
   const data = join(home, 'data');
   const directory = join(data, 'recovery-status');
   await mkdir(directory, { recursive: true });
@@ -87,6 +90,7 @@ test('recovery CLI reads an OmO-produced snapshot alongside legacy OpenCode snap
   const result = JSON.parse(json.stdout);
   assert.equal(result.totalWaiting, 2);
   assert.deepEqual(result.instances.map((item: { source: string }) => item.source).sort(), ['omo', 'opencode']);
+  assert.equal(result.instances.find((item: { source: string }) => item.source === 'omo')?.nextCheckAt, now + 180_001);
   assert.match(json.stdout, /omo-session/);
   assert.doesNotMatch(json.stdout, /test@example|accountId|loginId/);
   const text = await invoke(process.execPath, args, { env });
