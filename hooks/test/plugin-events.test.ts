@@ -308,8 +308,9 @@ async function recoveryFixture(t: TestContext) {
   let watchFailures = 0;
   let stateAccounts: Record<string, { usedPercent?: number | null; resetAt: number; blockedUntil: number; checkedAt?: number }> = {};
   let lastQuotaCheckAt = 0;
+  let lastQuotaCheckOutcome = 'available';
   let readState = async () => JSON.stringify({ accounts: stateAccounts, ...(lastQuotaCheckAt ? {
-    lastQuotaCheck: { provider: 'codex', completedAt: lastQuotaCheckAt, outcome: 'network_error', switched: false, latestData: false, waitUntil: 0 },
+    lastQuotaCheck: { provider: 'codex', completedAt: lastQuotaCheckAt, outcome: lastQuotaCheckOutcome, switched: false, latestData: lastQuotaCheckOutcome === 'available', waitUntil: 0 },
   } : {}) });
   const prompts: Prompt[] = [];
   const histories = new Map<string, object[]>();
@@ -386,7 +387,7 @@ async function recoveryFixture(t: TestContext) {
   };
   return { plugin, directory, sdk, histories, statuses, notifications, logs, prompts, payloads, children, timers, advance, flush, seed, fail, settledStatus, watcherInstances,
     setAccounts: (accounts: Record<string, { usedPercent?: number | null; resetAt: number; blockedUntil: number; checkedAt?: number }>) => { stateAccounts = accounts; },
-    setQuotaCheckAt: (completedAt: number) => { lastQuotaCheckAt = completedAt; },
+    setQuotaCheckAt: (completedAt: number, outcome = 'available') => { lastQuotaCheckAt = completedAt; lastQuotaCheckOutcome = outcome; },
     setReadState: (reader: () => Promise<string>) => { readState = reader; },
     failNextWatch: () => { watchFailures += 1; },
     emitState: (filename: string | null = 'switch-state.json') => { for (const callback of [...watcherEvents]) callback('rename', filename); },
@@ -793,18 +794,24 @@ test('a receipt published during a recovery check is consumed before its retry b
   assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['receipt-in-flight']);
 });
 
-test('recovery stops quota polling after five attempts and waits for switch-state changes', async (t) => {
+test('recovery stops quota polling after ten failures and waits for quota changes', async (t) => {
   const state = await recoveryFixture(t); await state.fail('bounded-recovery', 'network_error');
-  for (const delay of [5_000, 10_000, 20_000, 40_000]) {
-    await state.advance(delay);
+  const delays = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000, 300_000];
+  for (const [index, delay] of delays.entries()) {
+    await state.advance(delay - 1);
+    assert.equal(state.payloads.length, index + 1);
+    await state.advance(1);
+    assert.equal(state.payloads.length, index + 2);
     state.children.at(-1)?.finish('network_error', undefined, false);
     await state.flush();
   }
 
-  assert.equal(state.payloads.length, 5);
-  assert.ok(state.logs.some((message) => message.includes('recovery check attempt=5/5 outcome=network_error')));
+  assert.equal(state.payloads.length, 10);
+  assert.ok(state.logs.some((message) => message.includes('recovery check attempt=10/10 outcome=network_error')));
+  state.setQuotaCheckAt(Date.now(), 'network_error');
+  state.emitState(); await state.flush(); await state.advance(0);
   await state.advance(300_000);
-  assert.equal(state.payloads.length, 5);
+  assert.equal(state.payloads.length, 10);
 
   const sessionID = 'bounded-recovery';
   for (let index = 0; index < 3; index += 1) await state.plugin.event(idle(sessionID));
@@ -814,11 +821,13 @@ test('recovery stops quota polling after five attempts and waits for switch-stat
   await state.plugin.event({ event: { type: 'message.updated', properties: { info: user.info } } });
   await state.plugin.event({ event: { type: 'message.part.updated', properties: { part: user.parts[0] } } });
   await state.advance(20 * pollInterval);
-  assert.equal(state.payloads.length, 5);
+  assert.equal(state.payloads.length, 10);
 
   state.setAccounts({ recovered: { usedPercent: 0, resetAt: 0, blockedUntil: 0 } });
   state.emitState(); await state.flush(); await state.advance(0);
-  assert.equal(state.payloads.length, 6);
+  assert.equal(state.payloads.length, 11);
+  state.children.at(-1)?.finish('available'); await state.flush();
+  assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
 });
 
 test('missing quota data keeps recovery checks scheduled until data is obtained', async (t) => {

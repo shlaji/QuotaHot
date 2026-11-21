@@ -52,7 +52,7 @@ const RECOVERY_INTERVAL_MS = 600000;
 const MAX_TIMER_DELAY_MS = 2147483647;
 const NETWORK_RETRY_BASE_MS = 5000;
 const NETWORK_RETRY_MAX_MS = 300000;
-const MAX_RECOVERY_FAILURES = 5;
+const MAX_RECOVERY_FAILURES = 10;
 const LOCK_RETRY_MS = 1000;
 const RESET_BUFFER_MS = 60000;
 const STATE_WATCH_RETRY_MS = 1000;
@@ -135,7 +135,8 @@ async function readRecoveryState() {
     const receipt = state?.lastQuotaCheck;
     const receiptAt = receipt?.provider === "codex" && Number.isFinite(receipt.completedAt) &&
       typeof receipt.switched === "boolean" && typeof receipt.latestData === "boolean" &&
-      Number.isFinite(receipt.waitUntil) && ["switched", "available", "no_candidate", "network_error", "check_failed"].includes(receipt.outcome)
+      Number.isFinite(receipt.waitUntil) &&
+      (["switched", "available"].includes(receipt.outcome) || receipt.latestData && receipt.outcome === "no_candidate")
       ? receipt.completedAt : 0;
     const now = Date.now();
     return {
@@ -162,13 +163,16 @@ async function refreshRecoveryState(external) {
       stateReadAgain = false;
       const state = await readRecoveryState();
       const quotaChanged = state.signature !== stateSignature;
-      const receiptChanged = state.receiptAt !== stateReceiptAt;
+      const receiptChanged = state.receiptAt > 0 && state.receiptAt !== stateReceiptAt;
       stateSignature = state.signature;
       stateReceiptAt = state.receiptAt;
       stateResetAt = state.resetAt;
       if (external && (quotaChanged || receiptChanged) && [...waitingSessions.values()].some((entry) => entry.queued)) {
         if (receiptChanged) recoveryCheckAfter = state.receiptAt;
-        else if (quotaChanged) recoveryFailures = 0;
+        if (quotaChanged) {
+          recoveryFailures = 0;
+          if (!recoveryRunning) networkRetryDelay = NETWORK_RETRY_BASE_MS;
+        }
         if (recoveryRunning) pendingExternalRecovery = true;
         else {
           clearTimeout(recoveryTimer);
@@ -387,8 +391,10 @@ function scheduleRecovery(delay) {
       if (!contended && outcome !== "network_error") recoveryDelay = outcome === "switched" || outcome === "available"
         ? RECOVERY_INTERVAL_MS : Math.min(recoveryDelay * 2, 8 * RECOVERY_INTERVAL_MS);
       recoveryWaitUntil = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now() ? result.waitUntil : 0;
-      recoveryHasLatestData = result?.latestData === true;
-      recoveryFailures = recoveryHasLatestData || outcome === "switched" || outcome === "available" ? 0 : recoveryFailures + 1;
+      if (!contended) {
+        recoveryHasLatestData = result?.latestData === true;
+        recoveryFailures = recoveryHasLatestData || outcome === "switched" || outcome === "available" ? 0 : recoveryFailures + 1;
+      }
       await refreshRecoveryState(false);
       for (const entry of entries) {
         if (!active(entry)) continue;
@@ -409,6 +415,8 @@ function scheduleRecovery(delay) {
       } else if (!followUp) recoveryCheckAfter = null;
       if (followUp && recoveryCheckAfter !== null) {
         scheduleRecovery(contended ? LOCK_RETRY_MS : 0);
+      } else if (contended) {
+        scheduleRecovery(LOCK_RETRY_MS);
       } else if (recoveryHasLatestData) {
         if (recoveryWaitUntil > Date.now() || stateResetAt > Date.now()) scheduleRecovery();
       } else if (recoveryFailures < MAX_RECOVERY_FAILURES) {
@@ -437,6 +445,7 @@ function scheduleRecovery(delay) {
 }
 
 function retryDelayFor(outcome) {
+  if (outcome === "lock_contended") return undefined;
   if (outcome !== "network_error") {
     networkRetryDelay = NETWORK_RETRY_BASE_MS;
     return undefined;
@@ -453,8 +462,10 @@ async function runInitialRecovery(wave, owner, run, payload) {
       const result = await run(payload);
       const outcome = result?.switched ? "switched" : result?.outcome;
       const retryDelay = retryDelayFor(outcome);
-      recoveryHasLatestData = result?.latestData === true;
-      recoveryFailures = recoveryHasLatestData || outcome === "switched" || outcome === "available" ? 0 : recoveryFailures + 1;
+      if (outcome !== "lock_contended") {
+        recoveryHasLatestData = result?.latestData === true;
+        recoveryFailures = recoveryHasLatestData || outcome === "switched" || outcome === "available" ? 0 : recoveryFailures + 1;
+      }
       recoveryWaitUntil = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now() ? result.waitUntil : 0;
       owner.logRecovery("check attempt=" + attempt + "/" + MAX_RECOVERY_FAILURES + " outcome=" + (outcome || "unknown") +
         " latestData=" + recoveryHasLatestData + " waitUntil=" + (recoveryWaitUntil || "none"));
@@ -584,8 +595,8 @@ function createRecovery(client, run, notify) {
             recoveryRetryAt = Date.now() + LOCK_RETRY_MS;
             clearTimeout(recoveryTimer);
             recoveryTimer = undefined;
-          }
-          if (recoveryHasLatestData) {
+            scheduleRecovery(LOCK_RETRY_MS);
+          } else if (recoveryHasLatestData) {
             if (recoveryWaitUntil > Date.now() || stateResetAt > Date.now()) scheduleRecovery();
           } else if (recoveryFailures < MAX_RECOVERY_FAILURES) scheduleRecovery(retryDelay);
           owner.logRecovery("nextCheckAt=" + (nextCheckAt === null ? "none" : nextCheckAt) +

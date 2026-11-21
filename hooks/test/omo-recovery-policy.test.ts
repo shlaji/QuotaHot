@@ -35,8 +35,8 @@ test('OmO with fresh quota and no future reset waits for a real state change', a
 });
 
 for (const [outcome, delays] of [
-  ['network_error', [3_000, 10_000, 30_000]],
-  ['check_failed', [600_000, 1_200_000, 2_400_000, 4_800_000]],
+  ['network_error', [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000, 300_000]],
+  ['check_failed', [600_000, 1_200_000, 2_400_000, 4_800_000, 4_800_000, 4_800_000, 4_800_000, 4_800_000, 4_800_000]],
 ] as const) {
   test(`OmO bounds ${outcome} retries and wakes for changed quota`, async (t) => {
     const state = omoRecoveryFixture(t);
@@ -63,7 +63,7 @@ for (const [outcome, delays] of [
     const log = () => (state.logs.get('/isolated/data/logs/omo-recovery.jsonl') ?? '').trim()
       .split('\n').filter(Boolean).map((line) => JSON.parse(line));
     assert.ok(log().some((event) => event.event === 'check_paused'
-      && event.reason === (outcome === 'network_error' ? 'network_retry_limit' : 'failure_limit')
+      && event.reason === 'failure_limit'
       && event.failures === delays.length + 1 && event.sessions[0] === 'bounded'));
 
     state.setState({ accounts: { recovered: { usedPercent: 0, resetAt: 0, blockedUntil: 0 } } });
@@ -106,7 +106,7 @@ for (const cancelFirst of [false, true]) {
     state.children[0]?.finish({ outcome: 'network_error', latestData: false });
     await Promise.all([firstRun.pending, secondRun.pending]);
     await state.flush();
-    await state.advance(3_000);
+    await state.advance(5_000);
     assert.equal(state.children.length, 2);
     state.children[1]?.finish({ outcome: 'available', resume: true, latestData: true });
     await state.flush();
@@ -131,7 +131,7 @@ test('OmO defers a due check while busy and resumes once after becoming idle', a
   const session = state.session('busy');
   await session.fail({ outcome: 'network_error', latestData: false });
   session.setIdle(false);
-  await state.advance(3_000);
+  await state.advance(5_000);
   assert.equal(state.children.length, 1);
   session.setIdle(true);
   await state.advance(1_000);
@@ -146,7 +146,7 @@ test('OmO resumes a ready session after transient busy status without querying q
   const state = omoRecoveryFixture(t);
   const session = state.session('ready');
   await session.fail({ outcome: 'network_error', latestData: false });
-  await state.advance(3_000);
+  await state.advance(5_000);
   session.setIdle(false);
   state.children[1]?.finish({ outcome: 'available', resume: true, latestData: true });
   await state.flush();
@@ -186,7 +186,7 @@ for (const inFlight of [false, true]) {
   test(`OmO joins an existing recovery with inFlight=${inFlight} without duplicate checks or continuation`, async (t) => {
     const state = omoRecoveryFixture(t);
     await state.session('waiting').fail({ outcome: 'network_error', latestData: false });
-    if (inFlight) await state.advance(3_000);
+    if (inFlight) await state.advance(5_000);
     const other = state.session('new');
     const { pending } = await other.begin();
     assert.equal(state.children.length, 2);
@@ -234,7 +234,7 @@ for (const source of ['matching', 'other_login', 'opencode']) {
 test('OmO state changes during a failed check preserve its network retry delay', async (t) => {
   const state = omoRecoveryFixture(t);
   await state.session('in-flight').fail({ outcome: 'network_error', latestData: false });
-  await state.advance(3_000);
+  await state.advance(5_000);
   state.setState({ accounts: { changed: { usedPercent: 100, resetAt: 1_000_000, blockedUntil: 1_000_000 } } });
   state.emitState(); await state.flush();
   state.children[1]?.finish({ outcome: 'network_error', latestData: false });
