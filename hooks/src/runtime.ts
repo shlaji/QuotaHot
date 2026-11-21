@@ -87,6 +87,7 @@ export async function runHook(
       provider: 'codex',
       triggerClient: 'opencode',
       recover: true,
+      scanPool: true,
       exhausted: false,
       threshold: 100,
       cacheMs: 0,
@@ -99,7 +100,9 @@ export async function runHook(
     const latestData = result.quotaCheck?.latestData ?? result.checked.some((account) => account.source === 'live');
     const outcome: HookOutcome = result.lockContended ? 'lock_contended' : result.quotaCheck?.outcome ?? quotaCheckOutcome(result, true);
     return {
-      stdout: JSON.stringify({ switched: result.switched, outcome, latestData, ...(result.waitUntil ? { waitUntil: result.waitUntil } : {}) }),
+      stdout: JSON.stringify({ switched: result.switched, outcome, latestData,
+        ...(result.writeBlocked ? { writeBlocked: true } : {}),
+        ...(result.waitUntil ? { waitUntil: result.waitUntil } : {}) }),
       result, skipped: '', outcome,
     };
   }
@@ -121,6 +124,7 @@ export async function runHook(
     ...opts,
     provider: opts.provider ?? 'codex',
     triggerClient: client === 'omo' ? 'omo-agent' : 'opencode',
+    scanPool: true,
     recover: client === 'omo' && payload.recover === true,
     exhausted: client === 'omo' ? opts.check === false : true,
     ...(client === 'omo' && payload.recover === true ? { minIntervalMs: 0 } : {}),
@@ -133,9 +137,9 @@ export async function runHook(
     usageQuery: opts.usageQuery ?? queryHookUsage,
   });
   const latestData = result.quotaCheck?.latestData ?? result.checked.some((account) => account.source === 'live');
-  const resume = client === 'omo' && !result.switched &&
-    (result.checked[0]?.usable === true || result.quotaCheck?.outcome === 'available');
-  const outcome: HookOutcome = result.lockContended ? 'lock_contended' : resume ? 'available' : result.quotaCheck?.outcome ?? quotaCheckOutcome(result, false);
+  const outcome: HookOutcome = result.lockContended ? 'lock_contended'
+    : result.quotaCheck?.outcome ?? quotaCheckOutcome(result, client === 'omo');
+  const resume = client === 'omo' && outcome === 'available';
   const checks = client === 'omo' ? result.checked.slice(0, 20).map(({ source, usable, error, transport }) => ({
     source, usable,
     ...(error ? { error: /^(?:usage_(?:http_\d{3}|timeout|network_error|endpoint_unavailable)|invalid_(?:proxy|usage_json)|missing_quota_data)$/.test(error)
@@ -152,6 +156,7 @@ export async function runHook(
         from: result.switched ? '[redacted]' : '',
         to: result.switched ? '[redacted]' : '',
         latestData,
+        ...(result.writeBlocked ? { writeBlocked: true } : {}),
         ...(checks.length ? { checks } : {}),
         ...(result.waitUntil ? { waitUntil: result.waitUntil } : {}),
     }),

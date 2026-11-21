@@ -401,7 +401,7 @@ function scheduleRecovery(delay) {
         ? RECOVERY_INTERVAL_MS : Math.min(recoveryDelay * 2, 8 * RECOVERY_INTERVAL_MS);
       recoveryWaitUntil = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now() ? result.waitUntil : 0;
       if (!contended) {
-        recoveryHasLatestData = result?.latestData === true;
+        recoveryHasLatestData = result?.latestData === true && !result.writeBlocked;
         recoveryFailures = recoveryHasLatestData || outcome === "switched" || outcome === "available" ? 0 : recoveryFailures + 1;
       }
       await refreshRecoveryState(false);
@@ -412,7 +412,8 @@ function scheduleRecovery(delay) {
       }
       publishRecoveryStatus();
       owner.logRecovery("check attempt=" + attempt + " outcome=" + lastCheckResult +
-        " latestData=" + recoveryHasLatestData + " waitUntil=" + (recoveryWaitUntil || "none"));
+        " latestData=" + (result?.latestData === true) + " waitUntil=" + (recoveryWaitUntil || "none") +
+        (result?.writeBlocked ? " writeBlocked=true" : ""));
       await Promise.all(entries.map(resume));
     } finally {
       recoveryRunning = false;
@@ -473,12 +474,13 @@ async function runInitialRecovery(wave, owner, run, payload) {
       const outcome = result?.switched ? "switched" : result?.outcome;
       const retryDelay = retryDelayFor(outcome);
       if (outcome !== "lock_contended") {
-        recoveryHasLatestData = result?.latestData === true;
+        recoveryHasLatestData = result?.latestData === true && !result.writeBlocked;
         recoveryFailures = recoveryHasLatestData || outcome === "switched" || outcome === "available" ? 0 : recoveryFailures + 1;
       }
       recoveryWaitUntil = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now() ? result.waitUntil : 0;
       owner.logRecovery("check attempt=" + attempt + " outcome=" + (outcome || "unknown") +
-        " latestData=" + recoveryHasLatestData + " waitUntil=" + (recoveryWaitUntil || "none"));
+        " latestData=" + (result?.latestData === true) + " waitUntil=" + (recoveryWaitUntil || "none") +
+        (result?.writeBlocked ? " writeBlocked=true" : ""));
       return { result, retryDelay };
     })();
   }

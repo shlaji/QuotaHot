@@ -45,6 +45,7 @@ export type SwitchOptions = {
   readonly reason: string;
   readonly exhausted: boolean;
   readonly recover: boolean;
+  readonly scanPool?: boolean;
   readonly threshold: number;
   readonly cacheMs: number;
   readonly minIntervalMs: number;
@@ -66,6 +67,9 @@ export type SwitchResult = {
   readonly waitUntil: number;
   readonly checked: readonly AccountStatus[];
   readonly quotaCheck?: QuotaCheckReceipt;
+  readonly poolChecked?: true;
+  readonly selectedAccountId?: string;
+  readonly writeBlocked?: true;
 };
 
 export function exhaustionOf(windows: readonly Window[], threshold: number, nowMs: number): { readonly exhausted: boolean; readonly resetAt: number } {
@@ -153,7 +157,7 @@ async function assess(account: Account, state: SwitchState, config: SwitchOption
 
 export async function switchAccount(partial: Partial<SwitchOptions> = {}): Promise<SwitchResult> {
   const config = options(partial);
-  if (config.triggerClient === 'opencode' && (config.provider === 'codex' || config.provider === 'claude') &&
+  if (!(config.scanPool && config.check) && config.triggerClient === 'opencode' && (config.provider === 'codex' || config.provider === 'claude') &&
       Number.isFinite(config.quotaCheckAfter)) {
     const receipt = (await readState()).lastQuotaCheck;
     if (receipt?.provider === config.provider && receipt.completedAt >= (config.quotaCheckAfter ?? Infinity)) {
@@ -171,13 +175,16 @@ export async function switchAccount(partial: Partial<SwitchOptions> = {}): Promi
   const acquire = config.triggerClient === 'omo-agent' && config.omoRequest ? waitForSwitchLock : withSwitchLock;
   const locked = config.dryRun ? await switchLocked(config, network, appConfig.accountOrder) : await acquire(async () => {
     const result = await switchLocked(config, network, appConfig.accountOrder);
-    if (!recordCheck || result.quotaCheck || config.triggerClient === 'omo-agent' && result.checked.length === 0) return result;
+    if (!recordCheck || result.quotaCheck || result.writeBlocked ||
+        config.triggerClient === 'omo-agent' && result.checked.length === 0) return result;
     const state = await readState();
     const outcome = quotaCheckOutcome(result, config.recover || config.triggerClient === 'omo-agent');
     const receipt: QuotaCheckReceipt = {
       provider: config.provider, completedAt: Date.now(), outcome,
       switched: result.switched, latestData: result.checked.some((account) => account.source === 'live'),
       waitUntil: result.waitUntil,
+      ...(result.poolChecked ? { poolChecked: true } : {}),
+      ...(result.selectedAccountId ? { selectedAccountId: result.selectedAccountId } : {}),
       ...(config.triggerClient === 'omo-agent' && config.omoRequest ? { omoRequest: config.omoRequest } : {}),
     };
     await writeState({ ...state, [config.triggerClient === 'omo-agent' ? 'lastOmoQuotaCheck' : 'lastQuotaCheck']: receipt });
@@ -188,10 +195,14 @@ export async function switchAccount(partial: Partial<SwitchOptions> = {}): Promi
 
 export function quotaCheckOutcome(result: SwitchResult, recover: boolean): QuotaCheckOutcome {
   if (result.switched) return 'switched';
+  if (result.poolChecked) {
+    if (result.writeBlocked) return 'check_failed';
+    if (result.selectedAccountId) return 'available';
+  }
   const writeFailed = result.written.some((write) => write.error);
   const networkFailed = result.checked.some((account) => account.error === 'usage_network_error' || account.error === 'usage_timeout');
   const checkFailed = result.checked.some((account) => account.source === 'error');
-  if (recover && result.checked[0]?.usable) return 'available';
+  if (!result.poolChecked && recover && result.checked[0]?.usable) return 'available';
   return writeFailed ? 'check_failed' : networkFailed ? 'network_error' : checkFailed ? 'check_failed' : 'no_candidate';
 }
 
@@ -237,13 +248,30 @@ async function switchLocked(config: SwitchOptions, network: NetworkConfig, accou
   if (clients.length === 0) return result(`${config.provider} 没有可切换的客户端`, config.reason);
   const trigger = config.triggerClient && clients.includes(config.triggerClient) ? config.triggerClient : clients[0];
   if (trigger === undefined) return result('没有可切换的客户端', config.reason);
-  if (trigger === 'omo-agent' && !(await readClientTokens(trigger, clientPath(trigger)))) {
+  const scanPool = config.scanPool && config.check;
+  if (!scanPool && trigger === 'omo-agent' && !(await readClientTokens(trigger, clientPath(trigger)))) {
     return result('OmO 没有可管理的单账户 OAuth 凭证；多账户请使用 OmO 自带的切换', config.reason);
   }
   const pool = (await loadAccounts(ACCOUNTS_DIR)).filter((account) => account.provider === config.provider && !account.disabled);
-  if (pool.length < (config.recover ? 1 : 2)) return result(`账户目录里只有 ${pool.length} 个可用的 ${config.provider} 账户，没有可切换的对象`, config.reason);
+  if (pool.length < (scanPool || config.recover ? 1 : 2)) return result(`账户目录里只有 ${pool.length} 个可用的 ${config.provider} 账户，没有可切换的对象`, config.reason);
+  const triggerPath = clientPath(trigger);
+  const omoSnapshot = scanPool && trigger === 'omo-agent' ? await readOmoIdentity(triggerPath) : null;
+  const opencodeSnapshot = scanPool && trigger === 'opencode' ? await readClientTokens(trigger, triggerPath) : null;
   const current = await currentAccount(trigger, pool);
-  if (trigger === 'omo-agent' && config.omoRequest) {
+  if (scanPool) {
+    const receipt = trigger === 'omo-agent' ? state.lastOmoQuotaCheck : state.lastQuotaCheck;
+    const priorSwitch = state.clients[trigger]?.omoChange;
+    const sameLogin = trigger !== 'omo-agent' || (omoSnapshot && isDeepStrictEqual(receipt?.omoRequest, config.omoRequest) &&
+      (isDeepStrictEqual(omoSnapshot, config.omoRequest) || (receipt?.switched &&
+        isDeepStrictEqual(priorSwitch?.from, config.omoRequest) && isDeepStrictEqual(priorSwitch?.to, omoSnapshot))));
+    if (!config.dryRun && sameLogin && receipt?.poolChecked === true && receipt.provider === config.provider &&
+        receipt.completedAt >= (config.quotaCheckAfter ?? Infinity) &&
+        (!receipt.selectedAccountId || receipt.selectedAccountId === current?.id)) {
+      return result('复用本轮账户池额度查询结果', config.reason, {
+        switched: receipt.switched, waitUntil: receipt.waitUntil, quotaCheck: receipt,
+      });
+    }
+  } else if (trigger === 'omo-agent' && config.omoRequest) {
     if (!current) return result('无法确认 OmO 当前账户', config.reason);
     const identity = await readOmoIdentity(clientPath(trigger));
     if (!identity) return result('OmO 凭证不可管理，未复用切换', config.reason);
@@ -267,14 +295,14 @@ async function switchLocked(config: SwitchOptions, network: NetworkConfig, accou
   }
   const now = Date.now();
   const last = state.clients[trigger]?.switchedAt ?? 0;
-  if (!config.dryRun && now - last < config.minIntervalMs) return result(`${Math.round((now - last) / 1000)} 秒前刚切换过，这次跳过`, config.reason, { from: current?.email ?? '' });
+  if (!scanPool && !config.dryRun && now - last < config.minIntervalMs) return result(`${Math.round((now - last) / 1000)} 秒前刚切换过，这次跳过`, config.reason, { from: current?.email ?? '' });
   const previousMemo = current ? state.accounts[current.id] : undefined;
-  if (current && config.exhausted) {
+  if (!scanPool && current && config.exhausted) {
     const resetAt = previousMemo?.resetAt && previousMemo.resetAt > now ? previousMemo.resetAt : now + FALLBACK_COOLDOWN_MS;
     state.accounts[current.id] = { usedPercent: previousMemo?.usedPercent ?? 100, resetAt, checkedAt: now, blockedUntil: resetAt };
   }
   const checked: AccountStatus[] = [];
-  if (current) checked.push(config.exhausted ? status(current, state.accounts[current.id], 'live') : await assess(current, state, config, network));
+  if (!scanPool && current) checked.push(config.exhausted ? status(current, state.accounts[current.id], 'live') : await assess(current, state, config, network));
   if (trigger === 'omo-agent' && config.omoRequest && checked[0]?.source === 'error') {
     return result('无法核实 OmO 当前账户额度', config.reason, { from: current?.email ?? '', checked });
   }
@@ -287,24 +315,53 @@ async function switchLocked(config: SwitchOptions, network: NetworkConfig, accou
   const ranks = new Map<string, number>();
   for (const id of order) if (!ranks.has(id)) ranks.set(id, ranks.size);
   const candidates = [...pool].sort((a, b) => (ranks.get(a.id) ?? Infinity) - (ranks.get(b.id) ?? Infinity));
-  for (const candidate of candidates) {
-    if (candidate.id === current?.id) continue;
-    const candidateStatus = await assess(candidate, state, config, network);
-    checked.push(candidateStatus);
+  const poolResult = scanPool ? { poolChecked: true } as const : {};
+  if (scanPool) {
+    for (const candidate of candidates) {
+      checked.push(await assess(candidate, state, config, network));
+    }
+  }
+  for (const [index, candidate] of candidates.entries()) {
+    if (!scanPool && candidate.id === current?.id) continue;
+    const candidateStatus = (scanPool ? checked[index] : undefined) ?? await assess(candidate, state, config, network);
+    if (!scanPool) checked.push(candidateStatus);
+    const checkedIndex = scanPool ? index : checked.length - 1;
     if (!candidateStatus.usable) {
       if (candidateStatus.resetAt > now) waitUntil = waitUntil === 0 ? candidateStatus.resetAt : Math.min(waitUntil, candidateStatus.resetAt);
       continue;
     }
-    if (config.dryRun) return result(`将切换到 ${candidate.email}，未写入任何文件`, config.reason, { from: current?.email ?? '', to: candidate.email, checked });
-    if (!(await ensureFresh(candidate, network))) {
-      checked[checked.length - 1] = { ...candidateStatus, usable: false, source: 'error', error: '令牌续期失败' };
+    if (scanPool && !config.dryRun && candidate.id !== current?.id && Date.now() - last < config.minIntervalMs) {
+      await writeState(state);
+      return result('额度已确认，等待切换间隔后再试', config.reason, {
+        from: current?.email ?? '', checked, waitUntil: last + config.minIntervalMs, ...poolResult,
+      });
+    }
+    if (!config.dryRun && candidate.id !== current?.id && !(await ensureFresh(candidate, network))) {
+      checked[checkedIndex] = { ...candidateStatus, usable: false, source: 'error', error: '令牌续期失败' };
       continue;
     }
-    const omoBefore = clients.includes('omo-agent') ? await readOmoIdentity(clientPath('omo-agent')) : null;
-    if (config.omoRequest && !isDeepStrictEqual(omoBefore, config.omoRequest)) {
+    if (scanPool) {
+      const loginUnchanged = trigger === 'omo-agent'
+        ? omoSnapshot !== null && isDeepStrictEqual(await readOmoIdentity(triggerPath), omoSnapshot)
+        : isDeepStrictEqual(await readClientTokens(trigger, triggerPath), opencodeSnapshot);
+      if (!loginUnchanged) {
+        if (!config.dryRun) await writeState(state);
+        return result('已查完账户池，但客户端登录不可管理或在查询期间变化', config.reason, { checked, ...poolResult, writeBlocked: true });
+      }
+      if (candidate.id === current?.id) {
+        if (!config.dryRun) await writeState(state);
+        return result(`${current.email} 是优先级最高的可用账户，不切换`, config.reason, {
+          from: current.email, checked, ...poolResult, selectedAccountId: candidate.id,
+        });
+      }
+    }
+    if (config.dryRun) return result(`将切换到 ${candidate.email}，未写入任何文件`, config.reason, { from: current?.email ?? '', to: candidate.email, checked, ...poolResult });
+    const omoBefore = scanPool && trigger === 'omo-agent' ? omoSnapshot
+      : clients.includes('omo-agent') ? await readOmoIdentity(clientPath('omo-agent')) : null;
+    if (!scanPool && config.omoRequest && !isDeepStrictEqual(omoBefore, config.omoRequest)) {
       return result('额度查询期间 OmO 凭证已变化，未切换', config.reason, { checked });
     }
-    const written = await syncToClients(candidate, clients, config.omoRequest);
+    const written = await syncToClients(candidate, clients, scanPool ? omoBefore ?? undefined : config.omoRequest);
     const omoAfter = omoBefore && written.some((entry) => entry.source === 'omo-agent' && !entry.error)
       ? await readOmoIdentity(clientPath('omo-agent')) : null;
     for (const write of written.filter((entry) => !entry.error)) state.clients[write.source] = {
@@ -315,11 +372,12 @@ async function switchLocked(config: SwitchOptions, network: NetworkConfig, accou
     await writeState(state);
     const triggerWrite = written.find((write) => write.source === trigger);
     if (!triggerWrite || triggerWrite.error) {
-      checked[checked.length - 1] = { ...candidateStatus, usable: false, source: 'error', error: triggerWrite?.error || '触发客户端未写入' };
-      return result(`写入触发客户端 ${CLIENTS[trigger] ?? trigger} 失败，未完成切换`, config.reason, { from: current?.email ?? '', written, checked });
+      checked[checkedIndex] = { ...candidateStatus, usable: false, source: 'error', error: triggerWrite?.error || '触发客户端未写入' };
+      return result(`写入触发客户端 ${CLIENTS[trigger] ?? trigger} 失败，未完成切换`, config.reason, { from: current?.email ?? '', written, checked, ...poolResult });
     }
-    return { switched: true, message: `已切换到 ${candidate.email}`, reason: config.reason, from: current?.email ?? '', to: candidate.email, written, waitUntil: 0, checked };
+    return { switched: true, message: `已切换到 ${candidate.email}`, reason: config.reason, from: current?.email ?? '', to: candidate.email, written, waitUntil: 0, checked,
+      ...poolResult, ...(scanPool ? { selectedAccountId: candidate.id } : {}) };
   }
   if (!config.dryRun) await writeState(state);
-  return result(waitUntil > 0 ? `所有 ${config.provider} 账户都已用尽，最早 ${new Date(waitUntil).toLocaleString()} 恢复` : `没有找到可用的 ${config.provider} 账户`, config.reason, { from: current?.email ?? '', waitUntil, checked });
+  return result(waitUntil > 0 ? `所有 ${config.provider} 账户都已用尽，最早 ${new Date(waitUntil).toLocaleString()} 恢复` : `没有找到可用的 ${config.provider} 账户`, config.reason, { from: current?.email ?? '', waitUntil, checked, ...poolResult });
 }

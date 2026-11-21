@@ -214,11 +214,12 @@ function createOmoRecovery() {
         group.delay = available ? RECOVERY_INTERVAL_MS : Math.min(group.delay * 2, 8 * RECOVERY_INTERVAL_MS);
       }
       if (!contended) {
-        group.hasData = result?.latestData === true;
+        group.hasData = result?.latestData === true && !result.writeBlocked;
         group.failures = group.hasData || available ? 0 : group.failures + 1;
       }
       log('check_result', group.entries, { recover, outcome: group.lastOutcome,
-        latestData: group.hasData, failures: group.failures, ...(retryDelay !== undefined ? { retryDelayMs: retryDelay } : {}),
+        latestData: result?.latestData === true, failures: group.failures, ...(retryDelay !== undefined ? { retryDelayMs: retryDelay } : {}),
+        ...(result?.writeBlocked ? { writeBlocked: true } : {}),
         ...(result?.checks ? { checks: result.checks } : {}) });
       group.waitUntil = Number.isFinite(result?.waitUntil) ? result.waitUntil : 0;
       await refresh(false);

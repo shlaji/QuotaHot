@@ -21,6 +21,8 @@ export type QuotaCheckReceipt = {
   readonly latestData: boolean;
   readonly waitUntil: number;
   readonly omoRequest?: OmoIdentity;
+  readonly poolChecked?: true;
+  readonly selectedAccountId?: string;
 };
 
 export type SwitchState = {

@@ -302,7 +302,7 @@ test('a quota error from the newly switched OmO account is not treated as the pr
   assert.equal(nested(authPath, 'chatgpt-subscription', 'accountId'), 'acct-c@x.com');
 });
 
-test('OmO verifies the current account before acting on an ambiguously attributed quota error', async () => {
+test('OmO uses a verified alternative when current quota cannot be verified', async () => {
   const { runHook } = await import('../src/runtime.js');
   for (const available of [true, null]) {
     reset();
@@ -319,19 +319,97 @@ test('OmO verifies the current account before acting on an ambiguously attribute
       source: 'omo', provider: 'chatgpt-subscription', error: { message: 'quota exhausted' },
       omoRequest: { accountId: 'acct-b@x.com', email: 'b@x.com', loginId: 'new-login' },
     }), {
-      usageQuery: async (account) => ({
-        accountId: account.id, provider: account.provider, email: account.email,
-        ok: available !== null, status: available === null ? 503 : 200,
-        error: available === null ? 'usage_network_error' : '', plan: '', subscriptionEndsAt: null,
-        userId: '', quotaAvailable: available, windows: [], endpoint: 'test',
-      }),
+      usageQuery: async (account) => {
+        const quota = account.email === 'a@x.com' ? available === null : available;
+        return {
+          accountId: account.id, provider: account.provider, email: account.email,
+          ok: quota !== null, status: quota === null ? 503 : 200,
+          error: quota === null ? 'usage_network_error' : '', plan: '', subscriptionEndsAt: null,
+          userId: '', quotaAvailable: quota, windows: [], endpoint: 'test',
+        };
+      },
     });
-    assert.equal(JSON.parse(output.stdout).switched, false);
+    assert.equal(JSON.parse(output.stdout).switched, available === null);
     assert.equal(JSON.parse(output.stdout).resume === true, available === true);
-    assert.equal(nested(authPath, 'chatgpt-subscription', 'accountId'), 'acct-b@x.com');
-    if (available === true) assert.equal(nested(statePath, 'accounts', 'codex:b@x.com', 'blockedUntil'), 0);
-    else assert.equal(existsSync(statePath), false);
+    const selected = available === null ? 'a@x.com' : 'b@x.com';
+    assert.equal(nested(authPath, 'chatgpt-subscription', 'accountId'), `acct-${selected}`);
+    assert.equal(nested(statePath, 'accounts', `codex:${selected}`, 'blockedUntil'), 0);
   }
+});
+
+for (const client of ['opencode', 'omo'] as const) {
+  for (const action of ['keep', 'switch', 'block'] as const) {
+    test(`${client} recovery checks the whole pool before deciding to ${action}`, async () => {
+      reset();
+      writeAccount('c@x.com');
+      writeAccount('d@x.com');
+      const disabled = join(accountsDir, 'disabled.json');
+      writeFileSync(disabled, JSON.stringify({ type: 'codex', email: 'disabled@x.com', disabled: true }));
+      const order = action === 'keep' ? ['c', 'a', 'b', 'd'] : ['c', 'b', 'a', 'd'];
+      writeFileSync(join(dataDir, 'config.json'), JSON.stringify({
+        accountOrder: { codex: order.map((name) => `codex:${name}@x.com`) },
+      }));
+      const agentDir = join(home, '.omo', 'agent');
+      mkdirSync(agentDir, { recursive: true });
+      const authPath = join(agentDir, 'auth.json');
+      writeFileSync(authPath, JSON.stringify({ 'chatgpt-subscription': {
+        type: 'oauth', access: 'token-a@x.com', refresh: 'refresh-a@x.com',
+        expires: Date.now() + 86_400_000, accountId: 'acct-a@x.com', email: 'a@x.com', loginId: 'current',
+      } }));
+      const payload = client === 'opencode' ? { source: 'opencode', provider: 'openai', recover: true } : {
+        source: 'omo', provider: 'chatgpt-subscription', recover: true, error: { message: 'quota exhausted' },
+        omoRequest: { accountId: 'acct-c@x.com', email: 'c@x.com', loginId: 'previous' },
+      };
+      const queried: string[] = [];
+      const { runHook } = await import('../src/runtime.js');
+      const output = await runHook(client, JSON.stringify(payload), { usageQuery: async (account) => {
+        queried.push(account.email);
+        if (action === 'block' && account.email === 'd@x.com') {
+          if (client === 'omo') {
+            writeFileSync(authPath, JSON.stringify({ 'chatgpt-subscription': {
+              type: 'oauth', access: 'token-d@x.com', refresh: 'refresh-d@x.com',
+              expires: Date.now() + 86_400_000, accountId: 'acct-d@x.com', email: 'd@x.com', loginId: 'changed',
+            } }));
+          } else {
+            writeFileSync(opencodeAuthPath, JSON.stringify({ openai: { type: 'oauth', access: 'token-d@x.com' } }));
+          }
+        }
+        return {
+          accountId: account.id, provider: account.provider, email: account.email, ok: true, status: 200,
+          error: '', plan: '', subscriptionEndsAt: null, userId: '',
+          quotaAvailable: account.email !== 'c@x.com', windows: [], endpoint: 'test',
+        };
+      } });
+      assert.deepEqual(queried, order.map((name) => `${name}@x.com`));
+      assert.equal(output.outcome, { keep: 'available', switch: 'switched', block: 'check_failed' }[action]);
+      if (action === 'block') {
+        assert.partialDeepStrictEqual(JSON.parse(output.stdout), { latestData: true, writeBlocked: true });
+        assert.equal(nested(codexAuthPath, 'tokens', 'access_token'), 'token-a@x.com');
+      }
+      assert.equal(nested(opencodeAuthPath, 'openai', 'access'),
+        action === 'switch' ? 'token-b@x.com' : action === 'block' && client === 'opencode' ? 'token-d@x.com' : 'token-a@x.com');
+      if (client === 'omo') assert.equal(nested(authPath, 'chatgpt-subscription', 'accountId'),
+        { keep: 'acct-a@x.com', switch: 'acct-b@x.com', block: 'acct-d@x.com' }[action]);
+    });
+  }
+}
+
+test('the switch interval does not skip live checks or select a lower-ranked account', async () => {
+  reset();
+  const switchedAt = Date.now();
+  writeFileSync(statePath, JSON.stringify({
+    accounts: {}, clients: { opencode: { accountId: 'codex:a@x.com', email: 'a@x.com', switchedAt } },
+  }));
+  writeFileSync(join(dataDir, 'config.json'), JSON.stringify({ accountOrder: { codex: ['codex:b@x.com'] } }));
+  availabilityByEmail.set('a@x.com', true);
+  availabilityByEmail.set('b@x.com', true);
+
+  const result = await switchWithUsage({ triggerClient: 'opencode', scanPool: true, cacheMs: 0, minIntervalMs: 60_000 });
+
+  assert.deepEqual(observations.queried, ['b@x.com', 'a@x.com']);
+  assert.equal(result.switched, false);
+  assert.equal(result.waitUntil, switchedAt + 60_000);
+  assert.equal(nested(opencodeAuthPath, 'openai', 'access'), 'token-a@x.com');
 });
 
 test('OmO does not overwrite a login changed during the quota query', async () => {
