@@ -34,9 +34,12 @@ function bypasses(target: string, rules: readonly string[]): boolean {
   return false;
 }
 
+export function usesProxy(target: string, network: NetworkConfig): boolean {
+  return network.proxy.trim() !== '' && !bypasses(target, network.noProxy);
+}
+
 export function dispatcherFor(target: string, network: NetworkConfig): Dispatcher {
-  const proxy = network.proxy.trim();
-  return proxy && !bypasses(target, network.noProxy)
-    ? new ProxyAgent({ uri: proxy, allowH2: false, requestTls: { allowH2: false } })
+  return usesProxy(target, network)
+    ? new ProxyAgent({ uri: network.proxy.trim(), allowH2: false, requestTls: { allowH2: false } })
     : new Agent({ allowH2: false });
 }

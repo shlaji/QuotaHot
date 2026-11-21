@@ -25,6 +25,8 @@ test('OmO with fresh quota and no future reset waits for a real state change', a
   assert.equal(state.children.length, 1);
 
   state.setState({ accounts: { recovered: { usedPercent: 10, resetAt: 0, blockedUntil: 0 } } });
+  state.emitState('logs'); await state.flush(); await state.advance(0);
+  assert.equal(state.children.length, 1);
   state.emitState(); await state.flush(); await state.advance(0);
   assert.equal(state.children.length, 2);
   state.children.at(-1)?.finish({ outcome: 'available', resume: true, latestData: true });
@@ -50,6 +52,10 @@ for (const [outcome, delays] of [
     await state.advance(86_400_000);
     state.emitState(); await state.flush(); await state.advance(0);
     assert.equal(state.children.length, 5);
+    const log = () => (state.logs.get('/isolated/data/logs/omo-recovery.jsonl') ?? '').trim()
+      .split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    assert.ok(log().some((event) => event.event === 'check_paused' && event.reason === 'failure_limit'
+      && event.failures === 5 && event.sessions[0] === 'bounded'));
 
     state.setState({ accounts: { recovered: { usedPercent: 0, resetAt: 0, blockedUntil: 0 } } });
     state.emitState(); await state.flush(); await state.advance(0);
@@ -57,6 +63,9 @@ for (const [outcome, delays] of [
     state.children.at(-1)?.finish({ outcome: 'available', resume: true, latestData: true });
     await state.flush();
     assert.deepEqual(state.messages, ['bounded']);
+    assert.ok(log().some((event) => event.event === 'state_wakeup' && event.quotaChanged));
+    assert.ok(log().some((event) => event.event === 'resume_requested' && event.mode === 'background'));
+    assert.doesNotMatch(JSON.stringify(log()), /test@example\.invalid/);
   });
 }
 

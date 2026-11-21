@@ -136,6 +136,12 @@ export async function runHook(
   const resume = client === 'omo' && !result.switched &&
     (result.checked[0]?.usable === true || result.quotaCheck?.outcome === 'available');
   const outcome: HookOutcome = result.lockContended ? 'lock_contended' : resume ? 'available' : result.quotaCheck?.outcome ?? quotaCheckOutcome(result, false);
+  const checks = client === 'omo' ? result.checked.slice(0, 20).map(({ source, usable, error, transport }) => ({
+    source, usable,
+    ...(error ? { error: /^(?:usage_(?:http_\d{3}|timeout|network_error|endpoint_unavailable)|invalid_(?:proxy|usage_json)|missing_quota_data)$/.test(error)
+      ? error : error === '令牌已过期且续期失败' ? 'credential_refresh_failed' : 'other_check_error' } : {}),
+    ...(transport ? { transport } : {}),
+  })) : [];
   return {
       stdout: JSON.stringify({
         switched: result.switched,
@@ -146,6 +152,7 @@ export async function runHook(
         from: result.switched ? '[redacted]' : '',
         to: result.switched ? '[redacted]' : '',
         latestData,
+        ...(checks.length ? { checks } : {}),
         ...(result.waitUntil ? { waitUntil: result.waitUntil } : {}),
     }),
     result,

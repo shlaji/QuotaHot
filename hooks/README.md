@@ -107,6 +107,8 @@ QuotaHot 单次额度查询使用固定 15 秒预算。Codex 只有遇到 404、
 
 `recovery-status`（或 `recovery`）检查本地 `$QUOTAHOT_DATA_DIR/recovery-status/*.json` 中的全部 OpenCode / OmO 快照，不向上游查询额度。输出区分插件来源，并显示等待会话数、会话 ID、阶段、实际下次检查时间；JSON 还包含最近一次检查结果。同一插件模块发布一份快照，OmO 内不同账户组的下次检查时间取最早值；多个进程分别显示。状态文件使用属主权限，在最后一个等待会话退出时删除；异常退出留下的有效快照若超过三分钟没有心跳，会在本次状态查询中标记为 `stale` 并删除，避免长期积累。快照仅用于诊断，不保存令牌或消息正文，也不会在重启后恢复任务。升级后需重新执行 `quotahot-hook install omo` 并重新加载扩展，旧版 OmO 扩展不会发布这些快照，历史失败会话也不会自动补建恢复任务。
 
+OmO 恢复诊断写入 `$QUOTAHOT_DATA_DIR/logs/omo-recovery.jsonl`（默认 `~/.quotahot/logs/omo-recovery.jsonl`）。按会话 ID 查找，可看到查询结果、网络错误类别和可取得的系统错误码、代理或直连、失败次数、停止重试原因、状态唤醒和续跑请求。日志不记录令牌、账户邮箱、代理 URL 或消息正文。文件约 2 MiB 后停止追加；可移走旧日志后继续采集。新日志需要更新 Hook CLI 和 OmO 扩展，并重新加载扩展。
+
 ## OpenCode 会话群通知
 
 会话通知由独立插件 `quotahot-session-notify.js` 处理，不修改额度切换插件 `quotahot.js`。顶层 `quotahot-hook install` / `uninstall` 管理额度切换集成；通知插件须单独执行 `notify install` / `notify uninstall`，卸载只删除带有 QuotaHot 通知所有权标记的插件文件。通知模板 `opencode-notification-plugin-template.js` 须与可执行文件同目录；从源码构建后可在 `hooks/` 目录使用 `node dist/quotahot-hook`，不要假定 shell 安装脚本已安装通知模板。

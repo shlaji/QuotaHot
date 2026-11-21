@@ -74,6 +74,24 @@ test('OmO resumes from a verified available quota receipt without a repeated liv
   assert.equal(out.outcome, 'available');
 });
 
+test('OmO returns a redacted diagnostic for a failed quota query', async (t) => {
+  const previous = reply;
+  t.after(() => { reply = previous; });
+  const transport = { route: 'proxy', endpoint: '/backend-api/wham/usage', code: 'ECONNRESET', elapsedMs: 42 } as const;
+  reply = { ...reply, switched: false, written: [], checked: [{
+    id: 'private-account', email: 'private@example.invalid', usable: false, usedPercent: null,
+    resetAt: 0, source: 'error', error: 'usage_network_error', transport,
+  }] };
+  const out = await runHook('omo', JSON.stringify({
+    source: 'omo', provider: 'chatgpt-subscription', recover: true,
+    error: { message: 'quota exhausted' },
+    omoRequest: { accountId: 'private-account', email: 'private@example.invalid', loginId: 'login' },
+  }));
+  assert.equal(out.outcome, 'network_error');
+  assert.deepEqual(JSON.parse(out.stdout).checks, [{ source: 'error', usable: false, error: 'usage_network_error', transport }]);
+  assert.doesNotMatch(out.stdout, /private/);
+});
+
 test('认得出 OpenCode 事件里的限额', () => {
   assert.equal(opencodeSignal({ event: { properties: { error: { status: 429 } } } }).hit, true);
   assert.equal(opencodeSignal({ event: { message: 'You have hit your usage limit' } }).hit, true);

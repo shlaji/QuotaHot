@@ -327,7 +327,7 @@ printf '%s' '{"switched":false,"outcome":"no_candidate"}'
 
 test('concurrent OmO sessions share one real hook and both resume after switching accounts', { timeout: 20_000 }, async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'quotahot-omo-concurrent-'));
-  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(home, { recursive: true, force: true, maxRetries: 3 }));
   const agentDir = join(home, 'agent');
   const data = join(home, 'data');
   await mkdir(join(data, 'accounts'), { recursive: true });

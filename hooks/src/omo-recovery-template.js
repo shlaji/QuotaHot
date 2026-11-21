@@ -1,5 +1,5 @@
 import { watch as watchOmoState } from 'node:fs';
-import { readFile as readOmoStateFile } from 'node:fs/promises';
+import { appendFile as appendOmoLog, readFile as readOmoStateFile, stat as statOmoLog } from 'node:fs/promises';
 import { homedir as omoHome } from 'node:os';
 import { dirname as omoDirname, join as omoJoin } from 'node:path';
 
@@ -8,6 +8,24 @@ function createOmoRecovery() {
   const BUFFER = 60_000;
   const MAX_FAILURES = 5;
   const statePath = omoJoin(process.env.QUOTAHOT_DATA_DIR ?? omoJoin(omoHome(), '.quotahot'), 'switch-state.json');
+  const logDirectory = omoJoin(omoDirname(statePath), 'logs');
+  const logPath = omoJoin(logDirectory, 'omo-recovery.jsonl');
+  let logWrites = Promise.resolve();
+  function log(event, entries, details = {}) {
+    const line = JSON.stringify({
+      at: Date.now(), pid: process.pid, event,
+      sessions: [...entries].map((entry) => entry.sessionID).filter((id) => /^[a-zA-Z0-9_-]{1,128}$/.test(id)).slice(0, 20),
+      ...details,
+    }) + '\n';
+    logWrites = logWrites.then(async () => {
+      await mkdirOmoStatus(logDirectory, { recursive: true, mode: 0o700 });
+      const size = await statOmoLog(logPath).then((info) => info.size, (error) => {
+        if (error?.code === 'ENOENT') return 0;
+        throw error;
+      });
+      if (size < 2 * 1024 * 1024) await appendOmoLog(logPath, line, { mode: 0o600 });
+    }).catch(() => { /* Diagnostics must not affect recovery. */ });
+  }
   const groups = new Map();
   const publishStatus = createOmoRecoveryStatus(groups, omoDirname(statePath));
   let watcher, watchTimer, reading;
@@ -69,6 +87,7 @@ function createOmoRecovery() {
           if (!prune(group) || group.ready) continue;
           const matchingReceipt = receiptChanged && next.receiptAt > 0 && next.receiptKey === group.identityKey;
           if (!quotaChanged && !matchingReceipt) continue;
+          log('state_wakeup', group.entries, { quotaChanged, matchingReceipt, checkInProgress: group.running });
           if (matchingReceipt) group.checkAfter = next.receiptAt;
           else group.failures = 0;
           if (group.running) group.receiptPending ||= matchingReceipt;
@@ -83,7 +102,10 @@ function createOmoRecovery() {
   function watchState() {
     if (watcher || !groups.size) return;
     try {
-      const current = watchOmoState(omoDirname(statePath), () => { void refresh(true); });
+      const current = watchOmoState(omoDirname(statePath), (_event, name) => {
+        if (name != null && name.toString() !== 'switch-state.json') return;
+        void refresh(true);
+      });
       watcher = current;
       current.unref?.();
       current.on('error', () => {
@@ -118,6 +140,7 @@ function createOmoRecovery() {
     if (!group.ready && delay === undefined && (group.hasData ? !Number.isFinite(due) : group.failures >= MAX_FAILURES)) {
       group.timer = undefined;
       group.nextCheckAt = null;
+      log('check_paused', group.entries, { reason: group.hasData ? 'no_future_reset' : 'failure_limit', failures: group.failures });
       publishStatus();
       return;
     }
@@ -185,6 +208,8 @@ function createOmoRecovery() {
       }
       group.hasData = result?.latestData === true;
       group.failures = group.hasData || available ? 0 : group.failures + 1;
+      log('check_result', group.entries, { recover, outcome: group.lastOutcome,
+        latestData: group.hasData, failures: group.failures, ...(result?.checks ? { checks: result.checks } : {}) });
       group.waitUntil = Number.isFinite(result?.waitUntil) ? result.waitUntil : 0;
       await refresh(false);
       if (contended) {
@@ -207,6 +232,7 @@ function createOmoRecovery() {
       group.lastCheckedAt = Date.now();
       group.lastOutcome = 'check_failed';
       group.failures += 1;
+      log('check_exception', group.entries, { recover, failures: group.failures });
       return null;
     } finally {
       group.running = false;
@@ -215,6 +241,7 @@ function createOmoRecovery() {
         if (group.ready) schedule(group);
         else if (group.receiptPending) schedule(group, contended ? 1_000 : 0);
         else if (group.hasData || group.failures < MAX_FAILURES) schedule(group, retryDelay);
+        else log('check_paused', group.entries, { reason: 'failure_limit', failures: group.failures });
       }
       group.receiptPending = false;
       publishStatus();
@@ -222,6 +249,7 @@ function createOmoRecovery() {
   }
 
   return {
+    log,
     check(entry) {
       if (!entry.active()) return Promise.resolve(null);
       let group = groups.get(entry.key);

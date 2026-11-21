@@ -4,7 +4,7 @@ import { ACCOUNTS_DIR, loadConfig } from './config.js';
 import { accountIdOf, emailOf, loadAccounts } from './account-files.js';
 import { clientPath, readClientTokens, syncToClients } from './client-auth.js';
 import { ensureFresh } from './credentials.js';
-import type { NetworkConfig } from './network.js';
+import { usesProxy, type NetworkConfig } from './network.js';
 import { queryHookUsage } from './usage.js';
 import { readState, STATE_PATH, waitForSwitchLock, withSwitchLock, writeState, type AccountMemo, type QuotaCheckOutcome, type QuotaCheckReceipt, type SwitchState } from './state.js';
 import { readOmoIdentity, type OmoIdentity } from './omo-auth.js';
@@ -28,6 +28,12 @@ export type AccountStatus = {
   readonly resetAt: number;
   readonly source: 'cache' | 'live' | 'cooldown' | 'error' | 'skipped';
   readonly error: string;
+  readonly transport?: {
+    readonly route: 'proxy' | 'direct';
+    readonly endpoint: string;
+    readonly code?: string;
+    readonly elapsedMs: number;
+  };
 };
 
 export type UsageQuery = (account: Account, network: NetworkConfig) => Promise<UsageResult>;
@@ -123,7 +129,15 @@ async function assess(account: Account, state: SwitchState, config: SwitchOption
   const fresh = config.dryRun ? account.expiresAt > now : await ensureFresh(account, network);
   if (!fresh) return { id: account.id, email: account.email, usable: false, usedPercent: memo?.usedPercent ?? null, resetAt: 0, source: 'error', error: config.dryRun ? '只读预览不能刷新过期或有效期未知的令牌' : '令牌已过期且续期失败' };
   const usage = await (config.usageQuery ?? queryHookUsage)(account, network);
-  if (!usage.ok) return { id: account.id, email: account.email, usable: false, usedPercent: memo?.usedPercent ?? null, resetAt: 0, source: 'error', error: usage.error || `额度查询返回 HTTP ${usage.status}` };
+  if (!usage.ok) return { id: account.id, email: account.email, usable: false, usedPercent: memo?.usedPercent ?? null, resetAt: 0, source: 'error', error: usage.error || `额度查询返回 HTTP ${usage.status}`,
+    ...(/^https:\/\/(?:chatgpt\.com\/backend-api\/(?:wham|api\/codex)\/usage|api\.anthropic\.com\/api\/oauth\/usage)$/.test(usage.endpoint)
+      && usage.elapsedMs !== undefined ? { transport: {
+      route: usesProxy(usage.endpoint, network) ? 'proxy' : 'direct',
+      endpoint: new URL(usage.endpoint).pathname,
+      ...(usage.transportCode ? { code: usage.transportCode } : {}),
+      elapsedMs: usage.elapsedMs,
+    } } : {}),
+  };
   const threshold = exhaustionOf(usage.windows, config.threshold, now);
   const exhausted = usage.quotaAvailable === null ? threshold.exhausted : !usage.quotaAvailable;
   const latestReset = usage.windows.reduce((latest, window) => window.resetAt > now ? Math.max(latest, window.resetAt) : latest, 0);

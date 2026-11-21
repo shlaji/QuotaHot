@@ -53,14 +53,17 @@ export async function queryHookUsage(account: Account, network: NetworkConfig): 
   const urls = account.provider === 'codex' ? CODEX_URLS : [CLAUDE_URL];
   const signal = AbortSignal.timeout(15_000);
   const dispatcher = dispatcherFor(urls[0], network);
+  const startedAt = Date.now();
+  let endpoint = '';
   try {
     for (const url of urls) {
+      endpoint = url;
       const response = await fetch(url, {
         headers: account.provider === 'codex' ? codexHeaders(account.accessToken, account.accountId) : claudeHeaders(account.accessToken),
         dispatcher, signal, redirect: 'error',
       });
       const body = await response.text();
-      const result = { ...initial, status: response.status, endpoint: url };
+      const result = { ...initial, status: response.status, endpoint: url, elapsedMs: Date.now() - startedAt };
       if (account.provider === 'codex' && (response.status === 404 || response.status === 405 || (response.status === 403 && /^\s*</.test(body)))) continue;
       if (response.status !== 200) return { ...result, error: `usage_http_${response.status}` };
       const payload: unknown = JSON.parse(body);
@@ -72,9 +75,16 @@ export async function queryHookUsage(account: Account, network: NetworkConfig): 
       if (available === null && windows.length === 0) return { ...result, error: 'missing_quota_data' };
       return { ...result, ok: true, quotaAvailable: available, windows };
     }
-    return { ...initial, error: 'usage_endpoint_unavailable' };
+    return { ...initial, endpoint, elapsedMs: Date.now() - startedAt, error: 'usage_endpoint_unavailable' };
   } catch (error) {
-    return { ...initial, error: error instanceof SyntaxError ? 'invalid_usage_json' : signal.aborted ? 'usage_timeout' : 'usage_network_error' };
+    const cause = error instanceof Error ? error.cause ?? error : null;
+    const code = cause && typeof cause === 'object' && 'code' in cause ? cause.code : null;
+    // Never include the raw exception or its message (URLs and credentials may appear there).
+    const transportCode = typeof code === 'string' && /^(?:(?:UND_ERR|ERR_TLS|ERR_SSL|CERT|DEPTH_ZERO|SELF_SIGNED|UNABLE_TO)_[A-Z0-9_]{1,48}|E(?:CONNREFUSED|CONNRESET|TIMEDOUT|PIPE|HOSTUNREACH|NETUNREACH|NOTFOUND|AI_AGAIN))$/.test(code)
+      ? code : undefined;
+    return { ...initial, endpoint, elapsedMs: Date.now() - startedAt,
+      ...(transportCode ? { transportCode } : {}),
+      error: error instanceof SyntaxError ? 'invalid_usage_json' : signal.aborted ? 'usage_timeout' : 'usage_network_error' };
   } finally {
     await dispatcher.destroy();
   }

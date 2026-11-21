@@ -23,7 +23,8 @@ export function omoRecoveryFixture(t: TestContext) {
   let state = '{}';
   const timers = new Map<Timer, { at: number; callback: () => unknown }>();
   const files = new Map<string, string>();
-  const watchers = new Set<EventEmitter & { changed: () => void; close(): void }>();
+  const logs = new Map<string, string>();
+  const watchers = new Set<EventEmitter & { changed: (event: string, name: string) => void; close(): void }>();
   const payloads: Array<{ recover?: boolean; quotaCheckAfter?: number }> = [];
   const children: Array<{ finish(reply: Reply): void; killed(): boolean }> = [];
   const messages: string[] = [];
@@ -34,7 +35,7 @@ export function omoRecoveryFixture(t: TestContext) {
     os: { homedir: () => '/isolated' },
     path: { dirname, join },
     fs: {
-      watch: (_path: string, changed: () => void) => {
+      watch: (_path: string, changed: (event: string, name: string) => void) => {
         if (watchFailures > 0) { watchFailures -= 1; throw new Error('watch unavailable'); }
         const watcher = Object.assign(new EventEmitter(), {
           changed, unref() {}, close: () => { watchers.delete(watcher); },
@@ -46,6 +47,8 @@ export function omoRecoveryFixture(t: TestContext) {
     'fs/promises': {
       readFile: async (path: string) => path.endsWith('switch-state.json') ? state : files.get(path),
       mkdir: async () => undefined,
+      stat: async (path: string) => ({ size: Buffer.byteLength(logs.get(path) ?? '') }),
+      appendFile: async (path: string, contents: string) => { logs.set(path, (logs.get(path) ?? '') + contents); },
       writeFile: async (path: string, contents: string) => { files.set(path, contents); },
       rename: async (from: string, to: string) => { files.set(to, files.get(from) ?? ''); files.delete(from); },
       unlink: async (path: string) => { files.delete(path); },
@@ -161,10 +164,10 @@ export function omoRecoveryFixture(t: TestContext) {
     await flush();
   });
   return {
-    session, advance, flush, children, payloads, messages, notifications, files, timers, watchers,
+    session, advance, flush, children, payloads, messages, notifications, files, logs, timers, watchers,
     jumpWallClock: (duration: number) => { wallClock += duration; },
     setState: (value: object) => { state = JSON.stringify(value); },
-    emitState: () => { for (const watcher of [...watchers]) watcher.changed(); },
+    emitState: (name = 'switch-state.json') => { for (const watcher of [...watchers]) watcher.changed('rename', name); },
     failWatch: () => { watchFailures += 1; },
     now: () => wallClock,
   };

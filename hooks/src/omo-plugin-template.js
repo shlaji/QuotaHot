@@ -81,7 +81,7 @@ export default function (pi) {
       ? quotaStatus ? '429' : 'quota exhausted' : '';
   });
 
-  function runCheck(ctx, identity, error, recover, signal, quotaCheckAfter) {
+  function runCheck(ctx, entry, identity, error, recover, signal, quotaCheckAfter) {
     return new Promise((resolve) => {
       const child = spawn(COMMAND[0], [...COMMAND.slice(1), 'run', 'omo'], {
         env: { ...process.env, OMO_CODING_AGENT_DIR: ctx.agentDir },
@@ -91,18 +91,27 @@ export default function (pi) {
       signal?.addEventListener('abort', cancel, { once: true });
       if (signal?.aborted) cancel();
       let output = '';
-      const timer = setTimeout(() => child.kill('SIGKILL'), 120_000);
-      child.on('error', () => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); resolve(null); });
-      child.stdin.on('error', () => child.kill('SIGTERM'));
+      let failure = '';
+      const timer = setTimeout(() => { failure = 'timeout'; child.kill('SIGKILL'); }, 120_000);
+      child.on('error', () => { failure = 'spawn_error'; clearTimeout(timer); signal?.removeEventListener('abort', cancel); resolve(null); });
+      child.stdin.on('error', () => { failure ||= 'stdin_error'; child.kill('SIGTERM'); });
       child.stdout.on('data', (chunk) => {
         output += chunk.toString();
         if (output.length > 65_536) child.kill('SIGTERM');
       });
-      child.on('close', (code) => {
+      child.on('close', (code, exitSignal) => {
         clearTimeout(timer);
         signal?.removeEventListener('abort', cancel);
-        if (code !== 0 || output.length > 65_536 || signal?.aborted) return resolve(null);
-        try { resolve(JSON.parse(output)); } catch { resolve(null); }
+        // A child may have already returned a valid reply when its stdin closes.
+        if (failure === 'stdin_error' && code === 0 && output.length && output.length <= 65_536 && !signal?.aborted) {
+          try { return resolve(JSON.parse(output)); } catch { /* Keep the stdin failure for diagnostics. */ }
+        }
+        if (!failure) failure = signal?.aborted ? 'aborted' : output.length > 65_536 ? 'output_limit' : code !== 0 ? 'nonzero_exit' : '';
+        if (!failure) {
+          try { return resolve(JSON.parse(output)); } catch { failure = 'invalid_json'; }
+        }
+        recovery.log('check_process_failed', [entry], { recover, reason: failure, code, signal: exitSignal });
+        resolve(null);
       });
       child.stdin.end(JSON.stringify({ source: 'omo', provider: 'chatgpt-subscription',
         error: { message: error, ...(error === '429' ? { statusCode: 429 } : {}) },
@@ -125,15 +134,23 @@ export default function (pi) {
       sessionID: ctx.sessionManager?.getSessionId?.() ?? randomUUID(),
       active: () => revision === started && !ctx.signal?.aborted && ctx.model?.provider === 'chatgpt-subscription',
       idle: () => ctx.isIdle(),
-      run: (options, signal) => runCheck(ctx, identity, error, options.recover, signal, options.quotaCheckAfter),
+      run: (options, signal) => runCheck(ctx, entry, identity, error, options.recover, signal, options.quotaCheckAfter),
       notify: (message, kind) => { if (ctx.hasUI) ctx.ui.notify(message, kind); },
       resume: async () => {
         if (!entry.active() || !ctx.isIdle()) return false;
-        if (ctx.modelRegistry.authStorage.reload() !== 'loaded' || !await pi.setSessionModel(ctx.model)
-          || !entry.active() || !ctx.isIdle()) return false;
+        if (ctx.modelRegistry.authStorage.reload() !== 'loaded') {
+          recovery.log('resume_deferred', [entry], { reason: 'auth_reload' });
+          return false;
+        }
+        if (!await pi.setSessionModel(ctx.model) || !entry.active() || !ctx.isIdle()) {
+          recovery.log('resume_deferred', [entry], { reason: 'model_or_session_changed' });
+          return false;
+        }
         cancelRecovery();
         if (ctx.hasUI) ctx.ui.notify('继续当前任务', 'info');
-        await pi.sendUserMessage('继续当前任务');
+        try { await pi.sendUserMessage('继续当前任务'); }
+        catch (error) { recovery.log('resume_failed', [entry], { reason: 'send_message' }); throw error; }
+        recovery.log('resume_requested', [entry], { mode: 'background' });
         return true;
       },
     };
@@ -150,10 +167,17 @@ export default function (pi) {
     cancelRecovery();
     if ((!result?.switched && !result?.resume) || revision !== started || ctx.signal?.aborted
       || ctx.model?.provider !== 'chatgpt-subscription') return;
-    if (ctx.modelRegistry.authStorage.reload() !== 'loaded') return;
+    if (ctx.modelRegistry.authStorage.reload() !== 'loaded') {
+      recovery.log('resume_failed', [entry], { reason: 'auth_reload' });
+      return;
+    }
     // 同一模型的会话级重设会清除 OmO 为旧账户保留的 provider 额度冷却。
     if (!await pi.setSessionModel(ctx.model) || revision !== started || ctx.signal?.aborted
-      || ctx.model?.provider !== 'chatgpt-subscription') return;
+      || ctx.model?.provider !== 'chatgpt-subscription') {
+      recovery.log('resume_failed', [entry], { reason: 'model_or_session_changed' });
+      return;
+    }
+    recovery.log('resume_requested', [entry], { mode: 'inline' });
     if (ctx.hasUI) ctx.ui.notify('继续当前任务', 'info');
     return {
       entries: [...event.entries, {

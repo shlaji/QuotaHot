@@ -41,6 +41,8 @@ export type UsageResult = {
   readonly quotaAvailable: boolean | null;
   readonly windows: readonly Window[];
   readonly endpoint: string;
+  readonly transportCode?: string;
+  readonly elapsedMs?: number;
 };
 
 export type ConfigChange = {

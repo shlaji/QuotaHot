@@ -7,6 +7,7 @@ const proxies: Array<string | undici.ProxyAgent.Options> = [];
 const requests: string[] = [];
 let status = 200;
 let body = JSON.stringify({ rate_limit: { allowed: true } });
+let transportFailure: Error | undefined;
 mock.module('undici', {
   exports: {
     ...undici,
@@ -18,6 +19,7 @@ mock.module('undici', {
     },
     fetch: async (url: string) => {
       requests.push(url);
+      if (transportFailure) throw transportFailure;
       return new Response(body, { status });
     },
   },
@@ -30,6 +32,21 @@ const account = {
   expiresAt: Date.now() + 86400000, disabled: false, plan: '', subscriptionEndsAt: 0,
   userId: '', loginMethod: '', source: '', autoRefresh: false, syncPath: '', syncSource: '', idToken: '',
 } as const;
+
+test('hook usage preserves a transport cause code without exposing the exception message', async () => {
+  transportFailure = new TypeError('proxy credentials must not appear', {
+    cause: Object.assign(new Error('another private value'), { code: 'ECONNRESET' }),
+  });
+  try {
+    const result = await queryHookUsage(account, { proxy: '', noProxy: [] });
+    assert.equal(result.error, 'usage_network_error');
+    assert.equal(result.transportCode, 'ECONNRESET');
+    assert.equal(result.endpoint, 'https://chatgpt.com/backend-api/wham/usage');
+    assert.doesNotMatch(JSON.stringify(result), /credentials|private value/);
+  } finally {
+    transportFailure = undefined;
+  }
+});
 
 test('hook owns HTTP1 dispatchers and does not call wrapped global fetch', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('Headroom rejects this route'); });
