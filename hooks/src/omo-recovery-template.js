@@ -7,6 +7,7 @@ function createOmoRecovery() {
   const INTERVAL = 600_000;
   const BUFFER = 60_000;
   const MAX_FAILURES = 5;
+  const NETWORK_RETRY_DELAYS = [3_000, 10_000, 30_000];
   const statePath = omoJoin(process.env.QUOTAHOT_DATA_DIR ?? omoJoin(omoHome(), '.quotahot'), 'switch-state.json');
   const logDirectory = omoJoin(omoDirname(statePath), 'logs');
   const logPath = omoJoin(logDirectory, 'omo-recovery.jsonl');
@@ -60,7 +61,7 @@ function createOmoRecovery() {
     reading = (async () => {
       do {
         readAgain = false;
-        let next = { signature: '', receiptAt: 0, receiptKey: '', resetAt: Infinity };
+        let next = { signature: '', receiptAt: 0, receiptKey: '', receiptOutcome: null, resetAt: Infinity };
         try {
           const data = JSON.parse(await readOmoStateFile(statePath, 'utf8'));
           const quotas = Object.entries(data.accounts ?? {}).map(([id, memo]) =>
@@ -72,6 +73,7 @@ function createOmoRecovery() {
             && ['switched', 'available', 'no_candidate', 'network_error', 'check_failed'].includes(receipt.outcome)
             ? receipt.completedAt : 0;
           next = { signature: JSON.stringify(quotas), receiptAt,
+            receiptOutcome: receipt?.outcome,
             receiptKey: JSON.stringify([receipt?.omoRequest?.accountId, receipt?.omoRequest?.email, receipt?.omoRequest?.loginId]),
             resetAt: quotas.reduce((earliest, [, , reset, blocked]) => {
               const due = Number(blocked) + BUFFER > Date.now() ? Number(blocked) : Number(reset);
@@ -85,11 +87,16 @@ function createOmoRecovery() {
         state = next;
         if (external && (quotaChanged || receiptChanged)) for (const group of groups.values()) {
           if (!prune(group) || group.ready) continue;
-          const matchingReceipt = receiptChanged && next.receiptAt > 0 && next.receiptKey === group.identityKey;
+          // A failed network probe from this or another process must not bypass backoff.
+          const matchingReceipt = receiptChanged && next.receiptAt > 0 && next.receiptKey === group.identityKey
+            && next.receiptOutcome !== 'network_error';
           if (!quotaChanged && !matchingReceipt) continue;
           log('state_wakeup', group.entries, { quotaChanged, matchingReceipt, checkInProgress: group.running });
           if (matchingReceipt) group.checkAfter = next.receiptAt;
-          else group.failures = 0;
+          if (quotaChanged) {
+            group.failures = 0;
+            if (!group.running) group.networkFailures = 0;
+          }
           if (group.running) group.receiptPending ||= matchingReceipt;
           else schedule(group, 0);
         }
@@ -188,6 +195,7 @@ function createOmoRecovery() {
     const checkAfter = group.checkAfter ?? Date.now();
     let retryDelay;
     let contended = false;
+    let networkExhausted = false;
     try {
       await refresh(false);
       if (!prune(group)) return null;
@@ -201,15 +209,18 @@ function createOmoRecovery() {
       group.lastOutcome = outcome ?? 'check_failed';
       const available = outcome === 'available' || outcome === 'switched';
       contended = outcome === 'lock_contended';
-      retryDelay = outcome === 'network_error' ? group.networkDelay : undefined;
-      group.networkDelay = outcome === 'network_error' ? Math.min(group.networkDelay * 2, 300_000) : 5_000;
+      if (outcome === 'network_error') {
+        retryDelay = NETWORK_RETRY_DELAYS[group.networkFailures++];
+        networkExhausted = retryDelay === undefined;
+      } else if (!contended) group.networkFailures = 0;
       if (recover && !contended && outcome !== 'network_error') {
         group.delay = available ? INTERVAL : Math.min(group.delay * 2, 8 * INTERVAL);
       }
       group.hasData = result?.latestData === true;
       group.failures = group.hasData || available ? 0 : group.failures + 1;
       log('check_result', group.entries, { recover, outcome: group.lastOutcome,
-        latestData: group.hasData, failures: group.failures, ...(result?.checks ? { checks: result.checks } : {}) });
+        latestData: group.hasData, failures: group.failures, ...(retryDelay !== undefined ? { retryDelayMs: retryDelay } : {}),
+        ...(result?.checks ? { checks: result.checks } : {}) });
       group.waitUntil = Number.isFinite(result?.waitUntil) ? result.waitUntil : 0;
       await refresh(false);
       if (contended) {
@@ -222,8 +233,6 @@ function createOmoRecovery() {
       if (available) {
         group.ready = result;
         await deliver(group);
-      } else if (group.failures === MAX_FAILURES) {
-        for (const entry of group.entries) entry.notify('已停止自动额度查询，等待账户状态变化', 'info');
       }
       return result;
     } catch (error) {
@@ -232,6 +241,7 @@ function createOmoRecovery() {
       group.lastCheckedAt = Date.now();
       group.lastOutcome = 'check_failed';
       group.failures += 1;
+      group.networkFailures = 0;
       log('check_exception', group.entries, { recover, failures: group.failures });
       return null;
     } finally {
@@ -240,8 +250,11 @@ function createOmoRecovery() {
       if (prune(group)) {
         if (group.ready) schedule(group);
         else if (group.receiptPending) schedule(group, contended ? 1_000 : 0);
-        else if (group.hasData || group.failures < MAX_FAILURES) schedule(group, retryDelay);
-        else log('check_paused', group.entries, { reason: 'failure_limit', failures: group.failures });
+        else if (!networkExhausted && (retryDelay !== undefined || group.hasData || group.failures < MAX_FAILURES)) schedule(group, retryDelay);
+        else {
+          log('check_paused', group.entries, { reason: networkExhausted ? 'network_retry_limit' : 'failure_limit', failures: group.failures });
+          for (const entry of group.entries) entry.notify('已停止自动额度查询，等待账户状态变化', 'info');
+        }
       }
       group.receiptPending = false;
       publishStatus();
@@ -256,7 +269,7 @@ function createOmoRecovery() {
       if (!group) {
         group = { key: entry.key, identityKey: JSON.stringify([entry.identity.accountId, entry.identity.email, entry.identity.loginId]),
           entries: new Set(), initials: new Set(), failures: 0, delay: INTERVAL,
-          networkDelay: 5_000, retryAt: 0, waitUntil: 0, hasData: false, running: false,
+          networkFailures: 0, retryAt: 0, waitUntil: 0, hasData: false, running: false,
           nextCheckAt: null, lastCheckedAt: null, lastOutcome: null,
           checkAfter: null, ready: null, receiptPending: false };
         groups.set(entry.key, group);
