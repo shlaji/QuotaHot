@@ -75,10 +75,12 @@ let recoveryCheckAfter = null;
 let stateWatcher;
 let stateSignature = "";
 let stateReceiptAt = 0;
+let stateForcedSurveyAt = 0;
 let stateResetAt = 0;
 let stateReading = false;
 let stateReadAgain = false;
 let pendingExternalRecovery = false;
+let pendingForcedSurvey = false;
 let initialRecoveryWave;
 
 function publishRecoveryStatus() {
@@ -137,6 +139,7 @@ async function readRecoveryState() {
     return {
       signature: JSON.stringify(quotas),
       receiptAt,
+      forcedSurveyAt: state?.lastForcedCodexSurveyAt,
       resetAt: quotas.reduce((earliest, [, , resetAt, blockedUntil]) => {
         const next = Number(blockedUntil) + RESET_BUFFER_MS > now ? Number(blockedUntil) : Number(resetAt);
         return Number.isFinite(next) && next > 0 && next + RESET_BUFFER_MS > now ? Math.min(earliest, next) : earliest;
@@ -159,16 +162,24 @@ async function refreshRecoveryState(external) {
       const state = await readRecoveryState();
       const quotaChanged = state.signature !== stateSignature;
       const receiptChanged = state.receiptAt > 0 && state.receiptAt !== stateReceiptAt;
+      const queued = [...waitingSessions.values()].filter((entry) => entry.queued);
+      const forcedSurvey = queued.length && Number.isFinite(state.forcedSurveyAt) && state.forcedSurveyAt > stateForcedSurveyAt;
+      if (forcedSurvey) stateForcedSurveyAt = state.forcedSurveyAt;
       stateSignature = state.signature;
       stateReceiptAt = state.receiptAt;
       stateResetAt = state.resetAt;
-      if (external && (quotaChanged || receiptChanged) && [...waitingSessions.values()].some((entry) => entry.queued)) {
-        if (receiptChanged) recoveryCheckAfter = state.receiptAt;
-        if (quotaChanged) {
+      const manualWake = forcedSurvey && queued.some((entry) => state.forcedSurveyAt >= entry.started);
+      if (manualWake || (external && (quotaChanged || receiptChanged) && queued.length)) {
+        if (manualWake) recoveryCheckAfter = null;
+        else if (receiptChanged) recoveryCheckAfter = state.receiptAt;
+        if (quotaChanged || manualWake) {
           recoveryFailures = 0;
           if (!recoveryRunning) networkRetryDelay = NETWORK_RETRY_BASE_MS;
         }
-        if (recoveryRunning) pendingExternalRecovery = true;
+        if (recoveryRunning) {
+          pendingExternalRecovery = true;
+          pendingForcedSurvey ||= manualWake;
+        }
         else {
           clearTimeout(recoveryTimer);
           recoveryTimer = undefined;
@@ -244,8 +255,10 @@ function forget(entry, reason) {
     stateWatcher = undefined;
     stateSignature = "";
     stateReceiptAt = 0;
+    stateForcedSurveyAt = 0;
     stateResetAt = 0;
     pendingExternalRecovery = false;
+    pendingForcedSurvey = false;
   }
   publishRecoveryStatus();
 }
@@ -404,12 +417,14 @@ function scheduleRecovery(delay) {
     } finally {
       recoveryRunning = false;
       const followUp = pendingExternalRecovery;
+      const forcedFollowUp = pendingForcedSurvey;
       pendingExternalRecovery = false;
+      pendingForcedSurvey = false;
       if (contended) {
         recoveryRetryAt = Date.now() + LOCK_RETRY_MS;
         recoveryCheckAfter ??= checkAfter;
       } else if (!followUp) recoveryCheckAfter = null;
-      if (followUp && recoveryCheckAfter !== null) {
+      if (forcedFollowUp || (followUp && recoveryCheckAfter !== null)) {
         scheduleRecovery(contended ? LOCK_RETRY_MS : 0);
       } else if (contended) {
         scheduleRecovery(LOCK_RETRY_MS);
@@ -583,8 +598,8 @@ function createRecovery(client, run, notify) {
           entry.ready = result?.switched || result?.outcome === "switched" || result?.outcome === "available";
           entry.queued = !entry.ready;
           if (entry.queued) {
-            await refreshRecoveryState(false);
             watchRecoveryState();
+            await refreshRecoveryState(false);
           }
           if (result?.outcome === "lock_contended") {
             recoveryRetryAt = Date.now() + LOCK_RETRY_MS;

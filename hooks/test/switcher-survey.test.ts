@@ -62,6 +62,7 @@ test('survey preserves a concurrent switch receipt, clients and conflicting memo
   const persisted = await readState();
 
   assert.deepEqual(persisted.lastQuotaCheck, switchedState.lastQuotaCheck);
+  assert.ok((persisted.lastForcedCodexSurveyAt ?? 0) > 0);
   assert.deepEqual(persisted.clients, switchedState.clients);
   assert.deepEqual(persisted.accounts['codex:a@x.com'], switchedState.accounts['codex:a@x.com']);
   assert.deepEqual(persisted.accounts['codex:b@x.com'], switchedState.accounts['codex:b@x.com']);
@@ -72,13 +73,13 @@ test('survey preserves a concurrent switch receipt, clients and conflicting memo
   assert.equal(result.active.opencode, 'b@x.com');
 });
 
-test('survey returns results without persisting when the switch lock is held', async () => {
+test('ordinary surveys return results without persisting when the switch lock is held', async () => {
   reset();
   assessmentStarted = deferred();
   resumeAssessment = deferred();
   const original = { accounts: {}, clients: {} };
   await writeState(original);
-  const survey = surveyAccounts('codex', { threshold: 80, cacheMs: 0, check: true });
+  const survey = surveyAccounts('codex', { threshold: 80, cacheMs: 300_000, check: true });
   await assessmentStarted.promise;
 
   await withSwitchLock(async () => {
@@ -89,4 +90,25 @@ test('survey returns results without persisting when the switch lock is held', a
     assert.equal(result.active.opencode, 'a@x.com');
     assert.deepEqual(await readState(), original);
   });
+});
+
+test('forced Codex survey publishes a wakeup after a concurrent switch releases the lock', async () => {
+  reset();
+  assessmentStarted = deferred();
+  resumeAssessment = deferred();
+  await writeState({ accounts: {}, clients: {} });
+  const survey = surveyAccounts('codex', { threshold: 80, cacheMs: 0, check: true });
+  await assessmentStarted.promise;
+
+  await withSwitchLock(async () => {
+    resumeAssessment.resolve();
+    await writeState({ accounts: {}, clients: { opencode: { accountId: 'codex:b@x.com', email: 'b@x.com', switchedAt: 1 } } });
+  });
+
+  const result = await survey;
+  const persisted = await readState();
+  assert.equal(result.statuses.length, 2);
+  assert.ok(result.statuses.every((status) => status.source === 'live'));
+  assert.equal(persisted.clients.opencode?.email, 'b@x.com');
+  assert.ok((persisted.lastForcedCodexSurveyAt ?? 0) > 0);
 });

@@ -28,6 +28,7 @@ function createOmoRecovery() {
   let watcher, watchTimer, reading;
   let readAgain = false;
   let state = { signature: '', receiptAt: 0, receiptKey: '', resetAt: Infinity };
+  let forcedSurveyAt = 0;
 
   function cancel(entry) {
     const group = groups.get(entry.key);
@@ -45,6 +46,7 @@ function createOmoRecovery() {
     clearTimeout(watchTimer);
     watchTimer = undefined;
     state = { signature: '', receiptAt: 0, receiptKey: '', resetAt: Infinity };
+    forcedSurveyAt = 0;
   }
 
   function prune(group) {
@@ -58,8 +60,12 @@ function createOmoRecovery() {
       do {
         readAgain = false;
         let next = { signature: '', receiptAt: 0, receiptKey: '', resetAt: Infinity };
+        let manualSurveyAt = 0;
         try {
           const data = JSON.parse(await readOmoStateFile(statePath, 'utf8'));
+          if (Number.isFinite(data.lastForcedCodexSurveyAt) && data.lastForcedCodexSurveyAt > forcedSurveyAt) {
+            manualSurveyAt = forcedSurveyAt = data.lastForcedCodexSurveyAt;
+          }
           const quotas = Object.entries(data.accounts ?? {}).map(([id, memo]) =>
             [id, memo?.usedPercent, memo?.resetAt, memo?.blockedUntil]).sort(([a], [b]) => a.localeCompare(b));
           const receipt = data.lastOmoQuotaCheck;
@@ -80,17 +86,19 @@ function createOmoRecovery() {
         const quotaChanged = next.signature !== state.signature;
         const receiptChanged = next.receiptAt !== state.receiptAt;
         state = next;
-        if (external && (quotaChanged || receiptChanged)) for (const group of groups.values()) {
+        if (manualSurveyAt || (external && (quotaChanged || receiptChanged))) for (const group of groups.values()) {
           if (!prune(group) || group.ready) continue;
-          const matchingReceipt = receiptChanged && next.receiptAt > 0 && next.receiptKey === group.identityKey;
-          if (!quotaChanged && !matchingReceipt) continue;
-          log('state_wakeup', group.entries, { quotaChanged, matchingReceipt, checkInProgress: group.running });
-          if (matchingReceipt) group.checkAfter = next.receiptAt;
-          if (quotaChanged) {
+          const manualWake = manualSurveyAt > 0 && manualSurveyAt >= group.started;
+          const matchingReceipt = external && receiptChanged && next.receiptAt > 0 && next.receiptKey === group.identityKey;
+          if (!manualWake && !(external && quotaChanged) && !matchingReceipt) continue;
+          log('state_wakeup', group.entries, { quotaChanged, matchingReceipt, manualWake, checkInProgress: group.running });
+          if (manualWake) group.checkAfter = null;
+          else if (matchingReceipt) group.checkAfter = next.receiptAt;
+          if (quotaChanged || manualWake) {
             group.failures = 0;
             if (!group.running) group.networkDelay = NETWORK_RETRY_BASE_MS;
           }
-          if (group.running) group.receiptPending ||= matchingReceipt;
+          if (group.running) group.wakeupPending ||= manualWake || matchingReceipt;
           else schedule(group, 0);
         }
         external = readAgain;
@@ -219,7 +227,7 @@ function createOmoRecovery() {
         group.checkAfter ??= checkAfter;
       } else {
         group.retryAt = 0;
-        if (!group.receiptPending) group.checkAfter = null;
+        if (!group.wakeupPending) group.checkAfter = null;
       }
       if (available) {
         group.ready = result;
@@ -240,11 +248,11 @@ function createOmoRecovery() {
       group.inFlight = undefined;
       if (prune(group)) {
         if (group.ready) schedule(group);
-        else if (group.receiptPending) schedule(group, contended ? LOCK_RETRY_MS : 0);
+        else if (group.wakeupPending) schedule(group, contended ? LOCK_RETRY_MS : 0);
         else if (contended) schedule(group, LOCK_RETRY_MS);
         else schedule(group, group.hasData || group.failures >= HOURLY_RECOVERY_FAILURE_THRESHOLD ? undefined : retryDelay);
       }
-      group.receiptPending = false;
+      group.wakeupPending = false;
       publishStatus();
     }
   }
@@ -259,7 +267,7 @@ function createOmoRecovery() {
           entries: new Set(), initials: new Set(), failures: 0, delay: RECOVERY_INTERVAL_MS,
           networkDelay: NETWORK_RETRY_BASE_MS, retryAt: 0, waitUntil: 0, hasData: false, running: false,
           nextCheckAt: null, lastCheckedAt: null, lastOutcome: null,
-          checkAfter: null, ready: null, receiptPending: false };
+          started: Date.now(), checkAfter: null, ready: null, wakeupPending: false };
         groups.set(entry.key, group);
       }
       group.entries.add(entry);

@@ -125,7 +125,7 @@ async function assess(account: Account, state: SwitchState, config: SwitchOption
   const memo = state.accounts[account.id];
   if (memo && memo.blockedUntil > now && config.cacheMs > 0) return status(account, memo, 'cooldown');
   if (!config.check) return memo ? status(account, memo, 'cache') : { id: account.id, email: account.email, usable: true, usedPercent: null, resetAt: 0, source: 'skipped', error: '' };
-  if (memo && now - memo.checkedAt < config.cacheMs) return status(account, memo, 'cache');
+  if (memo && config.cacheMs > 0 && now - memo.checkedAt < config.cacheMs) return status(account, memo, 'cache');
   const fresh = config.dryRun ? account.expiresAt > now : await ensureFresh(account, network);
   if (!fresh) return { id: account.id, email: account.email, usable: false, usedPercent: memo?.usedPercent ?? null, resetAt: 0, source: 'error', error: config.dryRun ? '只读预览不能刷新过期或有效期未知的令牌' : '令牌已过期且续期失败' };
   const usage = await (config.usageQuery ?? queryHookUsage)(account, network);
@@ -211,15 +211,22 @@ export async function surveyAccounts(
     const account = await currentAccount(client, pool);
     if (account) active[client] = account.email;
   }
-  await withSwitchLock(async () => {
+  const wakeRecovery = provider === 'codex' && config.check && config.cacheMs === 0 &&
+    statuses.some((account) => account.source === 'live');
+  const persist = wakeRecovery ? waitForSwitchLock : withSwitchLock;
+  const saved = await persist(async () => {
     const latest = await readState();
     for (const [id, memo] of Object.entries(state.accounts)) {
       if (memo !== originalMemos[id] && isDeepStrictEqual(latest.accounts[id], originalMemos[id])) {
         latest.accounts[id] = memo;
       }
     }
-    await writeState(latest);
+    await writeState(wakeRecovery ? {
+      ...latest, lastForcedCodexSurveyAt: Math.max(Date.now(), (latest.lastForcedCodexSurveyAt ?? 0) + 1),
+    } : latest);
+    return true;
   });
+  if (wakeRecovery && saved === null) throw new Error('已查询额度，但等待写入恢复通知超时；请重试 status -c 0');
   return { statuses, active };
 }
 

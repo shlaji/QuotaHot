@@ -26,7 +26,7 @@ export const COMMAND_HELP: Readonly<Record<string, string>> = {
 查询账户额度与本机客户端在用账户，默认查询 Codex；可能更新本地额度缓存。
   --provider <codex|claude>  选择账户类型（默认 codex）。
   --threshold <percent>     上游未明确给出可用结论时，用于判断额度用尽的已用百分比（0–100，默认 80）。
-  -c, --cache-seconds <seconds> 优先使用指定秒数内的额度缓存（默认 300）。
+  -c, --cache-seconds <seconds> 使用指定秒数内的额度缓存（默认 300）；0 强制查询，成功取得 Codex 额度后唤醒等待中的恢复任务。
   --no-check               不请求上游，仅使用本地缓存；未知用量会标为 skipped。
   --json                   输出完整的账户状态和客户端登录映射。
 `,

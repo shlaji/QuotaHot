@@ -33,6 +33,7 @@ export type SwitchState = {
   }>;
   readonly lastQuotaCheck?: QuotaCheckReceipt;
   readonly lastOmoQuotaCheck?: QuotaCheckReceipt;
+  readonly lastForcedCodexSurveyAt?: number;
 };
 
 export const STATE_PATH = join(DATA_DIR, 'switch-state.json');
@@ -55,6 +56,8 @@ export async function readState(): Promise<SwitchState> {
       clients: record.clients && typeof record.clients === 'object' ? record.clients : {},
       ...(validQuotaCheck(record.lastQuotaCheck) ? { lastQuotaCheck: record.lastQuotaCheck } : {}),
       ...(validQuotaCheck(record.lastOmoQuotaCheck) ? { lastOmoQuotaCheck: record.lastOmoQuotaCheck } : {}),
+      ...(typeof record.lastForcedCodexSurveyAt === 'number' && Number.isFinite(record.lastForcedCodexSurveyAt)
+        ? { lastForcedCodexSurveyAt: record.lastForcedCodexSurveyAt } : {}),
     };
   } catch {
     return { accounts: {}, clients: {} };

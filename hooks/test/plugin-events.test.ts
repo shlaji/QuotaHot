@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import type { TestContext } from 'node:test';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { runInNewContext } from 'node:vm';
@@ -1615,7 +1616,7 @@ esac
   await plugin.event(idle('real')); assert.equal(prompts.length, 1);
 });
 
-test('generated ESM plugin observes an atomic external quota state rename', { timeout: 5000 }, async (t) => {
+for (const manual of [false, true]) test(`generated plugin rechecks after an atomic ${manual ? 'forced survey' : 'quota change'} update`, { timeout: 5000 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'quotahot-recovery-watch-'));
   t.after(async () => {
     for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -1651,11 +1652,48 @@ esac
     promptAsync: async () => { resolvePrompt(); return { data: undefined }; },
   } } });
   t.after(() => plugin.dispose());
-  await plugin.event(assistant('atomic', 'failed', 'openai', 10));
-  await plugin.event(terminal('atomic')); await plugin.event(idle('atomic'));
-  await writeFile(join(directory, 'switch-state.json.tmp'), JSON.stringify({ accounts: { external: {
-    usedPercent: 100, resetAt: Date.now() + 120_000, blockedUntil: Date.now() + 120_000,
-  } } }));
-  await rename(join(directory, 'switch-state.json.tmp'), join(directory, 'switch-state.json'));
+  const beginWaiting = async () => {
+    await plugin.event(assistant('atomic', 'failed', 'openai', 10));
+    await plugin.event(terminal('atomic')); await plugin.event(idle('atomic'));
+  };
+  if (manual) {
+    const email = 'manual@example.invalid';
+    const accountsDir = join(directory, 'accounts');
+    await mkdir(accountsDir);
+    await writeFile(join(accountsDir, 'codex-manual.json'), JSON.stringify({
+      type: 'codex', email, account_id: 'test', access_token: 'test', refresh_token: 'test',
+      expired: new Date(Date.now() + 86_400_000).toISOString(),
+    }));
+    // Seed the same values the mocked live query returns, then run the real CLI.
+    const unchanged = { usedPercent: null, resetAt: 0, blockedUntil: 0 };
+    const statePath = join(directory, 'switch-state.json');
+    await writeFile(statePath, JSON.stringify({ accounts: {
+      [`codex:${email}`]: { ...unchanged, checkedAt: Date.now() },
+    } }));
+    await beginWaiting();
+    const preload = `import { mock } from 'node:test';
+      mock.module(${JSON.stringify(import.meta.resolve('../src/usage.ts'))}, { exports: {
+        queryHookUsage: async () => ({ ok: true, quotaAvailable: true, windows: [] }),
+      } });`;
+    const runStatus = () => new Promise<string>((done, reject) => {
+      execFile(process.execPath, [
+        '--experimental-test-module-mocks', '--import', import.meta.resolve('tsx'),
+        '--import', `data:text/javascript,${encodeURIComponent(preload)}`,
+        resolve('src/index.ts'), 'status', '-c', '0', '--json',
+      ], { env: {
+        ...process.env, HOME: directory, QUOTAHOT_DATA_DIR: directory,
+        XDG_DATA_HOME: directory, XDG_CONFIG_HOME: directory,
+        OMO_CODING_AGENT_DIR: directory, PI_CODING_AGENT_DIR: directory, CODEX_HOME: directory,
+      } }, (error, stdout) => error ? reject(error) : done(stdout));
+    });
+    assert.partialDeepStrictEqual(JSON.parse(await runStatus()).statuses[0], { email, source: 'live' });
+    assert.partialDeepStrictEqual(JSON.parse(await readFile(statePath, 'utf8')).accounts[`codex:${email}`], unchanged);
+  } else {
+    await beginWaiting();
+    await writeFile(join(directory, 'switch-state.json.tmp'), JSON.stringify({ accounts: { external: {
+      usedPercent: 100, resetAt: Date.now() + 120_000, blockedUntil: Date.now() + 120_000,
+    } } }));
+    await rename(join(directory, 'switch-state.json.tmp'), join(directory, 'switch-state.json'));
+  }
   await continued;
 });

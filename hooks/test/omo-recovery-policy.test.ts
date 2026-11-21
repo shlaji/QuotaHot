@@ -190,6 +190,25 @@ test('OmO watcher errors retry local observation without polling the API on unch
   assert.equal(state.children.length, 2);
 });
 
+test('OmO follows up on a forced Codex survey received during a recovery check', async (t) => {
+  const state = omoRecoveryFixture(t);
+  await state.session('manual').fail({ outcome: 'network_error', latestData: false });
+  await state.advance(5_000);
+  assert.equal(state.children.length, 2);
+  // Even if the check's own read beats the watcher notification, don't lose the request.
+  state.setState({ lastForcedCodexSurveyAt: state.now() });
+  state.children[1]?.finish({ outcome: 'no_candidate', latestData: true });
+  await state.flush();
+  await state.advance(0);
+  assert.equal(state.children.length, 3);
+  state.children[2]?.finish({ outcome: 'no_candidate', latestData: true });
+  await state.flush();
+  state.emitState();
+  await state.flush();
+  await state.advance(0);
+  assert.equal(state.children.length, 3);
+});
+
 for (const inFlight of [false, true]) {
   test(`OmO joins an existing recovery with inFlight=${inFlight} without duplicate checks or continuation`, async (t) => {
     const state = omoRecoveryFixture(t);
