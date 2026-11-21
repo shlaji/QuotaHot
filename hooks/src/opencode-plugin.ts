@@ -4,12 +4,19 @@ import { join } from 'node:path';
 const placeholder = '"__QUOTAHOT_COMMAND_ARGS__"';
 const notificationPlaceholder = '"__QUOTAHOT_SESSION_NOTIFY_COMMAND_ARGS__"';
 const omoPlaceholder = '"__QUOTAHOT_OMO_COMMAND_ARGS__"';
+const recoveryPolicyMarker = '// __QUOTAHOT_RECOVERY_POLICY__';
+
+function inlineRecoveryPolicy(template: string): string {
+  if (!template.includes(recoveryPolicyMarker)) return template;
+  return template.replace(recoveryPolicyMarker,
+    () => readFileSync(join(import.meta.dirname, 'recovery-policy-template.js'), 'utf8'));
+}
 
 export function opencodePlugin(command: string | readonly string[]): string {
   const directory = import.meta.dirname;
   const template = readFileSync(join(directory, 'opencode-plugin-template.js'), 'utf8');
   if (template.split(placeholder).length !== 2) throw new Error('OpenCode plugin template must contain exactly one command placeholder');
-  return template.replace(placeholder, JSON.stringify(typeof command === 'string' ? [command] : command));
+  return inlineRecoveryPolicy(template).replace(placeholder, JSON.stringify(typeof command === 'string' ? [command] : command));
 }
 
 export function opencodeNotificationPlugin(command: string | readonly string[]): string {
@@ -33,5 +40,5 @@ export function omoPlugin(command: string | readonly string[]): string {
   const withStatus = source.includes(statusMarker)
     ? source.replace(statusMarker, readFileSync(join(import.meta.dirname, 'omo-recovery-status-template.js'), 'utf8'))
     : source;
-  return withStatus.replace(omoPlaceholder, JSON.stringify(typeof command === 'string' ? [command] : command));
+  return inlineRecoveryPolicy(withStatus).replace(omoPlaceholder, JSON.stringify(typeof command === 'string' ? [command] : command));
 }

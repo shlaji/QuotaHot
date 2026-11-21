@@ -727,6 +727,22 @@ test('fresh quota data with a reset deadline schedules one check after reset plu
   assert.equal(state.payloads.length, 2);
 });
 
+test('fresh quota data without a future reset waits for a quota change even after idle', async (t) => {
+  const state = await recoveryFixture(t);
+  await state.seed('fresh-no-reset');
+  const pending = state.plugin.event(terminal('fresh-no-reset')); await state.flush();
+  state.children.at(-1)?.finish('no_candidate', undefined, true); await pending;
+  await state.plugin.event(idle('fresh-no-reset'));
+
+  await state.advance(pollInterval);
+  assert.equal(state.children.length, 1, 'idle must not start another quota check without a reset');
+
+  state.setAccounts({ recovered: { usedPercent: 10, resetAt: 0, blockedUntil: 0 } });
+  state.emitState(); await state.flush(); await state.advance(0);
+  assert.equal(state.children.length, 2, 'a real quota change wakes the waiting session');
+  state.children.at(-1)?.finish('available', undefined, true); await state.flush();
+});
+
 test('failure observed during an in-flight check cannot bypass the retry delay', async (t) => {
   const state = await recoveryFixture(t); await state.fail('watcher-failure');
   await state.advance(pollInterval);
@@ -794,7 +810,7 @@ test('a receipt published during a recovery check is consumed before its retry b
   assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), ['receipt-in-flight']);
 });
 
-test('recovery stops quota polling after ten failures and waits for quota changes', async (t) => {
+test('recovery polls hourly after ten failures and wakes early for quota changes', async (t) => {
   const state = await recoveryFixture(t); await state.fail('bounded-recovery', 'network_error');
   const delays = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000, 300_000];
   for (const [index, delay] of delays.entries()) {
@@ -807,7 +823,6 @@ test('recovery stops quota polling after ten failures and waits for quota change
   }
 
   assert.equal(state.payloads.length, 10);
-  assert.ok(state.logs.some((message) => message.includes('recovery check attempt=10/10 outcome=network_error')));
   state.setQuotaCheckAt(Date.now(), 'network_error');
   state.emitState(); await state.flush(); await state.advance(0);
   await state.advance(300_000);
@@ -820,12 +835,18 @@ test('recovery stops quota polling after ten failures and waits for quota change
   history.push(user);
   await state.plugin.event({ event: { type: 'message.updated', properties: { info: user.info } } });
   await state.plugin.event({ event: { type: 'message.part.updated', properties: { part: user.parts[0] } } });
-  await state.advance(20 * pollInterval);
+  await state.advance(3_300_000 - 1);
   assert.equal(state.payloads.length, 10);
+  await state.advance(1);
+  assert.equal(state.payloads.length, 11);
+  state.children.at(-1)?.finish('network_error', undefined, false);
+  await state.flush();
+  await state.advance(3_600_000 - 1);
+  assert.equal(state.payloads.length, 11);
 
   state.setAccounts({ recovered: { usedPercent: 0, resetAt: 0, blockedUntil: 0 } });
   state.emitState(); await state.flush(); await state.advance(0);
-  assert.equal(state.payloads.length, 11);
+  assert.equal(state.payloads.length, 12);
   state.children.at(-1)?.finish('available'); await state.flush();
   assert.deepEqual(state.prompts.map((prompt) => prompt.path.id), [sessionID]);
 });

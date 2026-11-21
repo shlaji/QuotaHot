@@ -13,6 +13,7 @@ test('source CLI resolves its adjacent template from another working directory',
   const entry = join(packageRoot, 'src/index.ts');
   const loader = import.meta.resolve('tsx');
   const template = await readFile(join(packageRoot, 'src/opencode-plugin-template.js'), 'utf8');
+  const policy = await readFile(join(packageRoot, 'src/recovery-policy-template.js'), 'utf8');
   const command = [process.execPath, '--import', loader, entry, 'run', 'opencode'];
 
   const result = spawnSync(process.execPath, ['--import', loader, entry, 'install', '--print'], {
@@ -23,7 +24,9 @@ test('source CLI resolves its adjacent template from another working directory',
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout, `# ${join(root, 'opencode/plugin/quotahot.js')}\n${template.replace('"__QUOTAHOT_COMMAND_ARGS__"', JSON.stringify(command))}\n`);
+  const expected = template.replace('// __QUOTAHOT_RECOVERY_POLICY__', () => policy)
+    .replace('"__QUOTAHOT_COMMAND_ARGS__"', JSON.stringify(command));
+  assert.equal(result.stdout, `# ${join(root, 'opencode/plugin/quotahot.js')}\n${expected}\n`);
 });
 
 test('production build has no import.meta warning and resolves a relocated adjacent template', async (context) => {

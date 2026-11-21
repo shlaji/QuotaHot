@@ -15,8 +15,10 @@ test('自命令将相对入口转成绝对路径', () => {
 
 test('插件直接使用独立模板并以 JSON 数组替换完整命令参数', async () => {
   const template = await readFile(new URL('../src/opencode-plugin-template.js', import.meta.url), 'utf8');
+  const policy = await readFile(new URL('../src/recovery-policy-template.js', import.meta.url), 'utf8');
   const args = ['/tmp/quoted "hook" with spaces', '--import', 'file:///tmp/tsx loader', 'run', 'opencode'];
-  assert.equal(opencodePlugin(args), template.replace('"__QUOTAHOT_COMMAND_ARGS__"', JSON.stringify(args)));
+  assert.equal(opencodePlugin(args), template.replace('// __QUOTAHOT_RECOVERY_POLICY__', () => policy)
+    .replace('"__QUOTAHOT_COMMAND_ARGS__"', JSON.stringify(args)));
 });
 
 test('含空格的插件执行路径不会拆坏', async (t) => {

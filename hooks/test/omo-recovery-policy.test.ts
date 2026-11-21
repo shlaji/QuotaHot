@@ -38,7 +38,7 @@ for (const [outcome, delays] of [
   ['network_error', [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000, 300_000]],
   ['check_failed', [600_000, 1_200_000, 2_400_000, 4_800_000, 4_800_000, 4_800_000, 4_800_000, 4_800_000, 4_800_000]],
 ] as const) {
-  test(`OmO bounds ${outcome} retries and wakes for changed quota`, async (t) => {
+  test(`OmO polls hourly after ten ${outcome} failures and wakes for changed quota`, async (t) => {
     const state = omoRecoveryFixture(t);
     await state.session('bounded').fail({ outcome, latestData: false });
     for (const [index, delay] of delays.entries()) {
@@ -49,7 +49,7 @@ for (const [outcome, delays] of [
       state.children.at(-1)?.finish({ outcome, latestData: false });
       await state.flush();
     }
-    await state.advance(86_400_000);
+    await state.advance(3_600_000 - 1);
     state.emitState(); await state.flush(); await state.advance(0);
     assert.equal(state.children.length, delays.length + 1);
     if (outcome === 'network_error') {
@@ -60,15 +60,23 @@ for (const [outcome, delays] of [
       state.emitState(); await state.flush(); await state.advance(0);
       assert.equal(state.children.length, delays.length + 1);
     }
+    await state.advance(1);
+    assert.equal(state.children.length, 11);
+    state.children.at(-1)?.finish({ outcome, latestData: false });
+    await state.flush();
+    await state.advance(3_600_000 - 1);
+    assert.equal(state.children.length, 11);
+    await state.advance(1);
+    assert.equal(state.children.length, 12);
+    state.children.at(-1)?.finish({ outcome, latestData: false });
+    await state.flush();
+
     const log = () => (state.logs.get('/isolated/data/logs/omo-recovery.jsonl') ?? '').trim()
       .split('\n').filter(Boolean).map((line) => JSON.parse(line));
-    assert.ok(log().some((event) => event.event === 'check_paused'
-      && event.reason === 'failure_limit'
-      && event.failures === delays.length + 1 && event.sessions[0] === 'bounded'));
 
     state.setState({ accounts: { recovered: { usedPercent: 0, resetAt: 0, blockedUntil: 0 } } });
     state.emitState(); await state.flush(); await state.advance(0);
-    assert.equal(state.children.length, delays.length + 2);
+    assert.equal(state.children.length, 13);
     state.children.at(-1)?.finish({ outcome: 'available', resume: true, latestData: true });
     await state.flush();
     assert.deepEqual(state.messages, ['bounded']);

@@ -48,13 +48,8 @@ const assistantMessages = new Map();
 const lookupPromises = new Map();
 const deletedSessions = new Map();
 
-const RECOVERY_INTERVAL_MS = 600000;
+// __QUOTAHOT_RECOVERY_POLICY__
 const MAX_TIMER_DELAY_MS = 2147483647;
-const NETWORK_RETRY_BASE_MS = 5000;
-const NETWORK_RETRY_MAX_MS = 300000;
-const MAX_RECOVERY_FAILURES = 10;
-const LOCK_RETRY_MS = 1000;
-const RESET_BUFFER_MS = 60000;
 const STATE_WATCH_RETRY_MS = 1000;
 const STATE_PATH = join(process.env.QUOTAHOT_DATA_DIR ?? join(homedir(), ".quotahot"), "switch-state.json");
 const RECOVERY_STATUS_DIR = "recovery-status";
@@ -336,7 +331,7 @@ async function resume(entry) {
         forget(entry, reason); return;
       }
       if (entry.blocked) return;
-      if (entry.queued && recoveryFailures < MAX_RECOVERY_FAILURES) scheduleRecovery();
+      if (entry.queued) scheduleRecovery();
       if (!entry.ready || !entry.terminal || entry.status !== "idle") return;
       if (completedFailures.has(failureKey(entry))) { forget(entry); return; }
       const status = await sdkRequest(() => entry.owner.client.session.status());
@@ -361,12 +356,13 @@ async function resume(entry) {
 
 function scheduleRecovery(delay) {
   if (recoveryTimer || recoveryRunning || ![...waitingSessions.values()].some((entry) => entry.queued && !entry.blocked)) return;
-  const due = Math.min(recoveryWaitUntil > 0 && recoveryWaitUntil + RESET_BUFFER_MS > Date.now() ? recoveryWaitUntil + RESET_BUFFER_MS : Infinity,
-    Number.isFinite(stateResetAt) && stateResetAt > 0 && stateResetAt + RESET_BUFFER_MS > Date.now()
-      ? stateResetAt + RESET_BUFFER_MS : Infinity);
-  const wait = recoveryRetryAt > Date.now() ? recoveryRetryAt - Date.now()
-    : delay ?? (Number.isFinite(due) ? Math.max(0, due - Date.now()) : recoveryDelay);
-  const deadline = Date.now() + wait;
+  const now = Date.now();
+  const wait = quotaRecoveryDelay({
+    now, waitUntil: recoveryWaitUntil, stateResetAt, retryAt: recoveryRetryAt,
+    delay, hasData: recoveryHasLatestData, failures: recoveryFailures, backoff: recoveryDelay,
+  });
+  if (wait === undefined) return;
+  const deadline = now + wait;
   const check = async () => {
     recoveryTimer = undefined;
     nextCheckAt = null;
@@ -402,7 +398,7 @@ function scheduleRecovery(delay) {
         entry.queued = !entry.ready;
       }
       publishRecoveryStatus();
-      owner.logRecovery("check attempt=" + attempt + "/" + MAX_RECOVERY_FAILURES + " outcome=" + lastCheckResult +
+      owner.logRecovery("check attempt=" + attempt + " outcome=" + lastCheckResult +
         " latestData=" + recoveryHasLatestData + " waitUntil=" + (recoveryWaitUntil || "none"));
       await Promise.all(entries.map(resume));
     } finally {
@@ -417,10 +413,9 @@ function scheduleRecovery(delay) {
         scheduleRecovery(contended ? LOCK_RETRY_MS : 0);
       } else if (contended) {
         scheduleRecovery(LOCK_RETRY_MS);
-      } else if (recoveryHasLatestData) {
-        if (recoveryWaitUntil > Date.now() || stateResetAt > Date.now()) scheduleRecovery();
-      } else if (recoveryFailures < MAX_RECOVERY_FAILURES) {
-        scheduleRecovery(followUp ? Math.max(retryDelay ?? recoveryDelay, contended ? LOCK_RETRY_MS : 0) : retryDelay);
+      } else {
+        const backoff = followUp ? retryDelay ?? recoveryDelay : retryDelay;
+        scheduleRecovery(recoveryHasLatestData || recoveryFailures >= HOURLY_RECOVERY_FAILURE_THRESHOLD ? undefined : backoff);
       }
       owner?.logRecovery("nextCheckAt=" + (nextCheckAt === null ? "none" : nextCheckAt) +
         " failures=" + recoveryFailures);
@@ -467,7 +462,7 @@ async function runInitialRecovery(wave, owner, run, payload) {
         recoveryFailures = recoveryHasLatestData || outcome === "switched" || outcome === "available" ? 0 : recoveryFailures + 1;
       }
       recoveryWaitUntil = Number.isFinite(result?.waitUntil) && result.waitUntil > Date.now() ? result.waitUntil : 0;
-      owner.logRecovery("check attempt=" + attempt + "/" + MAX_RECOVERY_FAILURES + " outcome=" + (outcome || "unknown") +
+      owner.logRecovery("check attempt=" + attempt + " outcome=" + (outcome || "unknown") +
         " latestData=" + recoveryHasLatestData + " waitUntil=" + (recoveryWaitUntil || "none"));
       return { result, retryDelay };
     })();
@@ -596,9 +591,9 @@ function createRecovery(client, run, notify) {
             clearTimeout(recoveryTimer);
             recoveryTimer = undefined;
             scheduleRecovery(LOCK_RETRY_MS);
-          } else if (recoveryHasLatestData) {
-            if (recoveryWaitUntil > Date.now() || stateResetAt > Date.now()) scheduleRecovery();
-          } else if (recoveryFailures < MAX_RECOVERY_FAILURES) scheduleRecovery(retryDelay);
+          } else {
+            scheduleRecovery(recoveryHasLatestData || recoveryFailures >= HOURLY_RECOVERY_FAILURE_THRESHOLD ? undefined : retryDelay);
+          }
           owner.logRecovery("nextCheckAt=" + (nextCheckAt === null ? "none" : nextCheckAt) +
             " failures=" + recoveryFailures);
           publishRecoveryStatus();

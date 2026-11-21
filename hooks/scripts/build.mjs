@@ -22,14 +22,20 @@ const result = await build({
   define: { __QUOTAHOT_VERSION__: JSON.stringify(hookPackage.version), 'import.meta.dirname': '__dirname' },
 });
 await chmod('dist/quotahot-hook', 0o755);
-await copyFile('src/opencode-plugin-template.js', 'dist/opencode-plugin-template.js');
+const recoveryPolicyMarker = '// __QUOTAHOT_RECOVERY_POLICY__';
+const recoveryPolicy = await readFile('src/recovery-policy-template.js', 'utf8');
+function inlineRecoveryPolicy(template) {
+  if (template.split(recoveryPolicyMarker).length !== 2) throw new Error('Plugin template must contain exactly one recovery policy marker');
+  return template.replace(recoveryPolicyMarker, () => recoveryPolicy);
+}
+await writeFile('dist/opencode-plugin-template.js', inlineRecoveryPolicy(await readFile('src/opencode-plugin-template.js', 'utf8')));
 await copyFile('src/opencode-notification-plugin-template.js', 'dist/opencode-notification-plugin-template.js');
 const omoTemplate = await readFile('src/omo-plugin-template.js', 'utf8');
 const recoveryMarker = '// __QUOTAHOT_OMO_RECOVERY__';
 if (omoTemplate.split(recoveryMarker).length !== 2) throw new Error('OmO plugin template must contain exactly one recovery marker');
 const statusMarker = '// __QUOTAHOT_OMO_RECOVERY_STATUS__';
 if (omoTemplate.split(statusMarker).length !== 2) throw new Error('OmO plugin template must contain exactly one status marker');
-await writeFile('dist/omo-plugin-template.js', omoTemplate
+await writeFile('dist/omo-plugin-template.js', inlineRecoveryPolicy(omoTemplate)
   .replace(recoveryMarker, await readFile('src/omo-recovery-template.js', 'utf8'))
   .replace(statusMarker, await readFile('src/omo-recovery-status-template.js', 'utf8')));
 await writeFile('dist/package.json', '{"type":"commonjs"}\n');

@@ -4,11 +4,6 @@ import { homedir as omoHome } from 'node:os';
 import { dirname as omoDirname, join as omoJoin } from 'node:path';
 
 function createOmoRecovery() {
-  const INTERVAL = 600_000;
-  const BUFFER = 60_000;
-  const MAX_FAILURES = 10;
-  const NETWORK_RETRY_BASE_MS = 5_000;
-  const NETWORK_RETRY_MAX_MS = 300_000;
   const statePath = omoJoin(process.env.QUOTAHOT_DATA_DIR ?? omoJoin(omoHome(), '.quotahot'), 'switch-state.json');
   const logDirectory = omoJoin(omoDirname(statePath), 'logs');
   const logPath = omoJoin(logDirectory, 'omo-recovery.jsonl');
@@ -76,8 +71,8 @@ function createOmoRecovery() {
           next = { signature: JSON.stringify(quotas), receiptAt,
             receiptKey: JSON.stringify([receipt?.omoRequest?.accountId, receipt?.omoRequest?.email, receipt?.omoRequest?.loginId]),
             resetAt: quotas.reduce((earliest, [, , reset, blocked]) => {
-              const due = Number(blocked) + BUFFER > Date.now() ? Number(blocked) : Number(reset);
-              return Number.isFinite(due) && due > 0 && due + BUFFER > Date.now() ? Math.min(earliest, due) : earliest;
+              const due = Number(blocked) + RESET_BUFFER_MS > Date.now() ? Number(blocked) : Number(reset);
+              return Number.isFinite(due) && due > 0 && due + RESET_BUFFER_MS > Date.now() ? Math.min(earliest, due) : earliest;
             }, Infinity) };
         } catch {
           // 文件尚未生成或正在被替换时，保留本地等待。
@@ -132,25 +127,22 @@ function createOmoRecovery() {
     watchTimer.unref?.();
   }
 
-  function resetDeadline(group) {
-    const future = [group.waitUntil, state.resetAt].filter((time) =>
-      Number.isFinite(time) && time > 0 && time + BUFFER > Date.now());
-    return future.length ? Math.min(...future) + BUFFER : Infinity;
-  }
-
   function schedule(group, delay) {
     if (!prune(group) || group.running) return;
     clearTimeout(group.timer);
-    const due = resetDeadline(group);
-    if (!group.ready && delay === undefined && (group.hasData ? !Number.isFinite(due) : group.failures >= MAX_FAILURES)) {
+    const now = Date.now();
+    const wait = group.ready ? 1_000 : quotaRecoveryDelay({
+      now, waitUntil: group.waitUntil, stateResetAt: state.resetAt, retryAt: group.retryAt,
+      delay, hasData: group.hasData, failures: group.failures, backoff: group.delay,
+    });
+    if (wait === undefined) {
       group.timer = undefined;
       group.nextCheckAt = null;
-      log('check_paused', group.entries, { reason: group.hasData ? 'no_future_reset' : 'failure_limit', failures: group.failures });
+      log('check_paused', group.entries, { reason: 'no_future_reset', failures: group.failures });
       publishStatus();
       return;
     }
-    const deadline = group.ready ? Date.now() + 1_000 : group.retryAt > Date.now() ? group.retryAt
-      : Date.now() + (delay ?? (Number.isFinite(due) ? due - Date.now() : group.delay));
+    const deadline = now + wait;
     group.nextCheckAt = deadline;
     publishStatus();
     const arm = () => {
@@ -211,7 +203,7 @@ function createOmoRecovery() {
         group.networkDelay = Math.min(group.networkDelay * 2, NETWORK_RETRY_MAX_MS);
       } else if (!contended) group.networkDelay = NETWORK_RETRY_BASE_MS;
       if (recover && !contended && outcome !== 'network_error') {
-        group.delay = available ? INTERVAL : Math.min(group.delay * 2, 8 * INTERVAL);
+        group.delay = available ? RECOVERY_INTERVAL_MS : Math.min(group.delay * 2, 8 * RECOVERY_INTERVAL_MS);
       }
       if (!contended) {
         group.hasData = result?.latestData === true;
@@ -223,7 +215,7 @@ function createOmoRecovery() {
       group.waitUntil = Number.isFinite(result?.waitUntil) ? result.waitUntil : 0;
       await refresh(false);
       if (contended) {
-        group.retryAt = Date.now() + 1_000;
+        group.retryAt = Date.now() + LOCK_RETRY_MS;
         group.checkAfter ??= checkAfter;
       } else {
         group.retryAt = 0;
@@ -248,13 +240,9 @@ function createOmoRecovery() {
       group.inFlight = undefined;
       if (prune(group)) {
         if (group.ready) schedule(group);
-        else if (group.receiptPending) schedule(group, contended ? 1_000 : 0);
-        else if (contended) schedule(group, 1_000);
-        else if (group.hasData || group.failures < MAX_FAILURES) schedule(group, group.hasData ? undefined : retryDelay);
-        else {
-          log('check_paused', group.entries, { reason: 'failure_limit', failures: group.failures });
-          for (const entry of group.entries) entry.notify('已停止自动额度查询，等待账户状态变化', 'info');
-        }
+        else if (group.receiptPending) schedule(group, contended ? LOCK_RETRY_MS : 0);
+        else if (contended) schedule(group, LOCK_RETRY_MS);
+        else schedule(group, group.hasData || group.failures >= HOURLY_RECOVERY_FAILURE_THRESHOLD ? undefined : retryDelay);
       }
       group.receiptPending = false;
       publishStatus();
@@ -268,7 +256,7 @@ function createOmoRecovery() {
       let group = groups.get(entry.key);
       if (!group) {
         group = { key: entry.key, identityKey: JSON.stringify([entry.identity.accountId, entry.identity.email, entry.identity.loginId]),
-          entries: new Set(), initials: new Set(), failures: 0, delay: INTERVAL,
+          entries: new Set(), initials: new Set(), failures: 0, delay: RECOVERY_INTERVAL_MS,
           networkDelay: NETWORK_RETRY_BASE_MS, retryAt: 0, waitUntil: 0, hasData: false, running: false,
           nextCheckAt: null, lastCheckedAt: null, lastOutcome: null,
           checkAfter: null, ready: null, receiptPending: false };
