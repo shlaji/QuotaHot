@@ -175,6 +175,10 @@ export class WechatLoginService {
     return existed;
   }
 
+  isBindingChanging(owner: string): boolean {
+    return this.#ownerChanges.has(owner);
+  }
+
   #disableOwnerBinding(owner: string): void {
     this.#store.pauseBinding(owner);
     this.#ownerGenerations.set(owner, (this.#ownerGenerations.get(owner) ?? 0) + 1);

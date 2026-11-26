@@ -126,11 +126,38 @@ export function InboxPane({ active }: { readonly active: boolean }) {
   useEffect(() => { loader.setActive(active); return () => loader.setActive(false); }, [active, loader]);
   useEffect(() => {
     if (!active) return;
-    const timer = window.setInterval(() => {
+    let source: EventSource | undefined;
+    let timer: number | undefined;
+    let pageHidden = false;
+    const refresh = () => {
       const current = loader.getState();
       if (!current.bindingsLoading) void loader.refresh();
-    }, 5_000);
-    return () => window.clearInterval(timer);
+    };
+    const disconnect = () => {
+      source?.close();
+      source = undefined;
+      window.clearInterval(timer);
+      timer = undefined;
+    };
+    const syncVisibility = () => {
+      if (pageHidden || document.visibilityState !== 'visible') { disconnect(); return; }
+      if (source) return;
+      source = new EventSource('/api/wechat-inbox/presence');
+      source.addEventListener('ready', refresh);
+      timer = window.setInterval(refresh, 5_000);
+    };
+    const hide = () => { pageHidden = true; disconnect(); };
+    const show = () => { pageHidden = false; syncVisibility(); };
+    document.addEventListener('visibilitychange', syncVisibility);
+    window.addEventListener('pagehide', hide);
+    window.addEventListener('pageshow', show);
+    syncVisibility();
+    return () => {
+      document.removeEventListener('visibilitychange', syncVisibility);
+      window.removeEventListener('pagehide', hide);
+      window.removeEventListener('pageshow', show);
+      disconnect();
+    };
   }, [active, loader]);
   useEffect(() => { controls.setActive(active); return () => controls.setActive(false); }, [active, controls]);
   useEffect(() => { if (active && controlState.revision > 0) void loader.refresh(); }, [active, controlState.revision, loader]);

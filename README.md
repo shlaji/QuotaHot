@@ -548,7 +548,9 @@ Web 页面顶栏会显示当前运行服务的版本号。
 
 在微信页的**绑定用户**列表中点击**添加微信用户**即可申请二维码，不需要先在配置页填写 AppID 或 `Secret-Key`。空列表与非空列表都保留此入口，二维码及取消操作放在列表区内，不再设置顶部微信会话或退出登录区域。服务端通过 `GET https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3` 获取二维码，再以 `POST https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status` 轮询扫码结果；轮询请求使用 `application/x-www-form-urlencoded` 编码的 `qrcode` 字段，以及协议要求的 `iLink-App-Id: bot`、`iLink-App-ClientVersion: 131584` 请求头。
 
-浏览器只访问 QuotaHot 的同源 API，并显示服务端生成的本地二维码 SVG，不会取得 iLink 的原始二维码凭据或 `bot_token`。扫码确认后只保存或更新该微信用户的绑定凭证，不签发或要求持久 `quotahot_wechat` 浏览器会话 cookie。短期 `quotahot_wechat_flow` cookie 仍保留，仅用于保护本次二维码的轮询和取消，不是绑定列表或消息 API 的登录凭证。取消、切离微信页、二维码过期或重新扫码只结束或替换待完成流程，不停止已有绑定收发。
+浏览器只访问 QuotaHot 的同源 API，并显示服务端生成的本地二维码 SVG，不会取得 iLink 的原始二维码凭据或 `bot_token`。扫码确认后只保存或更新该微信用户的绑定凭证，不签发或要求持久 `quotahot_wechat` 浏览器会话 cookie。短期 `quotahot_wechat_flow` cookie 仍保留，仅用于保护本次二维码的轮询和取消，不是绑定列表或消息 API 的登录凭证。取消、切离微信页、二维码过期或重新扫码会结束或替换待完成流程，不会解除已有绑定。
+
+只有至少一个可见的 QuotaHot「微信对话」页通过同源 SSE 连接在线时，服务端才会为未暂停的绑定向 iLink 长轮询收件。切走、隐藏或关闭最后一个微信页后停止收件；服务重启时不在后台自动监听。再次打开页面会从已保存的游标继续，绑定和本地历史不受影响；离线期间的消息能否补收取决于上游保留情况。
 
 扫码流程 cookie 保持 `HttpOnly`、`SameSite=Strict` 和 `/api/wechat` 路径；服务端请求为 HTTPS 时设置 `Secure`，HTTP 时不设置。服务端不信任 `Forwarded` 或 `X-Forwarded-Proto`：HTTPS 在反向代理终止、代理以 HTTP 连接 QuotaHot 时，服务端无法确认外部协议，代理必须为该 cookie 添加 `Secure` 并阻止通过外部 HTTP 访问。HTTP 直连会明文传输流程 cookie，应仅在可信网络中使用。
 

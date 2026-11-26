@@ -13,6 +13,9 @@ import { basename } from 'node:path';
 import { WECHAT_DB_PATH } from '../src/server/config.js';
 import { WechatSessionStore } from '../src/server/wechat-session-store.js';
 import { WechatInboxStore } from '../src/server/wechat-inbox/store.js';
+import { existsSync } from 'node:fs';
+import { build } from 'esbuild';
+import { chromium } from 'playwright-core';
 
 const entry = new URL('../src/main.ts', import.meta.url).pathname;
 const networkBarrier = `data:text/javascript,${encodeURIComponent(`
@@ -310,6 +313,7 @@ test('WeChat QR routes retain Web auth and cross-site protection', async (contex
   const authorization = `Basic ${Buffer.from('wechat-test:local-test-password').toString('base64')}`;
   for (const [path, method] of [['/api/wechat/qrcode', 'POST'], ['/api/wechat/qrcode/unknown', 'GET'],
     ['/api/wechat/qrcode/unknown', 'DELETE'], ['/api/wechat-inbox/bindings', 'GET'],
+    ['/api/wechat-inbox/presence', 'GET'],
     ['/api/wechat/bindings/unknown', 'DELETE']]) {
     const denied = await fetch(`${server.base}${path}`, { method });
     assert.equal(denied.status, 401);
@@ -335,7 +339,7 @@ test('WeChat QR routes retain Web auth and cross-site protection', async (contex
   assert.deepEqual(await saved.json(), { status: 'unavailable' });
 });
 
-test('inbox restart recovers active owners and interrupted sends but preserves persisted pause and unlink history', async (context) => {
+test('inbox restart stays idle without a viewer and preserves interrupted sends, pause and unlink history', async (context) => {
   const dataDir = await mkdtemp(join(tmpdir(), 'quotahot-inbox-recovery-'));
   context.after(() => rm(dataDir, { recursive: true, force: true }));
   const sessionPath = join(dataDir, 'wechat', basename(WECHAT_DB_PATH));
@@ -364,7 +368,8 @@ test('inbox restart recovers active owners and interrupted sends but preserves p
   try {
     const bindings = await (await fetch(`${first.base}/api/wechat-inbox/bindings`)).json();
     assert.equal(bindings.length, 3);
-    assert.ok(bindings.every((binding: { connectionState: string }) => binding.connectionState !== 'stopped'));
+    assert.deepEqual(bindings.map((binding: { connectionState: string }) => binding.connectionState), ['stopped', 'stopped', 'stopped']);
+    assert.doesNotMatch(first.output(), /TEST_OUTBOUND_BLOCKED/);
     const verifiedContext = bindings.find((binding: { ownerIlinkUserId: string }) => binding.ownerIlinkUserId === 'other');
     assert.equal(verifiedContext?.replyContextState, 'ready');
     assert.equal(Object.hasOwn(verifiedContext ?? {}, 'messagingReadiness'), false);
@@ -386,7 +391,7 @@ test('inbox restart recovers active owners and interrupted sends but preserves p
       assert.deepEqual(await denied.json(), { error: 'wechat_inbox_binding_read_only' });
     }
     const other = await (await fetch(`${first.base}/api/wechat-inbox/bindings`)).json();
-    assert.notEqual(other.find((binding: { ownerIlinkUserId: string }) => binding.ownerIlinkUserId === 'other')?.connectionState, 'stopped');
+    assert.equal(other.find((binding: { ownerIlinkUserId: string }) => binding.ownerIlinkUserId === 'other')?.connectionState, 'stopped');
   } finally { await first.kill(); }
   const paused = new WechatSessionStore(sessionPath);
   paused.pauseBinding('active');
@@ -398,7 +403,8 @@ test('inbox restart recovers active owners and interrupted sends but preserves p
     assert.equal(bindings.find((binding) => binding.ownerIlinkUserId === 'active')?.connectionState, 'stopped');
     assert.equal(bindings.find((binding) => binding.ownerIlinkUserId === 'active')?.canSend, false);
     assert.equal(bindings.find((binding) => binding.ownerIlinkUserId === 'unlink')?.connectionState, 'unlinked');
-    assert.notEqual(bindings.find((binding) => binding.ownerIlinkUserId === 'other')?.connectionState, 'stopped');
+    assert.equal(bindings.find((binding) => binding.ownerIlinkUserId === 'other')?.connectionState, 'stopped');
+    assert.doesNotMatch(restarted.output(), /TEST_OUTBOUND_BLOCKED/);
   } finally { await restarted.kill('SIGINT'); }
   const recovered = new WechatInboxStore(inboxPath);
   const persisted = new WechatSessionStore(sessionPath);
@@ -413,6 +419,129 @@ test('inbox restart recovers active owners and interrupted sends but preserves p
     assert.ok(recovered.getBinding('unlink')?.unlinkedAt);
     assert.doesNotMatch(`${first.output()}${restarted.output()}`, /database is closed|SQLITE_MISUSE|synthetic-/i);
   } finally { recovered.close(); persisted.close(); }
+});
+
+test('the last WeChat presence stream controls whether unpaused inbox bindings poll', async (context) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'quotahot-inbox-presence-'));
+  context.after(() => rm(dataDir, { recursive: true, force: true }));
+  const sessions = new WechatSessionStore(join(dataDir, 'wechat', basename(WECHAT_DB_PATH)));
+  for (const owner of ['active', 'paused']) {
+    sessions.saveBinding({
+      ownerIlinkUserId: owner, botId: `bot-${owner}`, botToken: `synthetic-${owner}`, baseUrl: 'https://api.test',
+    }, Date.now());
+  }
+  sessions.pauseBinding('paused');
+  sessions.close();
+  const server = await serveOn(dataDir);
+  context.after(() => server.kill());
+  const root = `${server.base}/api/wechat-inbox`;
+  const states = async () => {
+    const response = await fetch(`${root}/bindings`);
+    assert.equal(response.status, 200);
+    const bindings: { ownerIlinkUserId: string; connectionState: string }[] = await response.json();
+    return Object.fromEntries(bindings.map((binding) => [binding.ownerIlinkUserId, binding.connectionState]));
+  };
+  async function open() {
+    const controller = new AbortController();
+    context.after(() => controller.abort());
+    const response = await fetch(`${root}/presence`, { headers: { accept: 'text/event-stream' },
+      signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5_000)]) });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type') ?? '', /^text\/event-stream/);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const reader = response.body?.getReader();
+    assert.ok(reader);
+    assert.match(new TextDecoder().decode((await reader.read()).value), /event: ready/);
+    return () => controller.abort();
+  }
+
+  assert.equal((await fetch(`${root}/presence`)).status, 406, 'a plain read must not start reception');
+  assert.equal((await fetch(`${root}/presence`, { headers: {
+    accept: 'text/event-stream', 'sec-fetch-site': 'same-site',
+  } })).status, 403, 'a different origin must not open a viewer');
+  const closeFirst = await open();
+  const closeSecond = await open();
+  const state = await states();
+  assert.notEqual(state.active, 'stopped');
+  assert.equal(state.paused, 'stopped');
+  assert.match(server.output(), /TEST_OUTBOUND_BLOCKED/);
+
+  closeFirst();
+  assert.notEqual((await states()).active, 'stopped');
+  closeSecond();
+  await assert.doesNotReject(async () => {
+    const deadline = AbortSignal.timeout(3_000);
+    while ((await states()).active !== 'stopped') {
+      deadline.throwIfAborted();
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+  });
+  assert.deepEqual(await states(), { active: 'stopped', paused: 'stopped' });
+  const closeReopened = await open();
+  assert.notEqual((await states()).active, 'stopped');
+  closeReopened();
+});
+
+const inboxBrowser = process.env.QUOTAHOT_TEST_BROWSER ?? '/usr/bin/google-chrome';
+test('WeChat reception follows the visible browser page and selected app tab', {
+  skip: !existsSync(inboxBrowser),
+}, async (context) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'quotahot-inbox-browser-'));
+  context.after(() => rm(dataDir, { recursive: true, force: true }));
+  const sessions = new WechatSessionStore(join(dataDir, 'wechat', basename(WECHAT_DB_PATH)));
+  sessions.saveBinding({
+    ownerIlinkUserId: 'browser-owner', botId: 'synthetic-bot', botToken: 'synthetic-token', baseUrl: 'https://api.test',
+  }, Date.now());
+  sessions.close();
+  const server = await serveOn(dataDir);
+  context.after(() => server.kill());
+  const bundle = await build({
+    stdin: { resolveDir: process.cwd(), loader: 'tsx', contents: `
+      import { createElement } from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { App } from './src/web/App.tsx';
+      createRoot(document.getElementById('root')).render(createElement(App));
+    ` },
+    bundle: true, write: false, outdir: '/tmp/quotahot-inbox-browser-test', format: 'iife',
+    define: { 'process.env.NODE_ENV': '"production"' },
+  });
+  const script = bundle.outputFiles.find((file) => file.path.endsWith('.js'));
+  assert.ok(script);
+  const browser = await chromium.launch({ executablePath: inboxBrowser, headless: true });
+  context.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.route(`${server.base}/`, (route) => route.fulfill({ contentType: 'text/html', body: '<div id="root"></div>' }));
+  await page.goto(server.base);
+  await page.addScriptTag({ content: script.text });
+  await page.locator('#accounts-tab[aria-selected="true"]').waitFor();
+  await page.waitForFunction(async () => (await (await fetch('/api/wechat-inbox/bindings')).json())[0].connectionState === 'stopped');
+  assert.doesNotMatch(server.output(), /TEST_OUTBOUND_BLOCKED/);
+  await page.locator('#wechat-tab').click();
+  await page.waitForFunction(async () => (await (await fetch('/api/wechat-inbox/bindings')).json())[0].connectionState !== 'stopped');
+
+  // Headless Chromium can report every tab as visible. Drive the visibility event explicitly.
+  const setVisibility = (value: 'hidden' | 'visible') => page.evaluate((state) => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: state });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, value);
+  await setVisibility('hidden');
+  await page.waitForFunction(async () => (await (await fetch('/api/wechat-inbox/bindings')).json())[0].connectionState === 'stopped');
+  await setVisibility('visible');
+  await page.waitForFunction(async () => (await (await fetch('/api/wechat-inbox/bindings')).json())[0].connectionState !== 'stopped');
+  await page.locator('#accounts-tab').click();
+  await page.waitForFunction(async () => (await (await fetch('/api/wechat-inbox/bindings')).json())[0].connectionState === 'stopped');
+  await page.locator('#wechat-tab').click();
+  await page.waitForFunction(async () => (await (await fetch('/api/wechat-inbox/bindings')).json())[0].connectionState !== 'stopped');
+
+  await page.close();
+  const deadline = AbortSignal.timeout(3_000);
+  while (!deadline.aborted) {
+    const response = await fetch(`${server.base}/api/wechat-inbox/bindings`, { signal: deadline });
+    const bindings: { connectionState: string }[] = await response.json();
+    if (bindings[0]?.connectionState === 'stopped') return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail('the last closed browser page must stop reception');
 });
 
 test('legacy browser session rows remain inert and unchanged across real server restarts', async (context) => {

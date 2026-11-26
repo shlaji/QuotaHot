@@ -10,6 +10,8 @@ info:
     二维码启动、轮询和取消仍使用 /api/wechat/qrcode 系列路径，其中轮询和取消须验证短期 quotahot_wechat_flow cookie；
     flow cookie 不授予绑定管理或消息访问能力。二维码与逐绑定操作位于绑定列表区，不提供顶部会话/退出操作。
     本契约的消息路由使用 /api/wechat-inbox，解除在对应路径显式使用 /api/wechat。
+    微信页另用同源 GET /api/wechat-inbox/presence 活动流控制上游收件（Accept: text/event-stream）；
+    连接就绪事件为 ready，保活事件为 ping，不包含消息和绑定数据。最后一个连接断开时停止收件。
     不设置独立 readiness、Gate 0 或真实生产扫码/验收前置条件；语音出站在本次范围内保持禁用。
 security:
   - WebBasic: []

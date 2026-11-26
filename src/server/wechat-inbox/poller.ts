@@ -57,6 +57,12 @@ export class WechatInboxPoller {
     await Promise.all([...this.workers.keys()].map((owner) => this.stop(owner)));
   }
 
+  suspend(): void {
+    for (const [owner, worker] of this.workers) {
+      if (worker.state !== 'relogin_required') void this.stop(owner);
+    }
+  }
+
   async shutdown(): Promise<void> {
     this.closed = true;
     await this.stopAll();

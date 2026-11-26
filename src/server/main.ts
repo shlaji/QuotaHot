@@ -69,6 +69,7 @@ import { WechatInboxService } from './wechat-inbox/service.js';
 import { WechatInboxSender } from './wechat-inbox/sender.js';
 import { WechatInboxTyping } from './wechat-inbox/typing.js';
 import { wechatInboxRoutes } from './wechat-inbox/routes.js';
+import { wechatInboxPresence } from './wechat-inbox/presence.js';
 import { migrateWechatLocalData } from './wechat-inbox/migrate.js';
 
 const PORT = Number(process.env.PORT ?? 8686);
@@ -117,22 +118,18 @@ const wechatInboxPoller = new WechatInboxPoller({
 const inboxSendOptions = { getPollState: (owner: string) => wechatInboxPoller.getState(owner) };
 const wechatInboxSender = new WechatInboxSender(wechatSessionStore, wechatInboxStore, inboxSendOptions);
 const wechatInboxTyping = new WechatInboxTyping(wechatSessionStore, wechatInboxStore, inboxSendOptions);
+let wechatInboxVisible = false;
 const wechatLogin = new WechatLoginService(wechatSessionStore, wechatClient, {
   beforeBindingChange: (owner) => wechatInboxPoller.stop(owner),
   afterBindingChange: (owner) => {
     const binding = wechatSessionStore.getBinding(owner);
     if (!binding) { wechatInbox.deactivateBinding(owner); return; }
     wechatInbox.activateBinding(owner);
-    if (!wechatSessionStore.isBindingPaused(owner)) wechatInboxPoller.start(owner, binding);
+    if (wechatInboxVisible && !wechatSessionStore.isBindingPaused(owner)) wechatInboxPoller.start(owner, binding);
   },
 });
 wechatInboxStore.markInterruptedOutboundUnknown();
-for (const binding of wechatSessionStore.listBindings()) {
-  wechatInbox.activateBinding(binding.ownerIlinkUserId);
-  if (!wechatSessionStore.isBindingPaused(binding.ownerIlinkUserId)) {
-    wechatInboxPoller.start(binding.ownerIlinkUserId, binding);
-  }
-}
+for (const binding of wechatSessionStore.listBindings()) wechatInbox.activateBinding(binding.ownerIlinkUserId);
 const taskScheduler = new TaskScheduler(taskStore, {
   quota: taskQuotaSource({
     store,
@@ -812,6 +809,19 @@ api.get('/events', (c) =>
   }),
 );
 
+api.get('/wechat-inbox/presence', wechatInboxPresence(() => {
+  if (shuttingDown) return;
+  wechatInboxVisible = true;
+  for (const binding of wechatSessionStore.listBindings()) {
+    const owner = binding.ownerIlinkUserId;
+    if (!wechatLogin.isBindingChanging(owner) && !wechatSessionStore.isBindingPaused(owner)) {
+      wechatInboxPoller.start(owner, binding);
+    }
+  }
+}, () => {
+  wechatInboxVisible = false;
+  wechatInboxPoller.suspend();
+}));
 api.route('/wechat-inbox', wechatInboxRoutes({
   service: wechatInbox, sender: wechatInboxSender, typing: wechatInboxTyping,
 }));
